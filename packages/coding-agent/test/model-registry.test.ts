@@ -3,7 +3,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AnthropicMessagesCompat, Api, Context, Model, OpenAICompletionsCompat } from "@earendil-works/pi-ai";
 import { getApiProvider } from "@earendil-works/pi-ai";
-import { getOAuthProvider } from "@earendil-works/pi-ai/oauth";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import { AuthStorage } from "../src/core/auth-storage.ts";
 import { clearApiKeyCache, ModelRegistry, type ProviderConfigInput } from "../src/core/model-registry.ts";
@@ -178,7 +177,7 @@ describe("ModelRegistry", () => {
 				google: providerConfig(
 					"https://google-proxy.example.com/v1",
 					[{ id: "gemini-custom" }],
-					"google-generative-ai",
+					"openai-completions",
 				),
 			});
 
@@ -491,43 +490,6 @@ describe("ModelRegistry", () => {
 			expect(compat?.supportsLongCacheRetention).toBe(false);
 		});
 
-		test("model-level baseUrl overrides provider-level baseUrl for custom models", () => {
-			writeRawModelsJson({
-				"opencode-go": {
-					baseUrl: "https://opencode.ai/zen/go/v1",
-					apiKey: "TEST_KEY",
-					models: [
-						{
-							id: "minimax-m2.5",
-							api: "anthropic-messages",
-							baseUrl: "https://opencode.ai/zen/go",
-							reasoning: true,
-							input: ["text"],
-							cost: { input: 0.3, output: 1.2, cacheRead: 0.03, cacheWrite: 0 },
-							contextWindow: 204800,
-							maxTokens: 131072,
-						},
-						{
-							id: "glm-5",
-							api: "openai-completions",
-							reasoning: true,
-							input: ["text"],
-							cost: { input: 1, output: 3.2, cacheRead: 0.2, cacheWrite: 0 },
-							contextWindow: 204800,
-							maxTokens: 131072,
-						},
-					],
-				},
-			});
-
-			const registry = ModelRegistry.create(authStorage, modelsJsonPath);
-			const m25 = registry.find("opencode-go", "minimax-m2.5");
-			const glm5 = registry.find("opencode-go", "glm-5");
-
-			expect(m25?.baseUrl).toBe("https://opencode.ai/zen/go");
-			expect(glm5?.baseUrl).toBe("https://opencode.ai/zen/go/v1");
-		});
-
 		test("modelOverrides still apply when provider also defines models", () => {
 			writeRawModelsJson({
 				openrouter: {
@@ -621,13 +583,13 @@ describe("ModelRegistry", () => {
 			expect(opus?.name).not.toBe("Custom Sonnet Name");
 		});
 
-		test("model override with compat.openRouterRouting", () => {
+		test("model override with compat.supportsStrictMode", () => {
 			writeRawModelsJson({
 				openrouter: {
 					modelOverrides: {
 						"anthropic/claude-sonnet-4": {
 							compat: {
-								openRouterRouting: { only: ["amazon-bedrock"] },
+								supportsStrictMode: false,
 							},
 						},
 					},
@@ -639,7 +601,7 @@ describe("ModelRegistry", () => {
 
 			const sonnet = models.find((m) => m.id === "anthropic/claude-sonnet-4");
 			const compat = sonnet?.compat as OpenAICompletionsCompat | undefined;
-			expect(compat?.openRouterRouting).toEqual({ only: ["amazon-bedrock"] });
+			expect(compat?.supportsStrictMode).toBe(false);
 		});
 
 		test("model override deep merges compat settings", () => {
@@ -648,7 +610,7 @@ describe("ModelRegistry", () => {
 					modelOverrides: {
 						"anthropic/claude-sonnet-4": {
 							compat: {
-								openRouterRouting: { order: ["anthropic", "together"] },
+								supportsStrictMode: false,
 							},
 						},
 					},
@@ -659,9 +621,9 @@ describe("ModelRegistry", () => {
 			const models = getModelsForProvider(registry, "openrouter");
 			const sonnet = models.find((m) => m.id === "anthropic/claude-sonnet-4");
 
-			// Should have both the new routing AND preserve other compat settings
+			// Should have the overridden compat setting AND preserve other compat settings
 			const compat = sonnet?.compat as OpenAICompletionsCompat | undefined;
-			expect(compat?.openRouterRouting).toEqual({ order: ["anthropic", "together"] });
+			expect(compat?.supportsStrictMode).toBe(false);
 		});
 
 		test("multiple model overrides on same provider", () => {
@@ -669,10 +631,10 @@ describe("ModelRegistry", () => {
 				openrouter: {
 					modelOverrides: {
 						"anthropic/claude-sonnet-4": {
-							compat: { openRouterRouting: { only: ["amazon-bedrock"] } },
+							compat: { supportsStrictMode: false },
 						},
 						"anthropic/claude-opus-4": {
-							compat: { openRouterRouting: { only: ["anthropic"] } },
+							compat: { supportsStore: false },
 						},
 					},
 				},
@@ -686,8 +648,8 @@ describe("ModelRegistry", () => {
 
 			const sonnetCompat = sonnet?.compat as OpenAICompletionsCompat | undefined;
 			const opusCompat = opus?.compat as OpenAICompletionsCompat | undefined;
-			expect(sonnetCompat?.openRouterRouting).toEqual({ only: ["amazon-bedrock"] });
-			expect(opusCompat?.openRouterRouting).toEqual({ only: ["anthropic"] });
+			expect(sonnetCompat?.supportsStrictMode).toBe(false);
+			expect(opusCompat?.supportsStore).toBe(false);
 		});
 
 		test("model override combined with baseUrl override", () => {
@@ -842,11 +804,10 @@ describe("ModelRegistry", () => {
 	});
 
 	describe("dynamic provider lifecycle", () => {
-		test("getProviderDisplayName resolves registered, OAuth, built-in, and fallback names", () => {
+		test("getProviderDisplayName resolves registered, built-in, and fallback names", () => {
 			const registry = ModelRegistry.create(authStorage, modelsJsonPath);
 
 			expect(registry.getProviderDisplayName("openai")).toBe("OpenAI");
-			expect(registry.getProviderDisplayName("github-copilot")).toBe("GitHub Copilot");
 			expect(registry.getProviderDisplayName("unknown-provider")).toBe("unknown-provider");
 
 			registry.registerProvider("named-provider", {
@@ -867,29 +828,6 @@ describe("ModelRegistry", () => {
 				],
 			});
 			expect(registry.getProviderDisplayName("named-provider")).toBe("Named Provider");
-
-			registry.registerProvider("oauth-provider", {
-				baseUrl: "https://provider.test/v1",
-				api: "openai-completions",
-				oauth: {
-					name: "OAuth Provider",
-					login: async () => ({ access: "access", refresh: "refresh", expires: Date.now() + 60_000 }),
-					refreshToken: async (credentials) => credentials,
-					getApiKey: (credentials) => credentials.access,
-				},
-				models: [
-					{
-						id: "demo-model",
-						name: "Demo Model",
-						reasoning: false,
-						input: ["text"],
-						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-						contextWindow: 128000,
-						maxTokens: 4096,
-					},
-				],
-			});
-			expect(registry.getProviderDisplayName("oauth-provider")).toBe("OAuth Provider");
 		});
 
 		test("failed registerProvider does not persist invalid streamSimple config", () => {
@@ -951,27 +889,21 @@ describe("ModelRegistry", () => {
 			expect(registry.find("demo-provider", "demo-model")).toBeDefined();
 		});
 
-		test("unregisterProvider removes custom OAuth provider and restores built-in OAuth provider", () => {
+		test("unregisterProvider removes custom provider and restores built-in provider", () => {
 			const registry = ModelRegistry.create(authStorage, modelsJsonPath);
 
 			registry.registerProvider("anthropic", {
-				oauth: {
-					name: "Custom Anthropic OAuth",
-					login: async () => ({
-						access: "custom-access-token",
-						refresh: "custom-refresh-token",
-						expires: Date.now() + 60_000,
-					}),
-					refreshToken: async (credentials) => credentials,
-					getApiKey: (credentials) => credentials.access,
-				},
+				baseUrl: "https://custom.test/anthropic",
 			});
 
-			expect(getOAuthProvider("anthropic")?.name).toBe("Custom Anthropic OAuth");
+			const modelsBefore = getModelsForProvider(registry, "anthropic");
+			expect(modelsBefore.every((m) => m.baseUrl === "https://custom.test/anthropic")).toBe(true);
 
 			registry.unregisterProvider("anthropic");
 
-			expect(getOAuthProvider("anthropic")?.name).not.toBe("Custom Anthropic OAuth");
+			const modelsAfter = getModelsForProvider(registry, "anthropic");
+			expect(modelsAfter.length).toBeGreaterThan(0);
+			expect(modelsAfter.every((m) => m.baseUrl !== "https://custom.test/anthropic")).toBe(true);
 		});
 
 		test("unregisterProvider removes custom streamSimple override and restores built-in API stream handler", () => {

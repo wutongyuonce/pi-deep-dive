@@ -4,9 +4,6 @@ import { getEnvApiKey } from "../src/env-api-keys.ts";
 import { getModels, getProviders } from "../src/models.ts";
 import { complete } from "../src/stream.ts";
 import type { Api, KnownProvider, Model, ProviderStreamOptions, Tool } from "../src/types.ts";
-import { resolveApiKey } from "./oauth.ts";
-
-const githubCopilotToken = await resolveApiKey("github-copilot");
 
 const echoToolSchema = Type.Object({
 	value: Type.String({ description: "The value to echo" }),
@@ -26,9 +23,6 @@ interface AnthropicEagerE2ECase {
 }
 
 function getE2EApiKey(provider: KnownProvider): string | undefined {
-	if (provider === "github-copilot") {
-		return githubCopilotToken;
-	}
 	return getEnvApiKey(provider);
 }
 

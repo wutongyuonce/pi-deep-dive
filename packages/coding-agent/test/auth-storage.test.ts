@@ -1,8 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { registerOAuthProvider } from "@earendil-works/pi-ai/oauth";
-import lockfile from "proper-lockfile";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { AuthStorage } from "../src/core/auth-storage.ts";
 import { clearConfigValueCache } from "../src/core/resolve-config-value.ts";
@@ -298,55 +296,6 @@ describe("AuthStorage", () => {
 		});
 	});
 
-	describe("oauth lock compromise handling", () => {
-		test("returns undefined on compromised lock and allows a later retry", async () => {
-			const providerId = `test-oauth-provider-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-			registerOAuthProvider({
-				id: providerId,
-				name: "Test OAuth Provider",
-				async login() {
-					throw new Error("Not used in this test");
-				},
-				async refreshToken(credentials) {
-					return {
-						...credentials,
-						access: "refreshed-access-token",
-						expires: Date.now() + 60_000,
-					};
-				},
-				getApiKey(credentials) {
-					return `Bearer ${credentials.access}`;
-				},
-			});
-
-			writeAuthJson({
-				[providerId]: {
-					type: "oauth",
-					refresh: "refresh-token",
-					access: "expired-access-token",
-					expires: Date.now() - 10_000,
-				},
-			});
-
-			authStorage = AuthStorage.create(authJsonPath);
-
-			const realLock = lockfile.lock.bind(lockfile);
-			const lockSpy = vi.spyOn(lockfile, "lock");
-			lockSpy.mockImplementationOnce(async (file, options) => {
-				options?.onCompromised?.(new Error("Unable to update lock within the stale threshold"));
-				return realLock(file, options);
-			});
-
-			const firstTry = await authStorage.getApiKey(providerId);
-			expect(firstTry).toBeUndefined();
-
-			lockSpy.mockRestore();
-
-			const secondTry = await authStorage.getApiKey(providerId);
-			expect(secondTry).toBe("Bearer refreshed-access-token");
-		});
-	});
-
 	describe("persistence semantics", () => {
 		test("set preserves unrelated external edits", () => {
 			writeAuthJson({
@@ -436,10 +385,8 @@ describe("AuthStorage", () => {
 			authStorage = AuthStorage.inMemory({
 				anthropic: { type: "api_key", key: "secret-api-key" },
 				openai: {
-					type: "oauth",
-					access: "secret-access-token",
-					refresh: "secret-refresh-token",
-					expires: Date.now() + 1000,
+					type: "api_key",
+					key: "secret-api-key-2",
 				},
 			});
 

@@ -4,7 +4,6 @@ Extensions can register custom model providers via `pi.registerProvider()`. This
 
 - **Proxies** - Route requests through corporate proxies or API gateways
 - **Custom endpoints** - Use self-hosted or private model deployments
-- **OAuth/SSO** - Add authentication flows for enterprise providers
 - **Custom APIs** - Implement streaming for non-standard LLM APIs
 
 ## Example Extensions
@@ -21,7 +20,6 @@ See these complete provider examples:
 - [Override Existing Provider](#override-existing-provider)
 - [Register New Provider](#register-new-provider)
 - [Unregister Provider](#unregister-provider)
-- [OAuth Support](#oauth-support)
 - [Custom Streaming API](#custom-streaming-api)
 - [Context Overflow Errors](#context-overflow-errors)
 - [Testing Your Implementation](#testing-your-implementation)
@@ -182,7 +180,7 @@ pi.registerProvider("my-llm", {
 pi.unregisterProvider("my-llm");
 ```
 
-Unregistering removes that provider's dynamic models, API key fallback, OAuth provider registration, and custom stream handler registrations. Any built-in models or provider behavior that were overridden are restored.
+Unregistering removes that provider's dynamic models, API key fallback, and custom stream handler registrations. Any built-in models or provider behavior that were overridden are restored.
 
 Calls made after the initial extension load phase are applied immediately, so no `/reload` is required.
 
@@ -195,12 +193,6 @@ The `api` field determines which streaming implementation is used:
 | `anthropic-messages` | Anthropic Claude API and compatibles |
 | `openai-completions` | OpenAI Chat Completions API and compatibles |
 | `openai-responses` | OpenAI Responses API |
-| `azure-openai-responses` | Azure OpenAI Responses API |
-| `openai-codex-responses` | OpenAI Codex Responses API |
-| `mistral-conversations` | Mistral SDK Conversations/Chat streaming |
-| `google-generative-ai` | Google Generative AI API |
-| `google-vertex` | Google Vertex AI API |
-| `bedrock-converse-stream` | Amazon Bedrock Converse API |
 
 Most OpenAI-compatible providers work with `openai-completions`. Use model-level `thinkingLevelMap` for model-specific thinking levels, and `compat` for provider quirks:
 
@@ -232,10 +224,6 @@ Use `cacheControlFormat: "anthropic"` for OpenAI-compatible providers that expos
 
 For Anthropic-compatible providers using `api: "anthropic-messages"`, set `compat.forceAdaptiveThinking: true` on models or providers whose upstream model requires adaptive thinking (`thinking.type: "adaptive"` plus `output_config.effort`). Built-in adaptive Claude models set this automatically.
 
-> Migration note: Mistral moved from `openai-completions` to `mistral-conversations`.
-> Use `mistral-conversations` for native Mistral models.
-> If you intentionally route Mistral-compatible/custom endpoints through `openai-completions`, set `compat` flags explicitly as needed.
-
 ### Auth Header
 
 If your provider expects `Authorization: Bearer <key>` but doesn't use a standard API, set `authHeader: true`:
@@ -250,132 +238,14 @@ pi.registerProvider("custom-api", {
 });
 ```
 
-## OAuth Support
-
-Add OAuth/SSO authentication that integrates with `/login`:
-
-```typescript
-import type { OAuthCredentials, OAuthLoginCallbacks } from "@earendil-works/pi-ai";
-
-pi.registerProvider("corporate-ai", {
-  baseUrl: "https://ai.corp.com/v1",
-  api: "openai-responses",
-  models: [...],
-  oauth: {
-    name: "Corporate AI (SSO)",
-
-    async login(callbacks: OAuthLoginCallbacks): Promise<OAuthCredentials> {
-      const method = await callbacks.onSelect({
-        message: "Select login method:",
-        options: [
-          { id: "browser", label: "Browser OAuth" },
-          { id: "device", label: "Device code" }
-        ]
-      });
-      if (!method) throw new Error("Login cancelled");
-
-      let code: string;
-      if (method === "device") {
-        callbacks.onDeviceCode({
-          userCode: "ABCD-1234",
-          verificationUri: "https://sso.corp.com/device",
-          intervalSeconds: 5,
-          expiresInSeconds: 900
-        });
-        code = await pollDeviceCodeUntilComplete();
-      } else {
-        callbacks.onAuth({ url: "https://sso.corp.com/authorize?..." });
-        code = await callbacks.onPrompt({ message: "Enter SSO code:" });
-      }
-
-      // Exchange for tokens (your implementation)
-      const tokens = await exchangeCodeForTokens(code);
-
-      return {
-        refresh: tokens.refreshToken,
-        access: tokens.accessToken,
-        expires: Date.now() + tokens.expiresIn * 1000
-      };
-    },
-
-    async refreshToken(credentials: OAuthCredentials): Promise<OAuthCredentials> {
-      const tokens = await refreshAccessToken(credentials.refresh);
-      return {
-        refresh: tokens.refreshToken ?? credentials.refresh,
-        access: tokens.accessToken,
-        expires: Date.now() + tokens.expiresIn * 1000
-      };
-    },
-
-    getApiKey(credentials: OAuthCredentials): string {
-      return credentials.access;
-    },
-
-    // Optional: modify models based on user's subscription
-    modifyModels(models, credentials) {
-      const region = decodeRegionFromToken(credentials.access);
-      return models.map(m => ({
-        ...m,
-        baseUrl: `https://${region}.ai.corp.com/v1`
-      }));
-    }
-  }
-});
-```
-
-After registration, users can authenticate via `/login corporate-ai`.
-
-### OAuthLoginCallbacks
-
-The `callbacks` object provides three ways to authenticate:
-
-```typescript
-interface OAuthLoginCallbacks {
-  // Open URL in browser (for OAuth redirects)
-  onAuth(params: { url: string }): void;
-
-  // Show device code (for device authorization flow)
-  onDeviceCode(params: {
-    userCode: string;
-    verificationUri: string;
-    intervalSeconds?: number;
-    expiresInSeconds?: number;
-  }): void;
-
-  // Prompt user for input (for manual token entry)
-  onPrompt(params: { message: string }): Promise<string>;
-
-  // Show an interactive selector, e.g. to choose browser OAuth vs device code
-  onSelect(params: {
-    message: string;
-    options: { id: string; label: string }[];
-  }): Promise<string | undefined>;
-}
-```
-
-### OAuthCredentials
-
-Credentials are persisted in `~/.pi/agent/auth.json`:
-
-```typescript
-interface OAuthCredentials {
-  refresh: string;   // Refresh token (for refreshToken())
-  access: string;    // Access token (returned by getApiKey())
-  expires: number;   // Expiration timestamp in milliseconds
-}
-```
-
 ## Custom Streaming API
 
 For providers with non-standard APIs, implement `streamSimple`. Study the existing provider implementations before writing your own:
 
 **Reference implementations:**
 - [anthropic.ts](https://github.com/earendil-works/pi-mono/blob/main/packages/ai/src/providers/anthropic.ts) - Anthropic Messages API
-- [mistral.ts](https://github.com/earendil-works/pi-mono/blob/main/packages/ai/src/providers/mistral.ts) - Mistral Conversations API
 - [openai-completions.ts](https://github.com/earendil-works/pi-mono/blob/main/packages/ai/src/providers/openai-completions.ts) - OpenAI Chat Completions
 - [openai-responses.ts](https://github.com/earendil-works/pi-mono/blob/main/packages/ai/src/providers/openai-responses.ts) - OpenAI Responses API
-- [google.ts](https://github.com/earendil-works/pi-mono/blob/main/packages/ai/src/providers/google.ts) - Google Generative AI
-- [amazon-bedrock.ts](https://github.com/earendil-works/pi-mono/blob/main/packages/ai/src/providers/amazon-bedrock.ts) - AWS Bedrock
 
 ### Stream Pattern
 
@@ -629,7 +499,7 @@ interface ProviderConfig {
   /** API endpoint URL. Required when defining models. */
   baseUrl?: string;
 
-  /** API key or environment variable name. Required when defining models (unless oauth). */
+  /** API key or environment variable name. Required when defining models. */
   apiKey?: string;
 
   /** API type for streaming. Required at provider or model level when defining models. */
@@ -650,16 +520,7 @@ interface ProviderConfig {
 
   /** Models to register. If provided, replaces all existing models for this provider. */
   models?: ProviderModelConfig[];
-
-  /** OAuth provider for /login support. */
-  oauth?: {
-    name: string;
-    login(callbacks: OAuthLoginCallbacks): Promise<OAuthCredentials>;
-    refreshToken(credentials: OAuthCredentials): Promise<OAuthCredentials>;
-    getApiKey(credentials: OAuthCredentials): string;
-    modifyModels?(models: Model<Api>[], credentials: OAuthCredentials): Model<Api>[];
-  };
-}
+};
 ```
 
 ## Model Definition Reference

@@ -259,7 +259,7 @@ Route a built-in provider through a proxy without redefining models:
 }
 ```
 
-All built-in Anthropic models remain available. Existing OAuth or API key auth continues to work.
+All built-in Anthropic models remain available. Existing API key auth continues to work.
 
 To merge custom models into a built-in provider, include the `models` array:
 

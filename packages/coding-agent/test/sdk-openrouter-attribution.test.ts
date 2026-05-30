@@ -187,26 +187,4 @@ describe("createAgentSession OpenRouter attribution headers", () => {
 		expect(headers?.["X-OpenRouter-Title"]).toBe("request-title");
 		expect(headers?.["X-OpenRouter-Categories"]).toBe("provider-category");
 	});
-
-	it("adds OpenCode session headers", async () => {
-		const headers = await captureHeaders(createModel("opencode", "https://opencode.ai/zen/v1"), {
-			sessionId: "opencode-session",
-		});
-
-		expect(headers?.["x-opencode-session"]).toBe("opencode-session");
-		expect(headers?.["x-opencode-client"]).toBe("pi");
-	});
-
-	it("lets configured OpenCode headers override the defaults", async () => {
-		const headers = await captureHeaders(createModel("opencode", "https://opencode.ai/zen/v1"), {
-			sessionId: "opencode-session",
-			providerHeaders: {
-				"x-opencode-session": "configured-session",
-				"x-opencode-client": "configured-client",
-			},
-		});
-
-		expect(headers?.["x-opencode-session"]).toBe("configured-session");
-		expect(headers?.["x-opencode-client"]).toBe("configured-client");
-	});
 });

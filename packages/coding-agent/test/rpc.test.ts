@@ -11,7 +11,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 /**
  * RPC mode tests.
  */
-describe.skipIf(!process.env.ANTHROPIC_API_KEY && !process.env.ANTHROPIC_OAUTH_TOKEN)("RPC mode", () => {
+describe.skipIf(!process.env.ANTHROPIC_API_KEY)("RPC mode", () => {
 	let client: RpcClient;
 	let sessionDir: string;
 

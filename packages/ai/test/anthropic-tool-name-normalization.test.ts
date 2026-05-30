@@ -3,27 +3,19 @@ import { describe, expect, it } from "vitest";
 import { getModel } from "../src/models.ts";
 import { stream } from "../src/stream.ts";
 import type { Context, Tool } from "../src/types.ts";
-import { resolveApiKey } from "./oauth.ts";
 
-const oauthToken = await resolveApiKey("anthropic");
+const apiKey = process.env.ANTHROPIC_API_KEY;
 
 /**
- * Tests for Anthropic OAuth tool name normalization.
+ * Tests for Anthropic tool name round-trip preservation.
  *
- * When using Claude Code OAuth, tool names must match CC's canonical casing.
- * The normalization should:
- * 1. Convert tool names that match CC tools (case-insensitive) to CC casing on outbound
- * 2. Convert tool names back to the original casing on inbound
+ * Tool names should round-trip correctly through the Anthropic API:
+ * 1. Tool names sent to the API are preserved as-is
+ * 2. Tool names received back from the API match the originals
  *
- * This is a simple case-insensitive lookup, NOT a mapping of different names.
- * e.g., "todowrite" -> "TodoWrite" -> "todowrite" (round-trip works)
- *
- * The old `find -> Glob` mapping was WRONG because:
- * - Outbound: "find" -> "Glob"
- * - Inbound: "Glob" -> ??? (no tool named "glob" in context.tools, only "find")
- * - Result: tool call has name "Glob" but no tool exists with that name
+ * e.g., "todowrite" -> Anthropic -> "todowrite" (round-trip works)
  */
-describe.skipIf(!oauthToken)("Anthropic OAuth tool name normalization", () => {
+describe.skipIf(!apiKey)("Anthropic tool name round-trip", () => {
 	const model = getModel("anthropic", "claude-sonnet-4-6");
 
 	it("should normalize user-defined tool matching CC name (todowrite -> TodoWrite -> todowrite)", async () => {
@@ -49,7 +41,7 @@ describe.skipIf(!oauthToken)("Anthropic OAuth tool name normalization", () => {
 			tools: [todoTool],
 		};
 
-		const s = stream(model, context, { apiKey: oauthToken });
+		const s = stream(model, context, { apiKey });
 		let toolCallName: string | undefined;
 
 		for await (const event of s) {
@@ -64,12 +56,11 @@ describe.skipIf(!oauthToken)("Anthropic OAuth tool name normalization", () => {
 		const response = await s.result();
 		expect(response.stopReason, `Error: ${response.errorMessage}`).toBe("toolUse");
 
-		// The tool call should come back with the ORIGINAL name "todowrite", not "TodoWrite"
+		// The tool call should come back with the ORIGINAL name "todowrite"
 		expect(toolCallName).toBe("todowrite");
 	});
 
 	it("should handle pi's built-in tools (read, write, edit, bash)", async () => {
-		// Pi's tools use lowercase names, CC uses PascalCase
 		const readTool: Tool = {
 			name: "read",
 			description: "Read a file",
@@ -90,7 +81,7 @@ describe.skipIf(!oauthToken)("Anthropic OAuth tool name normalization", () => {
 			tools: [readTool],
 		};
 
-		const s = stream(model, context, { apiKey: oauthToken });
+		const s = stream(model, context, { apiKey });
 		let toolCallName: string | undefined;
 
 		for await (const event of s) {
@@ -105,14 +96,11 @@ describe.skipIf(!oauthToken)("Anthropic OAuth tool name normalization", () => {
 		const response = await s.result();
 		expect(response.stopReason, `Error: ${response.errorMessage}`).toBe("toolUse");
 
-		// The tool call should come back with the ORIGINAL name "read", not "Read"
+		// The tool call should come back with the ORIGINAL name "read"
 		expect(toolCallName).toBe("read");
 	});
 
-	it("should NOT map find to Glob - find is not a CC tool name", async () => {
-		// Pi has a "find" tool, CC has "Glob" - these are DIFFERENT tools
-		// The old code incorrectly mapped find -> Glob, which broke the round-trip
-		// because there's no tool named "glob" in context.tools
+	it("should preserve find tool name (no CC mapping)", async () => {
 		const findTool: Tool = {
 			name: "find",
 			description: "Find files by pattern",
@@ -133,7 +121,7 @@ describe.skipIf(!oauthToken)("Anthropic OAuth tool name normalization", () => {
 			tools: [findTool],
 		};
 
-		const s = stream(model, context, { apiKey: oauthToken });
+		const s = stream(model, context, { apiKey });
 		let toolCallName: string | undefined;
 
 		for await (const event of s) {
@@ -148,22 +136,10 @@ describe.skipIf(!oauthToken)("Anthropic OAuth tool name normalization", () => {
 		const response = await s.result();
 		expect(response.stopReason, `Error: ${response.errorMessage}`).toBe("toolUse");
 
-		// With the BROKEN find -> Glob mapping:
-		// - Sent as "Glob" to Anthropic
-		// - Received back as "Glob"
-		// - fromClaudeCodeName("Glob", tools) looks for tool.name.toLowerCase() === "glob"
-		// - No match (tool is named "find"), returns "Glob"
-		// - Test fails: toolCallName is "Glob" instead of "find"
-		//
-		// With the CORRECT implementation (no find->Glob mapping):
-		// - Sent as "find" to Anthropic (no CC tool named "Find")
-		// - Received back as "find"
-		// - Test passes: toolCallName is "find"
 		expect(toolCallName).toBe("find");
 	});
 
 	it("should handle custom tools that don't match any CC tool names", async () => {
-		// A completely custom tool should pass through unchanged
 		const customTool: Tool = {
 			name: "my_custom_tool",
 			description: "A custom tool",
@@ -184,7 +160,7 @@ describe.skipIf(!oauthToken)("Anthropic OAuth tool name normalization", () => {
 			tools: [customTool],
 		};
 
-		const s = stream(model, context, { apiKey: oauthToken });
+		const s = stream(model, context, { apiKey });
 		let toolCallName: string | undefined;
 
 		for await (const event of s) {

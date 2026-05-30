@@ -10,13 +10,7 @@ import type {
 	StreamOptions,
 } from "../types.ts";
 import { AssistantMessageEventStream } from "../utils/event-stream.ts";
-import type { BedrockOptions } from "./amazon-bedrock.ts";
 import type { AnthropicOptions } from "./anthropic.ts";
-import type { AzureOpenAIResponsesOptions } from "./azure-openai-responses.ts";
-import type { GoogleOptions } from "./google.ts";
-import type { GoogleVertexOptions } from "./google-vertex.ts";
-import type { MistralOptions } from "./mistral.ts";
-import type { OpenAICodexResponsesOptions } from "./openai-codex-responses.ts";
 import type { OpenAICompletionsOptions } from "./openai-completions.ts";
 import type { OpenAIResponsesOptions } from "./openai-responses.ts";
 
@@ -38,31 +32,6 @@ interface AnthropicProviderModule {
 	streamSimpleAnthropic: StreamFunction<"anthropic-messages", SimpleStreamOptions>;
 }
 
-interface AzureOpenAIResponsesProviderModule {
-	streamAzureOpenAIResponses: StreamFunction<"azure-openai-responses", AzureOpenAIResponsesOptions>;
-	streamSimpleAzureOpenAIResponses: StreamFunction<"azure-openai-responses", SimpleStreamOptions>;
-}
-
-interface GoogleProviderModule {
-	streamGoogle: StreamFunction<"google-generative-ai", GoogleOptions>;
-	streamSimpleGoogle: StreamFunction<"google-generative-ai", SimpleStreamOptions>;
-}
-
-interface GoogleVertexProviderModule {
-	streamGoogleVertex: StreamFunction<"google-vertex", GoogleVertexOptions>;
-	streamSimpleGoogleVertex: StreamFunction<"google-vertex", SimpleStreamOptions>;
-}
-
-interface MistralProviderModule {
-	streamMistral: StreamFunction<"mistral-conversations", MistralOptions>;
-	streamSimpleMistral: StreamFunction<"mistral-conversations", SimpleStreamOptions>;
-}
-
-interface OpenAICodexResponsesProviderModule {
-	streamOpenAICodexResponses: StreamFunction<"openai-codex-responses", OpenAICodexResponsesOptions>;
-	streamSimpleOpenAICodexResponses: StreamFunction<"openai-codex-responses", SimpleStreamOptions>;
-}
-
 interface OpenAICompletionsProviderModule {
 	streamOpenAICompletions: StreamFunction<"openai-completions", OpenAICompletionsOptions>;
 	streamSimpleOpenAICompletions: StreamFunction<"openai-completions", SimpleStreamOptions>;
@@ -73,41 +42,8 @@ interface OpenAIResponsesProviderModule {
 	streamSimpleOpenAIResponses: StreamFunction<"openai-responses", SimpleStreamOptions>;
 }
 
-interface BedrockProviderModule {
-	streamBedrock: (
-		model: Model<"bedrock-converse-stream">,
-		context: Context,
-		options?: BedrockOptions,
-	) => AsyncIterable<AssistantMessageEvent>;
-	streamSimpleBedrock: (
-		model: Model<"bedrock-converse-stream">,
-		context: Context,
-		options?: SimpleStreamOptions,
-	) => AsyncIterable<AssistantMessageEvent>;
-}
-
-const importNodeOnlyProvider = (specifier: string): Promise<unknown> => {
-	const runtimeSpecifier = import.meta.url.endsWith(".js") ? specifier.replace(/\.ts$/, ".js") : specifier;
-	return import(runtimeSpecifier);
-};
-
 let anthropicProviderModulePromise:
 	| Promise<LazyProviderModule<"anthropic-messages", AnthropicOptions, SimpleStreamOptions>>
-	| undefined;
-let azureOpenAIResponsesProviderModulePromise:
-	| Promise<LazyProviderModule<"azure-openai-responses", AzureOpenAIResponsesOptions, SimpleStreamOptions>>
-	| undefined;
-let googleProviderModulePromise:
-	| Promise<LazyProviderModule<"google-generative-ai", GoogleOptions, SimpleStreamOptions>>
-	| undefined;
-let googleVertexProviderModulePromise:
-	| Promise<LazyProviderModule<"google-vertex", GoogleVertexOptions, SimpleStreamOptions>>
-	| undefined;
-let mistralProviderModulePromise:
-	| Promise<LazyProviderModule<"mistral-conversations", MistralOptions, SimpleStreamOptions>>
-	| undefined;
-let openAICodexResponsesProviderModulePromise:
-	| Promise<LazyProviderModule<"openai-codex-responses", OpenAICodexResponsesOptions, SimpleStreamOptions>>
 	| undefined;
 let openAICompletionsProviderModulePromise:
 	| Promise<LazyProviderModule<"openai-completions", OpenAICompletionsOptions, SimpleStreamOptions>>
@@ -115,19 +51,6 @@ let openAICompletionsProviderModulePromise:
 let openAIResponsesProviderModulePromise:
 	| Promise<LazyProviderModule<"openai-responses", OpenAIResponsesOptions, SimpleStreamOptions>>
 	| undefined;
-let bedrockProviderModuleOverride:
-	| LazyProviderModule<"bedrock-converse-stream", BedrockOptions, SimpleStreamOptions>
-	| undefined;
-let bedrockProviderModulePromise:
-	| Promise<LazyProviderModule<"bedrock-converse-stream", BedrockOptions, SimpleStreamOptions>>
-	| undefined;
-
-export function setBedrockProviderModule(module: BedrockProviderModule): void {
-	bedrockProviderModuleOverride = {
-		stream: module.streamBedrock,
-		streamSimple: module.streamSimpleBedrock,
-	};
-}
 
 function forwardStream(target: AssistantMessageEventStream, source: AsyncIterable<AssistantMessageEvent>): void {
 	(async () => {
@@ -216,71 +139,6 @@ function loadAnthropicProviderModule(): Promise<
 	return anthropicProviderModulePromise;
 }
 
-function loadAzureOpenAIResponsesProviderModule(): Promise<
-	LazyProviderModule<"azure-openai-responses", AzureOpenAIResponsesOptions, SimpleStreamOptions>
-> {
-	azureOpenAIResponsesProviderModulePromise ||= import("./azure-openai-responses.ts").then((module) => {
-		const provider = module as AzureOpenAIResponsesProviderModule;
-		return {
-			stream: provider.streamAzureOpenAIResponses,
-			streamSimple: provider.streamSimpleAzureOpenAIResponses,
-		};
-	});
-	return azureOpenAIResponsesProviderModulePromise;
-}
-
-function loadGoogleProviderModule(): Promise<
-	LazyProviderModule<"google-generative-ai", GoogleOptions, SimpleStreamOptions>
-> {
-	googleProviderModulePromise ||= import("./google.ts").then((module) => {
-		const provider = module as GoogleProviderModule;
-		return {
-			stream: provider.streamGoogle,
-			streamSimple: provider.streamSimpleGoogle,
-		};
-	});
-	return googleProviderModulePromise;
-}
-
-function loadGoogleVertexProviderModule(): Promise<
-	LazyProviderModule<"google-vertex", GoogleVertexOptions, SimpleStreamOptions>
-> {
-	googleVertexProviderModulePromise ||= import("./google-vertex.ts").then((module) => {
-		const provider = module as GoogleVertexProviderModule;
-		return {
-			stream: provider.streamGoogleVertex,
-			streamSimple: provider.streamSimpleGoogleVertex,
-		};
-	});
-	return googleVertexProviderModulePromise;
-}
-
-function loadMistralProviderModule(): Promise<
-	LazyProviderModule<"mistral-conversations", MistralOptions, SimpleStreamOptions>
-> {
-	mistralProviderModulePromise ||= import("./mistral.ts").then((module) => {
-		const provider = module as MistralProviderModule;
-		return {
-			stream: provider.streamMistral,
-			streamSimple: provider.streamSimpleMistral,
-		};
-	});
-	return mistralProviderModulePromise;
-}
-
-function loadOpenAICodexResponsesProviderModule(): Promise<
-	LazyProviderModule<"openai-codex-responses", OpenAICodexResponsesOptions, SimpleStreamOptions>
-> {
-	openAICodexResponsesProviderModulePromise ||= import("./openai-codex-responses.ts").then((module) => {
-		const provider = module as OpenAICodexResponsesProviderModule;
-		return {
-			stream: provider.streamOpenAICodexResponses,
-			streamSimple: provider.streamSimpleOpenAICodexResponses,
-		};
-	});
-	return openAICodexResponsesProviderModulePromise;
-}
-
 function loadOpenAICompletionsProviderModule(): Promise<
 	LazyProviderModule<"openai-completions", OpenAICompletionsOptions, SimpleStreamOptions>
 > {
@@ -307,40 +165,12 @@ function loadOpenAIResponsesProviderModule(): Promise<
 	return openAIResponsesProviderModulePromise;
 }
 
-function loadBedrockProviderModule(): Promise<
-	LazyProviderModule<"bedrock-converse-stream", BedrockOptions, SimpleStreamOptions>
-> {
-	if (bedrockProviderModuleOverride) {
-		return Promise.resolve(bedrockProviderModuleOverride);
-	}
-	bedrockProviderModulePromise ||= importNodeOnlyProvider("./amazon-bedrock.ts").then((module) => {
-		const provider = module as BedrockProviderModule;
-		return {
-			stream: provider.streamBedrock,
-			streamSimple: provider.streamSimpleBedrock,
-		};
-	});
-	return bedrockProviderModulePromise;
-}
-
 export const streamAnthropic = createLazyStream(loadAnthropicProviderModule);
 export const streamSimpleAnthropic = createLazySimpleStream(loadAnthropicProviderModule);
-export const streamAzureOpenAIResponses = createLazyStream(loadAzureOpenAIResponsesProviderModule);
-export const streamSimpleAzureOpenAIResponses = createLazySimpleStream(loadAzureOpenAIResponsesProviderModule);
-export const streamGoogle = createLazyStream(loadGoogleProviderModule);
-export const streamSimpleGoogle = createLazySimpleStream(loadGoogleProviderModule);
-export const streamGoogleVertex = createLazyStream(loadGoogleVertexProviderModule);
-export const streamSimpleGoogleVertex = createLazySimpleStream(loadGoogleVertexProviderModule);
-export const streamMistral = createLazyStream(loadMistralProviderModule);
-export const streamSimpleMistral = createLazySimpleStream(loadMistralProviderModule);
-export const streamOpenAICodexResponses = createLazyStream(loadOpenAICodexResponsesProviderModule);
-export const streamSimpleOpenAICodexResponses = createLazySimpleStream(loadOpenAICodexResponsesProviderModule);
 export const streamOpenAICompletions = createLazyStream(loadOpenAICompletionsProviderModule);
 export const streamSimpleOpenAICompletions = createLazySimpleStream(loadOpenAICompletionsProviderModule);
 export const streamOpenAIResponses = createLazyStream(loadOpenAIResponsesProviderModule);
 export const streamSimpleOpenAIResponses = createLazySimpleStream(loadOpenAIResponsesProviderModule);
-const streamBedrockLazy = createLazyStream(loadBedrockProviderModule);
-const streamSimpleBedrockLazy = createLazySimpleStream(loadBedrockProviderModule);
 
 export function registerBuiltInApiProviders(): void {
 	registerApiProvider({
@@ -356,45 +186,9 @@ export function registerBuiltInApiProviders(): void {
 	});
 
 	registerApiProvider({
-		api: "mistral-conversations",
-		stream: streamMistral,
-		streamSimple: streamSimpleMistral,
-	});
-
-	registerApiProvider({
 		api: "openai-responses",
 		stream: streamOpenAIResponses,
 		streamSimple: streamSimpleOpenAIResponses,
-	});
-
-	registerApiProvider({
-		api: "azure-openai-responses",
-		stream: streamAzureOpenAIResponses,
-		streamSimple: streamSimpleAzureOpenAIResponses,
-	});
-
-	registerApiProvider({
-		api: "openai-codex-responses",
-		stream: streamOpenAICodexResponses,
-		streamSimple: streamSimpleOpenAICodexResponses,
-	});
-
-	registerApiProvider({
-		api: "google-generative-ai",
-		stream: streamGoogle,
-		streamSimple: streamSimpleGoogle,
-	});
-
-	registerApiProvider({
-		api: "google-vertex",
-		stream: streamGoogleVertex,
-		streamSimple: streamSimpleGoogleVertex,
-	});
-
-	registerApiProvider({
-		api: "bedrock-converse-stream",
-		stream: streamBedrockLazy,
-		streamSimple: streamSimpleBedrockLazy,
 	});
 }
 

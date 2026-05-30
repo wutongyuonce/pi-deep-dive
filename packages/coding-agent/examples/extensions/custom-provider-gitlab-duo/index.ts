@@ -6,7 +6,7 @@
  *
  * Usage:
  *   pi -e ./packages/coding-agent/examples/extensions/custom-provider-gitlab-duo
- *   # Then /login gitlab-duo, or set GITLAB_TOKEN=glpat-...
+ *   # Then set GITLAB_TOKEN=glpat-...
  */
 
 import {
@@ -15,8 +15,6 @@ import {
 	type Context,
 	createAssistantMessageEventStream,
 	type Model,
-	type OAuthCredentials,
-	type OAuthLoginCallbacks,
 	type SimpleStreamOptions,
 	streamSimpleAnthropic,
 	streamSimpleOpenAIResponses,
@@ -32,9 +30,6 @@ const AI_GATEWAY_URL = "https://cloud.gitlab.com";
 const ANTHROPIC_PROXY_URL = `${AI_GATEWAY_URL}/ai/v1/proxy/anthropic/`;
 const OPENAI_PROXY_URL = `${AI_GATEWAY_URL}/ai/v1/proxy/openai/v1`;
 
-const BUNDLED_CLIENT_ID = "da4edff2e6ebd2bc3208611e2768bc1c1dd7be791dc5ff26ca34ca9ee44f7d4b";
-const OAUTH_SCOPES = ["api"];
-const REDIRECT_URI = "http://127.0.0.1:8080/callback";
 const DIRECT_ACCESS_TTL = 25 * 60 * 1000;
 
 // =============================================================================
@@ -167,98 +162,6 @@ async function getDirectAccessToken(gitlabAccessToken: string): Promise<DirectAc
 	return cachedDirectAccess;
 }
 
-function invalidateDirectAccessToken() {
-	cachedDirectAccess = null;
-}
-
-// =============================================================================
-// OAuth
-// =============================================================================
-
-async function generatePKCE(): Promise<{ verifier: string; challenge: string }> {
-	const array = new Uint8Array(32);
-	crypto.getRandomValues(array);
-	const verifier = btoa(String.fromCharCode(...array))
-		.replace(/\+/g, "-")
-		.replace(/\//g, "_")
-		.replace(/=+$/, "");
-	const hash = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier));
-	const challenge = btoa(String.fromCharCode(...new Uint8Array(hash)))
-		.replace(/\+/g, "-")
-		.replace(/\//g, "_")
-		.replace(/=+$/, "");
-	return { verifier, challenge };
-}
-
-async function loginGitLab(callbacks: OAuthLoginCallbacks): Promise<OAuthCredentials> {
-	const { verifier, challenge } = await generatePKCE();
-	const authParams = new URLSearchParams({
-		client_id: BUNDLED_CLIENT_ID,
-		redirect_uri: REDIRECT_URI,
-		response_type: "code",
-		scope: OAUTH_SCOPES.join(" "),
-		code_challenge: challenge,
-		code_challenge_method: "S256",
-		state: crypto.randomUUID(),
-	});
-
-	callbacks.onAuth({ url: `${GITLAB_COM_URL}/oauth/authorize?${authParams.toString()}` });
-	const callbackUrl = await callbacks.onPrompt({ message: "Paste the callback URL:" });
-	const code = new URL(callbackUrl).searchParams.get("code");
-	if (!code) throw new Error("No authorization code found in callback URL");
-
-	const tokenResponse = await fetch(`${GITLAB_COM_URL}/oauth/token`, {
-		method: "POST",
-		headers: { "Content-Type": "application/x-www-form-urlencoded" },
-		body: new URLSearchParams({
-			client_id: BUNDLED_CLIENT_ID,
-			grant_type: "authorization_code",
-			code,
-			code_verifier: verifier,
-			redirect_uri: REDIRECT_URI,
-		}).toString(),
-	});
-
-	if (!tokenResponse.ok) throw new Error(`Token exchange failed: ${await tokenResponse.text()}`);
-	const data = (await tokenResponse.json()) as {
-		access_token: string;
-		refresh_token: string;
-		expires_in: number;
-		created_at: number;
-	};
-	invalidateDirectAccessToken();
-	return {
-		refresh: data.refresh_token,
-		access: data.access_token,
-		expires: (data.created_at + data.expires_in) * 1000 - 5 * 60 * 1000,
-	};
-}
-
-async function refreshGitLabToken(credentials: OAuthCredentials): Promise<OAuthCredentials> {
-	const response = await fetch(`${GITLAB_COM_URL}/oauth/token`, {
-		method: "POST",
-		headers: { "Content-Type": "application/x-www-form-urlencoded" },
-		body: new URLSearchParams({
-			client_id: BUNDLED_CLIENT_ID,
-			grant_type: "refresh_token",
-			refresh_token: credentials.refresh,
-		}).toString(),
-	});
-	if (!response.ok) throw new Error(`Token refresh failed: ${await response.text()}`);
-	const data = (await response.json()) as {
-		access_token: string;
-		refresh_token: string;
-		expires_in: number;
-		created_at: number;
-	};
-	invalidateDirectAccessToken();
-	return {
-		refresh: data.refresh_token,
-		access: data.access_token,
-		expires: (data.created_at + data.expires_in) * 1000 - 5 * 60 * 1000,
-	};
-}
-
 // =============================================================================
 // Stream Function
 // =============================================================================
@@ -273,7 +176,7 @@ export function streamGitLabDuo(
 	(async () => {
 		try {
 			const gitlabAccessToken = options?.apiKey;
-			if (!gitlabAccessToken) throw new Error("No GitLab access token. Run /login gitlab-duo or set GITLAB_TOKEN");
+			if (!gitlabAccessToken) throw new Error("No GitLab access token. Set GITLAB_TOKEN");
 
 			const cfg = MODEL_MAP.get(model.id);
 			if (!cfg) throw new Error(`Unknown model: ${model.id}`);
@@ -338,12 +241,6 @@ export default function (pi: ExtensionAPI) {
 			contextWindow,
 			maxTokens,
 		})),
-		oauth: {
-			name: "GitLab Duo",
-			login: loginGitLab,
-			refreshToken: refreshGitLabToken,
-			getApiKey: (cred) => cred.access,
-		},
 		streamSimple: streamGitLabDuo,
 	});
 }

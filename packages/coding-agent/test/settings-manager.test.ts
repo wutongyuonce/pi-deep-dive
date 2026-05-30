@@ -42,7 +42,7 @@ describe("SettingsManager", () => {
 
 			// Simulate user editing settings.json externally to add enabledModels
 			const currentSettings = JSON.parse(readFileSync(settingsPath, "utf-8"));
-			currentSettings.enabledModels = ["claude-opus-4-5", "gpt-5.2-codex"];
+			currentSettings.enabledModels = ["claude-opus-4-5", "gpt-5.4"];
 			writeFileSync(settingsPath, JSON.stringify(currentSettings, null, 2));
 
 			// User changes thinking level via Shift+Tab
@@ -51,7 +51,7 @@ describe("SettingsManager", () => {
 
 			// Verify enabledModels is preserved
 			const savedSettings = JSON.parse(readFileSync(settingsPath, "utf-8"));
-			expect(savedSettings.enabledModels).toEqual(["claude-opus-4-5", "gpt-5.2-codex"]);
+			expect(savedSettings.enabledModels).toEqual(["claude-opus-4-5", "gpt-5.4"]);
 			expect(savedSettings.defaultThinkingLevel).toBe("high");
 			expect(savedSettings.theme).toBe("dark");
 			expect(savedSettings.defaultModel).toBe("claude-sonnet");

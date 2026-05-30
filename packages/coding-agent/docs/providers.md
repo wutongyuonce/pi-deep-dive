@@ -1,45 +1,20 @@
 # Providers
 
-Pi supports subscription-based providers via OAuth and API key providers via environment variables or auth file. For each provider, pi knows all available models. The list is updated with every pi release.
+Pi supports API key providers via environment variables or auth file. For each provider, pi knows all available models. The list is updated with every pi release.
 
 ## Table of Contents
 
-- [Subscriptions](#subscriptions)
 - [API Keys](#api-keys)
 - [Auth File](#auth-file)
 - [Cloud Providers](#cloud-providers)
 - [Custom Providers](#custom-providers)
 - [Resolution Order](#resolution-order)
 
-## Subscriptions
-
-Use `/login` in interactive mode, then select a provider:
-
-- ChatGPT Plus/Pro (Codex)
-- Claude Pro/Max
-- GitHub Copilot
-
-Use `/logout` to clear credentials. Tokens are stored in `~/.pi/agent/auth.json` and auto-refresh when expired.
-
-### OpenAI Codex
-
-- Requires ChatGPT Plus or Pro subscription
-- Officially endorsed by OpenAI: [Codex for OSS](https://developers.openai.com/community/codex-for-oss)
-
-### Claude Pro/Max
-
-Anthropic subscription auth is active for Claude Pro/Max accounts. Third-party harness usage draws from [extra usage](https://claude.ai/settings/usage) and is billed per token, not against Claude plan limits.
-
-### GitHub Copilot
-
-- Press Enter for github.com, or enter your GitHub Enterprise Server domain
-- If you get "model not supported", enable it in VS Code: Copilot Chat → model selector → select model → "Enable"
-
 ## API Keys
 
 ### Environment Variables or Auth File
 
-Use `/login` in interactive mode and select a provider to store an API key in `auth.json`, or set credentials via environment variable:
+Set credentials via environment variable, or use `/login` in interactive mode to store an API key in `auth.json`:
 
 ```bash
 export ANTHROPIC_API_KEY=sk-ant-...
@@ -49,7 +24,6 @@ pi
 | Provider | Environment Variable | `auth.json` key |
 |----------|----------------------|------------------|
 | Anthropic | `ANTHROPIC_API_KEY` | `anthropic` |
-| Azure OpenAI Responses | `AZURE_OPENAI_API_KEY` | `azure-openai-responses` |
 | OpenAI | `OPENAI_API_KEY` | `openai` |
 | DeepSeek | `DEEPSEEK_API_KEY` | `deepseek` |
 | Google Gemini | `GEMINI_API_KEY` | `google` |
@@ -116,8 +90,6 @@ The `key` field supports three formats:
   ```json
   { "type": "api_key", "key": "sk-ant-..." }
   ```
-
-OAuth credentials are also stored here after `/login` and managed automatically.
 
 ## Cloud Providers
 
@@ -231,13 +203,13 @@ Or set `GOOGLE_APPLICATION_CREDENTIALS` to a service account key file.
 
 **Via models.json:** Add Ollama, LM Studio, vLLM, or any provider that speaks a supported API (OpenAI Completions, OpenAI Responses, Anthropic Messages, Google Generative AI). See [models.md](models.md).
 
-**Via extensions:** For providers that need custom API implementations or OAuth flows, create an extension. See [custom-provider.md](custom-provider.md) and [examples/extensions/custom-provider-gitlab-duo](../examples/extensions/custom-provider-gitlab-duo/).
+**Via extensions:** For providers that need custom API implementations, create an extension. See [custom-provider.md](custom-provider.md) and [examples/extensions/custom-provider-gitlab-duo](../examples/extensions/custom-provider-gitlab-duo/).
 
 ## Resolution Order
 
 When resolving credentials for a provider:
 
 1. CLI `--api-key` flag
-2. `auth.json` entry (API key or OAuth token)
+2. `auth.json` entry (API key)
 3. Environment variable
 4. Custom provider keys from `models.json`

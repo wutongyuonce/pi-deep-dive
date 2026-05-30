@@ -131,12 +131,7 @@ function getAttributionHeaders(
 	settingsManager: SettingsManager,
 	sessionId?: string,
 ): Record<string, string> | undefined {
-	if (
-		sessionId &&
-		(model.provider === "opencode" || model.provider === "opencode-go" || model.baseUrl.includes("opencode.ai"))
-	) {
-		return { "x-opencode-session": sessionId, "x-opencode-client": "pi" };
-	}
+	void sessionId;
 
 	if (!isInstallTelemetryEnabled(settingsManager)) {
 		return undefined;
@@ -147,17 +142,6 @@ function getAttributionHeaders(
 			"HTTP-Referer": "https://pi.dev",
 			"X-OpenRouter-Title": "pi",
 			"X-OpenRouter-Categories": "cli-agent",
-		};
-	}
-
-	if (
-		model.provider === "cloudflare-workers-ai" ||
-		model.provider === "cloudflare-ai-gateway" ||
-		model.baseUrl.includes("api.cloudflare.com") ||
-		model.baseUrl.includes("gateway.ai.cloudflare.com")
-	) {
-		return {
-			"User-Agent": "pi-coding-agent",
 		};
 	}
 

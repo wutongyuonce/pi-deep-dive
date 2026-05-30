@@ -5,7 +5,6 @@ import { getModel } from "../src/models.ts";
 import { completeSimple } from "../src/stream.ts";
 import type { Api, Context, Model, StopReason, Tool, ToolCall, ToolResultMessage } from "../src/types.ts";
 import { StringEnum } from "../src/utils/typebox-helpers.ts";
-import { hasBedrockCredentials } from "./bedrock-utils.ts";
 
 const calculatorSchema = Type.Object({
 	a: Type.Number({ description: "First number" }),
@@ -119,18 +118,6 @@ async function assertSecondToolCallWithInterleavedThinking<TApi extends Api>(
 }
 
 const hasAnthropicCredentials = !!getEnvApiKey("anthropic");
-
-describe.skipIf(!hasBedrockCredentials())("Amazon Bedrock interleaved thinking", () => {
-	it("should do interleaved thinking on Claude Opus 4.5", { retry: 3 }, async () => {
-		const llm = getModel("amazon-bedrock", "global.anthropic.claude-opus-4-5-20251101-v1:0");
-		await assertSecondToolCallWithInterleavedThinking(llm, "high");
-	});
-
-	it("should do interleaved thinking on Claude Opus 4.6", { retry: 3 }, async () => {
-		const llm = getModel("amazon-bedrock", "global.anthropic.claude-opus-4-6-v1");
-		await assertSecondToolCallWithInterleavedThinking(llm, "high");
-	});
-});
 
 describe.skipIf(!hasAnthropicCredentials)("Anthropic interleaved thinking", () => {
 	it("should do interleaved thinking on Claude Opus 4.5", { retry: 3 }, async () => {

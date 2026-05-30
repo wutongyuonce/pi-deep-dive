@@ -1570,43 +1570,19 @@ pi.registerProvider("my-proxy", {
 pi.registerProvider("anthropic", {
   baseUrl: "https://proxy.example.com"
 });
-
-// Register provider with OAuth support for /login
-pi.registerProvider("corporate-ai", {
-  baseUrl: "https://ai.corp.com",
-  api: "openai-responses",
-  models: [...],
-  oauth: {
-    name: "Corporate AI (SSO)",
-    async login(callbacks) {
-      // Custom OAuth flow
-      callbacks.onAuth({ url: "https://sso.corp.com/..." });
-      const code = await callbacks.onPrompt({ message: "Enter code:" });
-      return { refresh: code, access: code, expires: Date.now() + 3600000 };
-    },
-    async refreshToken(credentials) {
-      // Refresh logic
-      return credentials;
-    },
-    getApiKey(credentials) {
-      return credentials.access;
-    }
-  }
-});
 ```
 
 **Config options:**
 - `name` - Display name for the provider in UI such as `/login`.
 - `baseUrl` - API endpoint URL. Required when defining models.
-- `apiKey` - API key or environment variable name. Required when defining models (unless `oauth` provided).
+- `apiKey` - API key or environment variable name. Required when defining models.
 - `api` - API type: `"anthropic-messages"`, `"openai-completions"`, `"openai-responses"`, etc.
 - `headers` - Custom headers to include in requests.
 - `authHeader` - If true, adds `Authorization: Bearer` header automatically.
 - `models` - Array of model definitions. If provided, replaces all existing models for this provider. Model definitions can set `baseUrl` to override the provider endpoint for that model.
-- `oauth` - OAuth provider config for `/login` support. When provided, the provider appears in the login menu.
 - `streamSimple` - Custom streaming implementation for non-standard APIs.
 
-See [custom-provider.md](custom-provider.md) for advanced topics: custom streaming APIs, OAuth details, model definition reference.
+See [custom-provider.md](custom-provider.md) for advanced topics: custom streaming APIs, model definition reference.
 
 ### pi.unregisterProvider(name)
 
@@ -2583,7 +2559,7 @@ All examples in [examples/extensions/](../examples/extensions/).
 | `doom-overlay/` | Doom in overlay | `ui.custom` with overlay |
 | **Providers** |||
 | `custom-provider-anthropic/` | Custom Anthropic proxy | `registerProvider` |
-| `custom-provider-gitlab-duo/` | GitLab Duo integration | `registerProvider` with OAuth |
+| `custom-provider-gitlab-duo/` | GitLab Duo integration | `registerProvider` |
 | **Messages & Communication** |||
 | `message-renderer.ts` | Custom message rendering | `registerMessageRenderer`, `sendMessage` |
 | `event-bus.ts` | Inter-extension events | `pi.events` |

@@ -1,5 +1,5 @@
 /**
- * API Keys and OAuth
+ * API Keys
  *
  * Configure API key resolution via AuthStorage and ModelRegistry.
  */

@@ -88,8 +88,8 @@ describe("isContextOverflow", () => {
 			role: "assistant",
 			content: [],
 			api: "openai-completions",
-			provider: "xiaomi",
-			model: "mimo-v2.5-pro",
+			provider: "openai",
+			model: "gpt-4o",
 			usage: {
 				input,
 				output,
@@ -103,7 +103,7 @@ describe("isContextOverflow", () => {
 		};
 	}
 
-	it("detects Xiaomi-style overflow (length stop with zero output and filled context)", () => {
+	it("detects overflow on length stop with zero output and filled context", () => {
 		const message = createLengthStopMessage(58, 1048512, 0);
 		expect(isContextOverflow(message, 1048576)).toBe(true);
 	});

@@ -52,7 +52,7 @@ function createSession(options: {
 		},
 		getContextUsage: () => ({ contextWindow: 200_000, percent: 12.3 }),
 		modelRegistry: {
-			isUsingOAuth: () => false,
+			isUsingSubscriptionAuth: () => false,
 		},
 	};
 

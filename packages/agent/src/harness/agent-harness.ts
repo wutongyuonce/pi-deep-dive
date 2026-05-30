@@ -40,6 +40,15 @@ import type {
 } from "./types.ts";
 import { AgentHarnessError, BranchSummaryError, CompactionError, SessionError, toError } from "./types.ts";
 
+/**
+ * `AgentHarness` 是 `packages/agent` 的高层集成外壳。
+ *
+ * 相比纯运行时的 `Agent`，它额外负责：
+ * - session 持久化与树导航
+ * - skills / prompt templates 资源注入
+ * - provider 请求前后的 hook 与 streamOptions patch
+ * - compaction / branch summary 等长会话能力
+ */
 function createUserMessage(text: string, images?: ImageContent[]): UserMessage {
 	const content: Array<{ type: "text"; text: string } | ImageContent> = [{ type: "text", text }];
 	if (images) content.push(...images);
@@ -187,6 +196,7 @@ export class AgentHarness<
 	private nextTurnQueue: AgentMessage[] = [];
 	private handlers = new Map<string, Set<AgentHarnessHandler>>();
 
+	/** 构造阶段只做依赖注入和初始运行参数装配，不会启动任何异步流程。 */
 	constructor(options: AgentHarnessOptions<TSkill, TPromptTemplate, TTool>) {
 		this.env = options.env;
 		this.session = options.session;
@@ -208,6 +218,7 @@ export class AgentHarness<
 		return this.handlers.get(type);
 	}
 
+	/** 广播 harness 自有事件，例如 queue_update / settled / model_select。 */
 	private async emitOwn(event: AgentHarnessOwnEvent<TSkill, TPromptTemplate>, signal?: AbortSignal): Promise<void> {
 		for (const listener of this.getHandlers(SUBSCRIBER_EVENT_TYPE) ?? []) {
 			try {
@@ -218,6 +229,7 @@ export class AgentHarness<
 		}
 	}
 
+	/** 广播所有监听者都可见的事件，包括低层 AgentEvent 和 harness 自有事件。 */
 	private async emitAny(event: AgentHarnessEvent<TSkill, TPromptTemplate>, signal?: AbortSignal): Promise<void> {
 		for (const listener of this.getHandlers(SUBSCRIBER_EVENT_TYPE) ?? []) {
 			try {
@@ -228,6 +240,14 @@ export class AgentHarness<
 		}
 	}
 
+	/**
+	 * 触发某个具名 hook，并采用“最后一个非 undefined 返回值生效”的策略。
+	 *
+	 * 谁调用我：
+	 * - `createLoopConfig()` 里的 context / tool_call / tool_result
+	 * - `executeTurn()` 里的 before_agent_start
+	 * - `compact()` / `navigateTree()` 里的 session_* hook
+	 */
 	private async emitHook<TType extends keyof AgentHarnessEventResultMap>(
 		event: Extract<AgentHarnessOwnEvent, { type: TType }>,
 	): Promise<AgentHarnessEventResultMap[TType] | undefined> {
@@ -273,6 +293,7 @@ export class AgentHarness<
 		return current;
 	}
 
+	/** payload 发出前的最后改写点，常用于埋点、补 provider 特定字段或做请求审计。 */
 	private async emitBeforeProviderPayload(model: Model<any>, payload: unknown): Promise<unknown> {
 		const handlers = this.getHandlers("before_provider_payload");
 		let current = payload;
@@ -310,6 +331,7 @@ export class AgentHarness<
 		};
 	}
 
+	/** 一次 turn 的稳定快照：把 session、resources、model、active tools 组装成可执行输入。 */
 	private async createTurnState(): Promise<AgentHarnessTurnState<TSkill, TPromptTemplate, TTool>> {
 		const context = await this.session.buildContext();
 		const resources = this.getResources();
@@ -344,6 +366,7 @@ export class AgentHarness<
 		};
 	}
 
+	/** 把高层 turn state 翻译成低层 `AgentContext`，供 `runAgentLoop()` 使用。 */
 	private createContext(
 		turnState: AgentHarnessTurnState<TSkill, TPromptTemplate, TTool>,
 		systemPrompt?: string,
@@ -355,6 +378,14 @@ export class AgentHarness<
 		};
 	}
 
+	/**
+	 * 生成传给低层 loop 的 `streamFn`。
+	 *
+	 * 调用链：
+	 * - `executeTurn()` -> `runAgentLoop()`
+	 * - `runAgentLoop()` -> 本函数返回的 `streamFn`
+	 * - 本函数最终调用 `@earendil-works/pi-ai` 的 `streamSimple()`
+	 */
 	private createStreamFn(getTurnState: () => AgentHarnessTurnState<TSkill, TPromptTemplate, TTool>): StreamFn {
 		return async (model, context, streamOptions) => {
 			const turnState = getTurnState();
@@ -388,6 +419,7 @@ export class AgentHarness<
 		};
 	}
 
+	/** 按 queue mode 抽取待注入消息；若广播 queue_update 失败，会把消息原样放回队列。 */
 	private async drainQueuedMessages(queue: AgentMessage[], mode: QueueMode): Promise<AgentMessage[]> {
 		const messages = mode === "all" ? queue.splice(0) : queue.splice(0, 1);
 		if (messages.length === 0) return messages;
@@ -400,6 +432,13 @@ export class AgentHarness<
 		}
 	}
 
+	/**
+	 * 把 harness 的 hook / queue / session 语义翻译成低层 `AgentLoopConfig`。
+	 *
+	 * 这是高层编排与低层 `agent-loop.ts` 的接口面：
+	 * - 上游 `executeTurn()` 创建它
+	 * - 下游 `runAgentLoop()` 在每轮 assistant/tool 执行期间回调这里提供的方法
+	 */
 	private createLoopConfig(
 		getTurnState: () => AgentHarnessTurnState<TSkill, TPromptTemplate, TTool>,
 		setTurnState: (turnState: AgentHarnessTurnState<TSkill, TPromptTemplate, TTool>) => void,
@@ -456,6 +495,7 @@ export class AgentHarness<
 		if (missing.length > 0) throw new AgentHarnessError("invalid_argument", `Unknown tool(s): ${missing.join(", ")}`);
 	}
 
+	/** 把 run 期间缓存的 session 写操作统一冲刷到存储层，形成稳定 save point。 */
 	private async flushPendingSessionWrites(): Promise<void> {
 		while (this.pendingSessionWrites.length > 0) {
 			const write = this.pendingSessionWrites[0]!;
@@ -480,6 +520,12 @@ export class AgentHarness<
 		}
 	}
 
+	/**
+	 * 统一承接低层 `AgentEvent`，决定：
+	 * - 何时立即写 session
+	 * - 何时向外广播
+	 * - 何时补发 harness 语义事件（如 `save_point`、`settled`）
+	 */
 	private async handleAgentEvent(event: AgentEvent, signal?: AbortSignal): Promise<void> {
 		if (event.type === "message_end") {
 			await this.session.appendMessage(event.message);
@@ -523,6 +569,14 @@ export class AgentHarness<
 		return [failureMessage];
 	}
 
+	/**
+	 * 执行一次完整 turn。
+	 *
+	 * 调用链：
+	 * - `prompt()` / `skill()` / `promptFromTemplate()` -> 本函数
+	 * - 本函数先处理 before_agent_start、nextTurnQueue，再调用 `runAgentLoop()`
+	 * - `runAgentLoop()` 期间的 provider 请求通过 `createStreamFn()` 回到 `packages/ai`
+	 */
 	private async executeTurn(
 		turnState: AgentHarnessTurnState<TSkill, TPromptTemplate, TTool>,
 		text: string,
@@ -600,6 +654,7 @@ export class AgentHarness<
 		}
 	}
 
+	/** 普通用户 prompt 入口，是 CLI / UI 最常调用的方法。 */
 	async prompt(text: string, options?: { images?: ImageContent[] }): Promise<AssistantMessage> {
 		if (this.phase !== "idle") throw new AgentHarnessError("busy", "AgentHarness is busy");
 		this.phase = "turn";
@@ -615,6 +670,7 @@ export class AgentHarness<
 		}
 	}
 
+	/** 显式技能调用入口：把 skill 格式化成一段用户消息，再复用 `executeTurn()`。 */
 	async skill(name: string, additionalInstructions?: string): Promise<AssistantMessage> {
 		if (this.phase !== "idle") throw new AgentHarnessError("busy", "AgentHarness is busy");
 		this.phase = "turn";
@@ -632,6 +688,7 @@ export class AgentHarness<
 		}
 	}
 
+	/** Prompt template 入口：与 skill 类似，只是输入来自模板系统。 */
 	async promptFromTemplate(name: string, args: string[] = []): Promise<AssistantMessage> {
 		if (this.phase !== "idle") throw new AgentHarnessError("busy", "AgentHarness is busy");
 		this.phase = "turn";
@@ -678,6 +735,7 @@ export class AgentHarness<
 		}
 	}
 
+	/** 历史压缩入口：复用 compaction 算法，并把结果以 session entry 形式落盘。 */
 	async compact(
 		customInstructions?: string,
 	): Promise<{ summary: string; firstKeptEntryId: string; tokensBefore: number; details?: unknown }> {
@@ -734,6 +792,7 @@ export class AgentHarness<
 		}
 	}
 
+	/** 分支导航入口：切换 leaf，必要时生成 branch summary，并把 editorText 返回给调用方。 */
 	async navigateTree(
 		targetId: string,
 		options?: { summarize?: boolean; customInstructions?: string; replaceInstructions?: boolean; label?: string },
@@ -933,6 +992,7 @@ export class AgentHarness<
 		}
 	}
 
+	/** 中止当前 run，同时清空 steering/follow-up 队列，并广播 abort 事件。 */
 	async abort(): Promise<AbortResult> {
 		const clearedSteer = [...this.steerQueue];
 		const clearedFollowUp = [...this.followUpQueue];

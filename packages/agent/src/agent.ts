@@ -28,6 +28,15 @@ import type {
 
 export type { QueueMode } from "./types.ts";
 
+/**
+ * `Agent` 是对低层 `runAgentLoop*()` 的有状态封装。
+ *
+ * 核心职责：
+ * - 持有 transcript / model / tools / thinkingLevel 等运行态
+ * - 把回调式低层 loop 包装成更易用的 `prompt()` / `continue()` / `abort()` API
+ * - 维护 steer / follow-up 队列
+ * - 把低层 AgentEvent 先归并进内部 state，再分发给订阅者
+ */
 function defaultConvertToLlm(messages: AgentMessage[]): Message[] {
 	return messages.filter(
 		(message) => message.role === "user" || message.role === "assistant" || message.role === "toolResult",
@@ -115,6 +124,7 @@ export interface AgentOptions {
 	toolExecution?: ToolExecutionMode;
 }
 
+/** 轻量队列：Agent 用它分别管理 steering 和 follow-up 两类待注入消息。 */
 class PendingMessageQueue {
 	private messages: AgentMessage[] = [];
 	public mode: QueueMode;
@@ -198,6 +208,12 @@ export class Agent {
 	/** Tool execution strategy for assistant messages that contain multiple tool calls. */
 	public toolExecution: ToolExecutionMode;
 
+	/**
+	 * 构造时只做状态和依赖注入，不启动任何异步流程。
+	 *
+	 * 谁调用我：
+	 * - 应用层 `new Agent(...)`
+	 */
 	constructor(options: AgentOptions = {}) {
 		this._state = createMutableAgentState(options.initialState);
 		this.convertToLlm = options.convertToLlm ?? defaultConvertToLlm;
@@ -346,6 +362,8 @@ export class Agent {
 		}
 
 		if (lastMessage.role === "assistant") {
+			// 如果上一次停在 assistant，直接继续会违反低层 loop 对“最后一条必须是 user/toolResult”的要求。
+			// 这里优先尝试把已排队的消息提出来，重新走一次 prompt 流程。
 			const queuedSteering = this.steeringQueue.drain();
 			if (queuedSteering.length > 0) {
 				await this.runPromptMessages(queuedSteering, { skipInitialSteeringPoll: true });
@@ -364,6 +382,7 @@ export class Agent {
 		await this.runContinuation();
 	}
 
+	/** 把三种 prompt 输入形式统一归一化成 `AgentMessage[]`。 */
 	private normalizePromptInput(
 		input: string | AgentMessage | AgentMessage[],
 		images?: ImageContent[],
@@ -383,10 +402,18 @@ export class Agent {
 		return [{ role: "user", content, timestamp: Date.now() }];
 	}
 
+	/**
+	 * 新开一轮带 prompt 的 agent run。
+	 *
+	 * 调用链：
+	 * - `prompt()` -> `normalizePromptInput()` -> 本函数
+	 * - 本函数再通过 `runWithLifecycle()` 包装 `runAgentLoop()`
+	 */
 	private async runPromptMessages(
 		messages: AgentMessage[],
 		options: { skipInitialSteeringPoll?: boolean } = {},
 	): Promise<void> {
+		// 低层 loop 永远拿到 snapshot + config，不直接操作 Agent 的可变内部状态。
 		await this.runWithLifecycle(async (signal) => {
 			await runAgentLoop(
 				messages,
@@ -399,7 +426,9 @@ export class Agent {
 		});
 	}
 
+	/** continuation 版本，内部调用低层 `runAgentLoopContinue()`。 */
 	private async runContinuation(): Promise<void> {
+		// continue 不会额外追加新 prompt，而是基于当前 transcript 直接续跑。
 		await this.runWithLifecycle(async (signal) => {
 			await runAgentLoopContinue(
 				this.createContextSnapshot(),
@@ -411,6 +440,7 @@ export class Agent {
 		});
 	}
 
+	/** 为本次 run 生成上下文快照，避免低层 loop 直接持有可变 state。 */
 	private createContextSnapshot(): AgentContext {
 		return {
 			systemPrompt: this._state.systemPrompt,
@@ -419,9 +449,19 @@ export class Agent {
 		};
 	}
 
+	/**
+	 * 组装低层 `AgentLoopConfig`。
+	 *
+	 * 谁调用我：
+	 * - `runPromptMessages()`
+	 * - `runContinuation()`
+	 *
+	 * 我把 `Agent` 上的状态和 hook 全部映射成低层 loop 能理解的配置对象。
+	 */
 	private createLoopConfig(options: { skipInitialSteeringPoll?: boolean } = {}): AgentLoopConfig {
 		let skipInitialSteeringPoll = options.skipInitialSteeringPoll === true;
 		return {
+			// 这里把 Agent 自己持有的运行时状态，映射成低层 loop 所需的纯配置对象。
 			model: this._state.model,
 			reasoning: this._state.thinkingLevel === "off" ? undefined : this._state.thinkingLevel,
 			sessionId: this.sessionId,
@@ -433,11 +473,14 @@ export class Agent {
 			toolExecution: this.toolExecution,
 			beforeToolCall: this.beforeToolCall,
 			afterToolCall: this.afterToolCall,
+			// prepareNextTurn 在低层 loop 看起来是无参函数；
+			// 这里通过闭包把当前 run 的 signal 透传进去。
 			prepareNextTurn: this.prepareNextTurn ? async () => await this.prepareNextTurn?.(this.signal) : undefined,
 			convertToLlm: this.convertToLlm,
 			transformContext: this.transformContext,
 			getApiKey: this.getApiKey,
 			getSteeringMessages: async () => {
+				// 某些场景（如 continue 时先把队列手动取出）需要跳过首次 steering poll，避免重复消费。
 				if (skipInitialSteeringPoll) {
 					skipInitialSteeringPoll = false;
 					return [];
@@ -448,18 +491,28 @@ export class Agent {
 		};
 	}
 
+	/**
+	 * 生命周期壳层：保证一次 run 的 activeRun / abort / settle 行为一致。
+	 *
+	 * 调用链：
+	 * - `runPromptMessages()` / `runContinuation()` -> 本函数
+	 * - 本函数包裹任意 executor，统一处理 activeRun、异常兜底、finishRun
+	 */
 	private async runWithLifecycle(executor: (signal: AbortSignal) => Promise<void>): Promise<void> {
 		if (this.activeRun) {
 			throw new Error("Agent is already processing.");
 		}
 
+		// 每次 run 都生成一个独立的 abortController，保证 abort 粒度严格绑定到当前 run。
 		const abortController = new AbortController();
+		// `waitForIdle()` 依赖这个 promise；只有 finishRun() 调用 resolve 后才算真正 settle。
 		let resolvePromise = () => {};
 		const promise = new Promise<void>((resolve) => {
 			resolvePromise = resolve;
 		});
 		this.activeRun = { promise, resolve: resolvePromise, abortController };
 
+		// 先初始化运行态，再让低层 loop 开始发事件。
 		this._state.isStreaming = true;
 		this._state.streamingMessage = undefined;
 		this._state.errorMessage = undefined;
@@ -467,12 +520,15 @@ export class Agent {
 		try {
 			await executor(abortController.signal);
 		} catch (error) {
+			// 若低层没有按协议发出失败事件，这里补一套最小失败事件，保持上层监听者逻辑一致。
 			await this.handleRunFailure(error, abortController.signal.aborted);
 		} finally {
+			// finishRun 既会清 runtime state，也会 resolve activeRun.promise。
 			this.finishRun();
 		}
 	}
 
+	/** 当低层 loop 抛出异常且没能走正常事件协议时，补发一组失败事件维持上层一致性。 */
 	private async handleRunFailure(error: unknown, aborted: boolean): Promise<void> {
 		const failureMessage = {
 			role: "assistant",
@@ -491,6 +547,7 @@ export class Agent {
 		await this.processEvents({ type: "agent_end", messages: [failureMessage] });
 	}
 
+	/** 清理一次 run 的运行态；注意 transcript 本身不会在这里回滚。 */
 	private finishRun(): void {
 		this._state.isStreaming = false;
 		this._state.streamingMessage = undefined;
@@ -505,23 +562,31 @@ export class Agent {
 	 * `agent_end` only means no further loop events will be emitted. The run is
 	 * considered idle later, after all awaited listeners for `agent_end` finish
 	 * and `finishRun()` clears runtime-owned state.
+	 *
+	 * 这是 `Agent` 和低层 `agent-loop.ts` 的汇合点：
+	 * - 下游 `runAgentLoop*()` 把事件推到这里
+	 * - 这里先同步内部 state，再把事件广播给订阅者
 	 */
 	private async processEvents(event: AgentEvent): Promise<void> {
 		switch (event.type) {
 			case "message_start":
+				// 流式 assistant / toolResult 一开始只更新“正在生成中的消息”视图。
 				this._state.streamingMessage = event.message;
 				break;
 
 			case "message_update":
+				// 增量事件只覆盖 streamingMessage，不直接写入 transcript。
 				this._state.streamingMessage = event.message;
 				break;
 
 			case "message_end":
+				// 只有 message_end 才真正把消息提交进 transcript，避免 partial 污染历史。
 				this._state.streamingMessage = undefined;
 				this._state.messages.push(event.message);
 				break;
 
 			case "tool_execution_start": {
+				// pendingToolCalls 用不可变替换而不是原地改 Set，方便外层状态观察。
 				const pendingToolCalls = new Set(this._state.pendingToolCalls);
 				pendingToolCalls.add(event.toolCallId);
 				this._state.pendingToolCalls = pendingToolCalls;
@@ -529,6 +594,7 @@ export class Agent {
 			}
 
 			case "tool_execution_end": {
+				// 工具结束时从 pending 集合移除，供 UI 判断“是否还有工具在跑”。
 				const pendingToolCalls = new Set(this._state.pendingToolCalls);
 				pendingToolCalls.delete(event.toolCallId);
 				this._state.pendingToolCalls = pendingToolCalls;
@@ -536,6 +602,7 @@ export class Agent {
 			}
 
 			case "turn_end":
+				// errorMessage 只在 turn 末尾稳定写入，避免流式中途闪烁。
 				if (event.message.role === "assistant" && event.message.errorMessage) {
 					this._state.errorMessage = event.message.errorMessage;
 				}
@@ -550,6 +617,7 @@ export class Agent {
 		if (!signal) {
 			throw new Error("Agent listener invoked outside active run");
 		}
+		// 订阅者按注册顺序串行 await，保证外部副作用的顺序与 AgentEvent 顺序一致。
 		for (const listener of this.listeners) {
 			await listener(event, signal);
 		}

@@ -6,18 +6,6 @@ const EXPECTED_ADAPTIVE_THINKING_MODELS = [
 	"anthropic/claude-opus-4-6",
 	"anthropic/claude-opus-4-7",
 	"anthropic/claude-sonnet-4-6",
-	"cloudflare-ai-gateway/claude-opus-4-6",
-	"cloudflare-ai-gateway/claude-opus-4-7",
-	"cloudflare-ai-gateway/claude-sonnet-4-6",
-	"github-copilot/claude-opus-4.6",
-	"github-copilot/claude-opus-4.7",
-	"github-copilot/claude-sonnet-4.6",
-	"opencode/claude-opus-4-6",
-	"opencode/claude-opus-4-7",
-	"opencode/claude-sonnet-4-6",
-	"vercel-ai-gateway/anthropic/claude-opus-4.6",
-	"vercel-ai-gateway/anthropic/claude-opus-4.7",
-	"vercel-ai-gateway/anthropic/claude-sonnet-4.6",
 ];
 
 function getAllModels(): Model<Api>[] {
