@@ -9,7 +9,7 @@ import type {
 } from "./types.ts";
 
 /**
- * API 注册表是 `stream.ts` 和具体 provider 之间的桥接层 / 解耦层。
+ * API 注册表是 `stream.ts` 和具体 provider 之间的桥接层
  *
  * 调用链：
  * - `providers/register-builtins.ts` 在模块加载时调用 `registerApiProvider()`
@@ -21,33 +21,61 @@ import type {
  * - 让 provider 可以在运行时被注册、覆盖、卸载
  * - 让测试代码或扩展代码能够替换内置 provider，而不用改入口层
  */
+/** 注册表内部使用的统一流式函数签名（完整参数版本）。 */
 export type ApiStreamFunction = (
 	model: Model<Api>,
 	context: Context,
 	options?: StreamOptions,
 ) => AssistantMessageEventStream;
 
+/** 注册表内部使用的统一流式函数签名（简化参数版本）。 */
 export type ApiStreamSimpleFunction = (
 	model: Model<Api>,
 	context: Context,
 	options?: SimpleStreamOptions,
 ) => AssistantMessageEventStream;
 
+/**
+ * 对外暴露的强类型 provider 接口。
+ *
+ * 泛型参数：
+ * - `TApi`：该 provider 服务的 API 协议名，如 "openai-responses"
+ * - `TOptions`：该 provider 接受的完整参数类型
+ *
+ * `stream` 和 `streamSimple` 保留各自的强类型签名，
+ * 注册时由 `wrapStream()` / `wrapStreamSimple()` 统一擦除为内部签名。
+ */
 export interface ApiProvider<TApi extends Api = Api, TOptions extends StreamOptions = StreamOptions> {
 	api: TApi;
 	stream: StreamFunction<TApi, TOptions>;
 	streamSimple: StreamFunction<TApi, SimpleStreamOptions>;
 }
 
+/**
+ * 注册表内部存储的类型擦除后的 provider。
+ *
+ * 与 `ApiProvider` 的区别：
+ * - `ApiProvider` 保留泛型，供扩展方 / 测试代码使用
+ * - `ApiProviderInternal` 把泛型擦除为 `Api` / `StreamOptions`，
+ *   这样注册表可以用统一的 `Map<string, ApiProviderInternal>` 存储所有 provider
+ */
 interface ApiProviderInternal {
 	api: Api;
 	stream: ApiStreamFunction;
 	streamSimple: ApiStreamSimpleFunction;
 }
 
+/**
+ * 注册表中每条记录的完整结构。
+ *
+ * `sourceId` 用于标记 provider 来源，方便按来源批量卸载：
+ * - 内置 provider 通常不设置 sourceId
+ * - 动态注册方可以用它标记"这一批 provider 是我加的"
+ * - 卸载时按 sourceId 过滤，避免误删其它来源
+ */
 type RegisteredApiProvider = {
 	provider: ApiProviderInternal;
-	sourceId?: string;
+	sourceId?: string; // ?表示可选
 };
 
 // 全局注册表：

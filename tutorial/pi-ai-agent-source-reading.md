@@ -1,51 +1,5 @@
-# pi-ai 与 pi-agent-core 源码阅读教程
 
-这份文档不是 API 使用说明，而是一份面向“准备开发这两个模块”的源码阅读教程。
-
-目标有三个：
-
-1. 帮你先建立 **monorepo 里的分层认知**，知道 `pi-ai` 和 `pi-agent-core` 各自解决什么问题。
-2. 帮你按 **渐进式路径** 阅读源码，而不是一上来就陷进 9000 行 provider 细节。
-3. 帮你从“我要改功能 / 加 provider / 调 agent loop”这种 **开发者视角** 理解调用链。
-
-如果你刚开始接触 TypeScript，建议先搭配阅读：
-
-- [pi-ai-streaming-architecture.md](./pi-ai-streaming-architecture.md)
-
-那篇文档已经把 `EventStream`、`AbortController`、`AsyncIterable` 等底层概念拆开讲过了。本文会继续往上走，重点看模块边界、控制流和开发入口。
-
----
-
-## 1. 先建立全局地图
-
-这个仓库是一个 monorepo。和本文最相关的 4 个包如下：
-
-```text
-pi-tui (终端渲染库)          ← 纯 UI / 渲染层
-pi-ai  (统一 LLM API)       ← 模型、provider、流式事件、成本/usage
-
-    ↓ pi-agent-core 依赖 pi-ai
-pi-agent-core (agent 引擎)   ← agent loop、工具执行、事件分发、状态管理
-
-    ↓ pi-coding-agent 依赖 pi-ai + pi-agent-core + pi-tui
-pi-coding-agent (完整 CLI)   ← 会话、命令、工具、TUI、扩展系统
-```
-
-对源码阅读来说，最重要的结论是：
-
-- `pi-ai` 解决的是：**“怎么统一调用不同 LLM provider，并把结果变成统一事件流”**
-- `pi-agent-core` 解决的是：**“拿到统一事件流后，怎么驱动一个会执行工具的 agent loop”**
-- `pi-coding-agent` 解决的是：**“怎么把 agent 做成真正可用的产品”**
-
-所以如果你的目标是理解“agent 最底层怎么跑起来”，你应该先看：
-
-1. `packages/ai`
-2. `packages/agent`
-3. 最后再把 `packages/coding-agent` 当成上层集成样例
-
----
-
-## 2. 为什么要拆成两个库
+## 1. 为什么要拆成两个库
 
 很多项目会把“调 LLM”和“跑 agent”写在一起，但 `pi` 把它们分成了两个库：
 
@@ -54,7 +8,7 @@ pi-coding-agent (完整 CLI)   ← 会话、命令、工具、TUI、扩展系统
 
 这样拆有几个直接好处。
 
-### 2.1 `pi-ai` 可以独立使用
+### 1.1 `pi-ai` 可以独立使用
 
 如果你只是想写一个：
 
@@ -70,7 +24,7 @@ pi-coding-agent (完整 CLI)   ← 会话、命令、工具、TUI、扩展系统
 - [`packages/ai/src/stream.ts`](../packages/ai/src/stream.ts)
 - [`packages/ai/src/types.ts`](../packages/ai/src/types.ts)
 
-### 2.2 `pi-agent-core` 不关心底层 provider 细节
+### 1.2 `pi-agent-core` 不关心底层 provider 细节
 
 `pi-agent-core` 不直接写 OpenAI / Anthropic / Gemini 的协议适配。它只要求：
 
@@ -96,376 +50,9 @@ pi-coding-agent (完整 CLI)   ← 会话、命令、工具、TUI、扩展系统
 
 ---
 
-## 3. 你应该怎么读源码
+## 2. 再理解 `pi-agent-core`：它是 agent loop，不是完整产品
 
-不要按目录从上往下机械读。更有效的方式是：**按一条真实请求的调用链去读。**
-
-建议按下面 4 轮阅读。
-
-### 第一轮：只看公开入口和类型
-
-目标：先知道“这个包从外面怎么用”，暂时不深挖内部实现。
-
-`pi-ai` 先看：
-
-- [`packages/ai/src/index.ts`](../packages/ai/src/index.ts)
-- [`packages/ai/src/stream.ts`](../packages/ai/src/stream.ts)
-- [`packages/ai/src/models.ts`](../packages/ai/src/models.ts)
-- [`packages/ai/src/types.ts`](../packages/ai/src/types.ts)
-
-`pi-agent-core` 先看：
-
-- [`packages/agent/src/index.ts`](../packages/agent/src/index.ts)
-- [`packages/agent/src/agent-loop.ts`](../packages/agent/src/agent-loop.ts)
-- [`packages/agent/src/agent.ts`](../packages/agent/src/agent.ts)
-- [`packages/agent/src/types.ts`](../packages/agent/src/types.ts)
-
-读这一轮时，你只需要回答 4 个问题：
-
-1. 入口函数有哪些？
-2. 运行时的核心对象有哪些？
-3. 事件类型有哪些？
-4. 哪些是“统一抽象”，哪些是“provider / tool / hook 细节”？
-
-### 第二轮：跟一条最短调用链
-
-目标：从 `streamSimple()` / `runAgentLoop()` 跟到 provider 和工具执行。
-
-建议按下面顺序：
-
-1. `pi-ai`
-   - [`packages/ai/src/stream.ts`](../packages/ai/src/stream.ts)
-   - [`packages/ai/src/api-registry.ts`](../packages/ai/src/api-registry.ts)
-   - [`packages/ai/src/providers/register-builtins.ts`](../packages/ai/src/providers/register-builtins.ts)
-   - [`packages/ai/src/utils/event-stream.ts`](../packages/ai/src/utils/event-stream.ts)
-   - 一个代表 provider，例如 [`packages/ai/src/providers/openai-responses.ts`](../packages/ai/src/providers/openai-responses.ts)
-2. `pi-agent-core`
-   - [`packages/agent/src/agent-loop.ts`](../packages/agent/src/agent-loop.ts)
-   - [`packages/agent/src/agent.ts`](../packages/agent/src/agent.ts)
-
-### 第三轮：只看“扩展点”
-
-目标：如果你要开发这个模块，哪些函数最可能需要改。
-
-`pi-ai` 的扩展点通常是：
-
-- 新增 provider
-- 改消息转换
-- 改工具调用兼容
-- 改 usage / cost 计算
-
-`pi-agent-core` 的扩展点通常是：
-
-- 改 tool call 调度
-- 改 hook 时机
-- 改 turn 边界
-- 改 state 管理或队列策略
-
-### 第四轮：最后再看测试
-
-目标：确认你的理解和作者预期是否一致。
-
-推荐测试入口：
-
-- `pi-ai`
-  - [`packages/ai/test/stream.test.ts`](../packages/ai/test/stream.test.ts)
-  - [`packages/ai/test/abort.test.ts`](../packages/ai/test/abort.test.ts)
-  - [`packages/ai/test/lazy-module-load.test.ts`](../packages/ai/test/lazy-module-load.test.ts)
-- `pi-agent-core`
-  - [`packages/agent/test/agent-loop.test.ts`](../packages/agent/test/agent-loop.test.ts)
-  - [`packages/agent/test/agent.test.ts`](../packages/agent/test/agent.test.ts)
-  - [`packages/agent/test/harness/agent-harness.test.ts`](../packages/agent/test/harness/agent-harness.test.ts)
-
----
-
-## 4. 先理解 `pi-ai`：它不是 SDK，而是“统一 LLM 运行时”
-
-### 4.1 `pi-ai` 的职责边界
-
-`pi-ai` 负责的事情包括：
-
-- 模型注册与查找
-- provider 选择
-- 统一流式事件协议
-- 工具 schema 与参数校验
-- thinking / tool call / image / usage / cost 统一抽象
-- abort 透传
-- provider 间上下文 handoff
-
-它**不负责**：
-
-- 完整 agent loop
-- transcript 的长期状态管理
-- queue / steering / follow-up
-- UI
-
-所以你可以把 `pi-ai` 理解为：
-
-> 一个“多 provider + 多模态 + 工具调用 + 流式事件”的统一底座。
-
-### 4.2 `pi-ai` 的核心分层
-
-阅读源码时，可以把 `packages/ai/src` 分成 5 层：
-
-```text
-1. models / types
-   定义模型、消息、工具、事件协议
-
-2. stream entry
-   入口函数：stream() / complete() / streamSimple()
-
-3. registry
-   根据 model.api 找 provider
-
-4. providers
-   各 provider 的协议适配与流式解析
-
-5. utils
-   event-stream、headers、validation、json parse 等基础设施
-```
-
-对应的核心源码：
-
-- 类型层
-  - [`packages/ai/src/types.ts`](../packages/ai/src/types.ts)
-  - [`packages/ai/src/models.ts`](../packages/ai/src/models.ts)
-- 入口层
-  - [`packages/ai/src/stream.ts`](../packages/ai/src/stream.ts)
-- 注册层
-  - [`packages/ai/src/api-registry.ts`](../packages/ai/src/api-registry.ts)
-  - [`packages/ai/src/providers/register-builtins.ts`](../packages/ai/src/providers/register-builtins.ts)
-- 核心运行时
-  - [`packages/ai/src/utils/event-stream.ts`](../packages/ai/src/utils/event-stream.ts)
-- provider 样板
-  - [`packages/ai/src/providers/openai-responses.ts`](../packages/ai/src/providers/openai-responses.ts)
-  - [`packages/ai/src/providers/openai-completions.ts`](../packages/ai/src/providers/openai-completions.ts)
-  - [`packages/ai/src/providers/anthropic.ts`](../packages/ai/src/providers/anthropic.ts)
-
----
-
-## 5. `pi-ai` 的最短调用链
-
-这一节只跟一条最常见的链路：
-
-```typescript
-const stream = streamSimple(model, context, options);
-for await (const event of stream) {
-  // 消费事件
-}
-const message = await stream.result();
-```
-
-### 5.1 第一步：入口 `stream.ts`
-
-入口文件：
-
-- [`packages/ai/src/stream.ts`](../packages/ai/src/stream.ts)
-
-你应该重点看这几个函数：
-
-- `stream()`
-- `complete()`
-- `streamSimple()`
-- `completeSimple()`
-
-这层的作用非常单纯：
-
-- 根据 `model.api` 找到 provider
-- 调 provider 的 `stream()` 或 `streamSimple()`
-- 非流式版本其实也是复用流式版本，再等待 `result()`
-
-这意味着：
-
-- **真正复杂的逻辑不在入口层**
-- 入口层最重要的设计价值是“稳定 API 面”和“统一调度点”
-
-如果你以后要给 `pi-ai` 加 tracing、全局审计、统一 options 逻辑，这一层往往是第一落点。
-
-### 5.2 第二步：注册表 `api-registry.ts`
-
-核心文件：
-
-- [`packages/ai/src/api-registry.ts`](../packages/ai/src/api-registry.ts)
-
-它解决的问题是：
-
-> “同样都是 `stream(model, context)`，到底要调哪个 provider 实现？”
-
-这里做了三件事：
-
-1. provider 注册
-2. provider 查询
-3. 用 `wrapStream()` 做一次统一签名和运行时校验
-
-所以当你想新增 provider 时，真正的接入点不是 `stream.ts`，而是：
-
-1. 写 provider 实现
-2. 在 `register-builtins.ts` 里注册
-
-### 5.3 第三步：内置 provider 注册与懒加载
-
-核心文件：
-
-- [`packages/ai/src/providers/register-builtins.ts`](../packages/ai/src/providers/register-builtins.ts)
-
-这一层很重要，因为它体现了 `pi-ai` 的一个很实际的工程判断：
-
-> provider 很多，但不应该在应用启动时把所有 provider 都立即 import 进来。
-
-所以它做了懒加载包装：
-
-- 外层先返回一个 `AssistantMessageEventStream`
-- 真正 provider 模块异步 import
-- 内层 provider 流开始工作后，再把事件转发到外层流
-
-你可以把它理解为：
-
-```text
-调用方
-  -> streamSimple()
-  -> registry 取到 lazy provider
-  -> lazy provider 先 new 一个 outer stream
-  -> import 真正 provider 模块
-  -> provider.streamSimple(...)
-  -> forward inner stream -> outer stream
-```
-
-这是一个非常典型的“API 立即返回，内部懒初始化”的设计。
-
-对开发者来说，这里有两个重要启发：
-
-1. 如果你加新 provider，最好遵守这套懒加载模式
-2. 如果你排查“为什么 stream 已经返回了但 provider 还没真正开始跑”，这里就是入口
-
-### 5.4 第四步：统一事件流引擎 `event-stream.ts`
-
-核心文件：
-
-- [`packages/ai/src/utils/event-stream.ts`](../packages/ai/src/utils/event-stream.ts)
-
-这部分在 [pi-ai-streaming-architecture.md](./pi-ai-streaming-architecture.md) 里已经详细讲过，这里只从开发视角总结。
-
-你要记住的不是语法，而是它解决了两个工程问题：
-
-1. **provider 和消费者的速度不同步**
-2. **调用方既想实时消费事件，又想在结束时拿最终结果**
-
-所以 `EventStream<T, R>` 提供了两个接口面：
-
-- `for await ... of stream`
-- `await stream.result()`
-
-以及三个核心状态：
-
-- `queue`
-- `waiting`
-- `finalResultPromise`
-
-如果你未来要改 `pi-ai` 的流式协议，请优先问自己：
-
-- 这个改动属于 provider 层，还是 event-stream 层？
-- 它是新增事件，还是改最终结果？
-- 它需要影响 `result()` 吗？
-
-很多新手第一次读到 provider 文件时会头大，其实真正需要先吃透的是这一层。
-
-### 5.5 第五步：provider 内部如何把 SDK 事件转成统一事件
-
-推荐阅读代表文件：
-
-- [`packages/ai/src/providers/openai-responses.ts`](../packages/ai/src/providers/openai-responses.ts)
-
-原因不是它最简单，而是它最能代表 `pi-ai` 的实际复杂度：
-
-- 要处理 SDK client
-- 要处理 payload build
-- 要处理 onPayload / onResponse hook
-- 要处理 stream 事件转换
-- 要处理 usage / cost
-- 要处理 abort / error / partial results
-
-你读 provider 时，不要被具体字段淹没。先只抓主骨架：
-
-```text
-1. new AssistantMessageEventStream()
-2. 创建 provider client
-3. 构造 payload
-4. 发起流式请求
-5. 发 start 事件
-6. 把 provider 原生事件翻译成统一事件
-7. 成功 -> done
-8. 失败/中止 -> error
-9. end()
-```
-
-provider 文件之间虽然细节不同，但主骨架大体一致。
-
-所以阅读策略应该是：
-
-1. 精读 1 个代表 provider
-2. 横向扫 2~3 个其它 provider，只看差异点
-
-差异点通常集中在：
-
-- message 转换方式
-- tool call 编码方式
-- thinking 支持方式
-- 图片 / 多模态字段
-- usage / cache / pricing 计算
-
----
-
-## 6. 如果你要开发 `pi-ai`，最常改哪里
-
-### 场景 1：加一个新的 provider
-
-最推荐的切入路径：
-
-1. 看已有 provider 样板
-   - [`packages/ai/src/providers/openai-responses.ts`](../packages/ai/src/providers/openai-responses.ts)
-   - [`packages/ai/src/providers/anthropic.ts`](../packages/ai/src/providers/anthropic.ts)
-2. 在 `types.ts` 确认需要的 `Api` / `Model` / event 类型
-3. 写新 provider 文件
-4. 在 [`packages/ai/src/providers/register-builtins.ts`](../packages/ai/src/providers/register-builtins.ts) 注册
-5. 加测试
-
-实现时最关键的是保持这 3 个不变量：
-
-1. 对外必须返回 `AssistantMessageEventStream`
-2. 成功必须收敛成 `done`
-3. 失败和中止必须收敛成 `error`
-
-### 场景 2：改工具调用协议
-
-先看：
-
-- [`packages/ai/src/types.ts`](../packages/ai/src/types.ts)
-- [`packages/ai/src/providers/transform-messages.ts`](../packages/ai/src/providers/transform-messages.ts)
-- 各 provider 自己的 tool 处理逻辑
-
-这类改动最容易踩坑，因为 provider 之间 tool call 的表现差异很大。建议先确认改动影响的是：
-
-- 输入给模型的 tool schema
-- 模型返回的 tool call block
-- tool result 回灌格式
-
-三者中的哪一段
-
-### 场景 3：改 usage / cost / cache 行为
-
-先看：
-
-- 各 provider 文件里的 usage / pricing 代码
-- `models.generated.ts` 中的模型元信息
-- 相关测试，如 `openai-*cache*`、`total-tokens.test.ts`
-
-这部分经常是“看起来小，回归面很大”的区域。
-
----
-
-## 7. 再理解 `pi-agent-core`：它是 agent loop，不是完整产品
-
-### 7.1 `pi-agent-core` 的职责边界
+### 2.1 `pi-agent-core` 的职责边界
 
 `pi-agent-core` 负责：
 
@@ -488,7 +75,7 @@ provider 文件之间虽然细节不同，但主骨架大体一致。
 
 > 一个“会调用工具、会发事件、会维护状态”的通用 agent 引擎。
 
-### 7.2 `packages/agent` 内部怎么分层
+### 2.2 `packages/agent` 内部怎么分层
 
 阅读时可以先把目录分成 4 块：
 
@@ -515,7 +102,7 @@ provider 文件之间虽然细节不同，但主骨架大体一致。
 
 ---
 
-## 8. `pi-agent-core` 的最短调用链
+## 3. `pi-agent-core` 的最短调用链
 
 这一节只跟最核心的一条链：
 
@@ -524,7 +111,7 @@ const agent = new Agent(...)
 await agent.prompt("帮我做一件事")
 ```
 
-### 8.1 `Agent` 是高层有状态壳层
+### 3.1 `Agent` 是高层有状态壳层
 
 核心文件：
 
@@ -546,7 +133,7 @@ await agent.prompt("帮我做一件事")
 
 如果你想理解“为什么业务层更喜欢用 `Agent` 而不是直接调 loop”，那就必须看这个文件。
 
-### 8.2 真正的核心在 `agent-loop.ts`
+### 3.2 真正的核心在 `agent-loop.ts`
 
 核心文件：
 
@@ -565,7 +152,7 @@ await agent.prompt("帮我做一件事")
 - `executePreparedToolCall()`
 - `finalizeExecutedToolCall()`
 
-### 8.3 一轮最小调用链
+### 3.3 一轮最小调用链
 
 按执行顺序看，最短调用链是：
 
@@ -589,7 +176,7 @@ Agent.prompt()
 
 ---
 
-## 9. `runLoop()` 是真正的 agent 脑干
+## 4. `runLoop()` 是真正的 agent 脑干
 
 核心文件：
 
@@ -634,7 +221,7 @@ Agent.prompt()
 
 ---
 
-## 10. `streamAssistantResponse()` 是 `pi-agent-core` 和 `pi-ai` 的连接点
+## 5. `streamAssistantResponse()` 是 `pi-agent-core` 和 `pi-ai` 的连接点
 
 这是整个系统里最有代表性的桥接函数。
 
@@ -705,7 +292,7 @@ provider 流里出来的是：
 
 ---
 
-## 11. 工具执行链路怎么读
+## 6. 工具执行链路怎么读
 
 很多人读 agent 源码时最容易迷路的地方就是 tool call。
 
@@ -784,7 +371,7 @@ provider 流里出来的是：
 
 ---
 
-## 12. `Agent` 为什么还存在
+## 7. `Agent` 为什么还存在
 
 如果已经有 `runAgentLoop()`，为什么还需要 `Agent` 类？
 
@@ -838,7 +425,7 @@ provider 流里出来的是：
 
 ---
 
-## 13. `AgentHarness` 在整个体系里是什么位置
+## 8. `AgentHarness` 在整个体系里是什么位置
 
 如果你继续往 `packages/agent/src/harness` 读，会发现它又是一个更高层。
 
@@ -865,7 +452,7 @@ provider 流里出来的是：
 
 ---
 
-## 14. `coding-agent` 是怎么把 `pi-ai` 和 `pi-agent-core` 接起来的
+## 9. `coding-agent` 是怎么把 `pi-ai` 和 `pi-agent-core` 接起来的
 
 前面我们一直在看两个“库”：
 
@@ -882,7 +469,7 @@ provider 流里出来的是：
 
 > 用 `coding-agent` 自己的 **session / settings / extensions / tools / modes**，把 `pi-agent-core` 的 `Agent` 包起来，再把底层模型请求通过 `pi-ai` 的 `streamSimple()` 发出去，最后把事件交给 TUI 或 print/RPC 模式消费。
 
-### 14.1 先看一张接线图
+### 9.1 先看一张接线图
 
 ```text
 CLI main()
@@ -904,7 +491,7 @@ CLI main()
 - `pi-agent-core` 提供“agent loop”
 - `coding-agent` 提供“会话、产品能力、UI、扩展系统”
 
-### 14.2 入口：`main.ts` 只负责组装运行时
+### 9.2 入口：`main.ts` 只负责组装运行时
 
 建议先看：
 
@@ -930,7 +517,7 @@ CLI main()
 
 也就是说，`main.ts` 本身并不直接 new `Agent`，它把这件事委托给 SDK / runtime 层。
 
-### 14.3 真正的“接线点”在 `core/sdk.ts`
+### 9.3 真正的“接线点”在 `core/sdk.ts`
 
 如果你只允许自己精读一个 `coding-agent` 文件，我建议先读：
 
@@ -1017,7 +604,7 @@ const session = new AgentSession({
 
 这一步非常重要，因为从这里开始，`coding-agent` 就不再直接暴露裸 `Agent` 了，而是暴露一个更高层的“会话对象”。
 
-### 14.4 `AgentSession`：把 agent 变成真正可用的会话
+### 9.4 `AgentSession`：把 agent 变成真正可用的会话
 
 建议精读：
 
@@ -1117,7 +704,7 @@ InteractiveMode
 
 这条链就是 `coding-agent` 把两个底层库接起来的最核心路径。
 
-### 14.5 `AgentSessionRuntime`：让 session 可以被替换
+### 9.5 `AgentSessionRuntime`：让 session 可以被替换
 
 再往上还有一层：
 
@@ -1147,7 +734,7 @@ InteractiveMode
 
 这层和 `pi-agent-core` 没有直接算法耦合，但它是产品化必需的外壳。
 
-### 14.6 最后一层：模式层消费 `AgentSessionEvent`
+### 9.6 最后一层：模式层消费 `AgentSessionEvent`
 
 如果你想知道 UI 是怎么接上来的，看：
 
@@ -1186,7 +773,7 @@ this.unsubscribe = this.session.subscribe(async (event) => {
 - 会话与产品能力在 `AgentSession`
 - 渲染与交互在 mode / TUI
 
-### 14.7 把整条链再串一遍
+### 9.7 把整条链再串一遍
 
 现在可以把从 CLI 到模型，再回到 UI 的完整路径串起来了：
 
@@ -1218,7 +805,7 @@ main.ts
 
 如果你能把这张图在脑子里复述出来，说明你已经真正理解了 `coding-agent` 是怎么把 `pi-ai` 和 `pi-agent-core` 接起来的。
 
-### 14.8 开发时，应该从哪一层下手
+### 9.8 开发时，应该从哪一层下手
 
 如果你要改 `coding-agent` 对底层库的接法，建议按下面分工判断：
 
@@ -1259,205 +846,3 @@ main.ts
 先看：
 
 - [`packages/coding-agent/src/modes/interactive/interactive-mode.ts`](../packages/coding-agent/src/modes/interactive/interactive-mode.ts)
-
----
-
-## 15. 开发这两个模块时，建议怎么下手
-
-这一节不再讲“它是什么”，而是讲“你真的要改代码时怎么切入”。
-
-### 14.1 如果你要改 `pi-ai`
-
-先问自己改动属于哪类：
-
-1. 新 provider
-2. provider 行为兼容
-3. 统一事件协议
-4. 模型元信息
-5. auth / headers
-6. 工具调用 / thinking / image
-
-推荐路径：
-
-```text
-先改 provider 或 util
-  -> 再看是否要改 types.ts
-  -> 再看是否要改 stream.ts / registry
-  -> 最后补测试
-```
-
-不要反过来从入口乱改。
-
-### 14.2 如果你要改 `pi-agent-core`
-
-先问自己改动属于哪类：
-
-1. loop 节奏改动
-2. tool 执行改动
-3. hook 行为改动
-4. state / queue 改动
-5. harness 集成改动
-
-推荐路径：
-
-```text
-loop / tool / turn 相关
-  -> 先看 agent-loop.ts
-
-state / subscribe / abort 相关
-  -> 先看 agent.ts
-
-session / skill / template / compaction 相关
-  -> 再看 harness/
-```
-
-### 14.3 如果你只想“调通一个最小改动”
-
-最小有效阅读路径是：
-
-1. `pi-ai`
-   - `stream.ts`
-   - `event-stream.ts`
-   - 一个 provider
-2. `pi-agent-core`
-   - `agent-loop.ts`
-   - `agent.ts`
-
-很多改动其实根本不需要先读完整个 monorepo。
-
----
-
-## 16. 建议你这样配合阅读“源码 + 注释”
-
-因为核心文件里我已经补了较详细的中文注释，你现在最适合的阅读方式不是只盯着这篇文档，而是：
-
-### 路线 A：先读文档，再读核心源码
-
-顺序：
-
-1. 本文
-2. [pi-ai-streaming-architecture.md](./pi-ai-streaming-architecture.md)
-3. [`packages/ai/src/utils/event-stream.ts`](../packages/ai/src/utils/event-stream.ts)
-4. [`packages/ai/src/stream.ts`](../packages/ai/src/stream.ts)
-5. [`packages/ai/src/providers/openai-responses.ts`](../packages/ai/src/providers/openai-responses.ts)
-6. [`packages/agent/src/agent-loop.ts`](../packages/agent/src/agent-loop.ts)
-7. [`packages/agent/src/agent.ts`](../packages/agent/src/agent.ts)
-
-### 路线 B：跟一条调用链边读边跳
-
-顺序：
-
-1. `Agent.prompt()`
-2. `runPromptMessages()`
-3. `runWithLifecycle()`
-4. `runAgentLoop()`
-5. `runLoop()`
-6. `streamAssistantResponse()`
-7. `streamSimple()`
-8. `api-registry.ts`
-9. `register-builtins.ts`
-10. 某个 provider
-11. `EventStream`
-12. 再回到 `executeToolCalls()`
-
-这条路线最适合你已经大致知道 agent 是什么，但想真正跟一次控制流。
-
----
-
-## 17. 一个最重要的阅读心法
-
-读这个仓库时，最容易犯的错误是：
-
-> 看到 provider 很多、hooks 很多、tests 很多，就以为整个系统“非常分散”。
-
-其实它的骨架非常稳定。
-
-你只需要牢牢记住这两个中心句：
-
-### 对 `pi-ai`
-
-> `pi-ai` 的本质是：**把不同 provider 的请求/响应，统一翻译成同一种流式事件协议和同一种最终 `AssistantMessage`。**
-
-### 对 `pi-agent-core`
-
-> `pi-agent-core` 的本质是：**围绕一条 assistant 消息，执行“请求模型 -> 产出消息 -> 执行工具 -> 继续下一轮”的循环，并把过程全部事件化。**
-
-只要你抓住这两个中心句，再大的文件都不会完全失焦。
-
----
-
-## 18. 最后的源码索引
-
-如果你只保留一张清单，建议保留下面这张。
-
-### `pi-ai` 必看文件
-
-- 入口
-  - [`packages/ai/src/index.ts`](../packages/ai/src/index.ts)
-  - [`packages/ai/src/stream.ts`](../packages/ai/src/stream.ts)
-- 类型与模型
-  - [`packages/ai/src/types.ts`](../packages/ai/src/types.ts)
-  - [`packages/ai/src/models.ts`](../packages/ai/src/models.ts)
-- 核心运行时
-  - [`packages/ai/src/utils/event-stream.ts`](../packages/ai/src/utils/event-stream.ts)
-  - [`packages/ai/src/api-registry.ts`](../packages/ai/src/api-registry.ts)
-  - [`packages/ai/src/providers/register-builtins.ts`](../packages/ai/src/providers/register-builtins.ts)
-- 代表 provider
-  - [`packages/ai/src/providers/openai-responses.ts`](../packages/ai/src/providers/openai-responses.ts)
-  - [`packages/ai/src/providers/openai-completions.ts`](../packages/ai/src/providers/openai-completions.ts)
-  - [`packages/ai/src/providers/anthropic.ts`](../packages/ai/src/providers/anthropic.ts)
-
-### `pi-agent-core` 必看文件
-
-- 入口与核心类型
-  - [`packages/agent/src/index.ts`](../packages/agent/src/index.ts)
-  - [`packages/agent/src/types.ts`](../packages/agent/src/types.ts)
-- 主循环
-  - [`packages/agent/src/agent-loop.ts`](../packages/agent/src/agent-loop.ts)
-- 有状态封装
-  - [`packages/agent/src/agent.ts`](../packages/agent/src/agent.ts)
-- 高层集成
-  - [`packages/agent/src/harness/agent-harness.ts`](../packages/agent/src/harness/agent-harness.ts)
-
-### `coding-agent` 里“接线”相关必看文件
-
-- CLI 与 runtime 装配
-  - [`packages/coding-agent/src/main.ts`](../packages/coding-agent/src/main.ts)
-- 核心桥接
-  - [`packages/coding-agent/src/core/sdk.ts`](../packages/coding-agent/src/core/sdk.ts)
-- 会话壳层
-  - [`packages/coding-agent/src/core/agent-session.ts`](../packages/coding-agent/src/core/agent-session.ts)
-- session runtime
-  - [`packages/coding-agent/src/core/agent-session-runtime.ts`](../packages/coding-agent/src/core/agent-session-runtime.ts)
-- 交互模式
-  - [`packages/coding-agent/src/modes/interactive/interactive-mode.ts`](../packages/coding-agent/src/modes/interactive/interactive-mode.ts)
-
-### 测试入口
-
-- [`packages/ai/test/stream.test.ts`](../packages/ai/test/stream.test.ts)
-- [`packages/ai/test/abort.test.ts`](../packages/ai/test/abort.test.ts)
-- [`packages/agent/test/agent-loop.test.ts`](../packages/agent/test/agent-loop.test.ts)
-- [`packages/agent/test/agent.test.ts`](../packages/agent/test/agent.test.ts)
-
----
-
-## 19. 一句话总结
-
-如果你是从“开发者要改模块”的角度读这两个包，那么最正确的顺序不是：
-
-> 先把所有源码都扫一遍
-
-而是：
-
-> 先抓住边界，再跟一条真实调用链，然后只在你要改的那一层深挖。
-
-对这两个包来说，最值得先吃透的只有 6 个文件：
-
-- [`packages/ai/src/stream.ts`](../packages/ai/src/stream.ts)
-- [`packages/ai/src/utils/event-stream.ts`](../packages/ai/src/utils/event-stream.ts)
-- [`packages/ai/src/providers/openai-responses.ts`](../packages/ai/src/providers/openai-responses.ts)
-- [`packages/agent/src/agent-loop.ts`](../packages/agent/src/agent-loop.ts)
-- [`packages/agent/src/agent.ts`](../packages/agent/src/agent.ts)
-- [`packages/agent/src/harness/agent-harness.ts`](../packages/agent/src/harness/agent-harness.ts)
-
-先把这 6 个文件读明白，再去看剩余 provider 和 harness 子模块，你会轻松很多。

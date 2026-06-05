@@ -14,19 +14,46 @@ import type { AssistantMessage, AssistantMessageEvent } from "../types.ts";
  * - 消费者先开始等、数据还没到：把等待中的 `resolve` 存进 `waiting`
  */
 export class EventStream<T, R = T> implements AsyncIterable<T> {
+	// === 生产者-消费者缓冲区 ===
+	// 当生产者 `push()` 时，若没有消费者在等待，事件暂存于此。
+	// 消费者通过 `for await` 读取时，若队列非空则直接 shift 取出。
 	private queue: T[] = [];
+
+	// === 挂起中的消费者队列 ===
+	// 当消费者 `for await` 读取时，若队列为空且流未结束，
+	// 把该消费者的 `resolve` 回调存入此处，等待未来 `push()` 唤醒。
+	// 这是经典的"生产者-消费者"异步协调模式。
 	private waiting: ((value: IteratorResult<T>) => void)[] = [];
+
+	// === 流是否已关闭 ===
+	// `push()` 遇到终结事件或 `end()` 被调用时置为 true。
+	// 之后所有 `push()` 调用会被静默忽略，`for await` 循环会自然退出。
 	private done = false;
+
+	// === 最终结果 Promise ===
+	// 构造时预先创建，后续在 `push()` 或 `end()` 里手动 resolve。
+	// 调用方通过 `result()` 获取此 Promise，看起来像在等待一次异步请求完成，
+	// 实际上是等事件流结束后才兑现。
 	private finalResultPromise: Promise<R>;
+	// resolve 句柄，构造时从 Promise executor 中捕获。
+	// 使用 `!` 断言：TypeScript 不知道 Promise executor 是同步执行的，
+	// 但运行时保证构造函数返回前 resolveFinalResult 一定已被赋值。
 	private resolveFinalResult!: (result: R) => void;
+
+	// === 终结条件与结果提取策略 ===
+	// 由子类或调用方在构造时注入，实现"同一流类，不同终结逻辑"的复用。
+	// 例如 AssistantMessageEventStream 传入：
+	//   isComplete:   (event) => event.type === "done" || event.type === "error"
+	//   extractResult: (event) => event.type === "done" ? event.message : event.error
 	private isComplete: (event: T) => boolean;
 	private extractResult: (event: T) => R;
 
 	constructor(isComplete: (event: T) => boolean, extractResult: (event: T) => R) {
 		this.isComplete = isComplete;
 		this.extractResult = extractResult;
-		// 这里预先创建“最终结果 Promise”，后续在 `push()` / `end()` 里手动 resolve。
-		// 调用者看起来像是在等待一次异步请求完成，内部其实是事件流结束后才兑现结果。
+		// Promise executor 是同步执行的：new Promise((resolve) => { ... }) 里的回调
+		// 会在 Promise 构造期间立即执行，因此 this.resolveFinalResult 在构造函数
+		// 返回前一定会被赋值。`!` 非空断言正是对这个运行时保证的类型层面声明。
 		this.finalResultPromise = new Promise((resolve) => {
 			this.resolveFinalResult = resolve;
 		});

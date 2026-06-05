@@ -3,16 +3,6 @@
     <img alt="pi logo" src="https://pi.dev/logo-auto.svg" width="128">
   </a>
 </p>
-<p align="center">
-  <a href="https://discord.com/invite/3cU7Bz4UPx"><img alt="Discord" src="https://img.shields.io/badge/discord-community-5865F2?style=flat-square&logo=discord&logoColor=white" /></a>
-</p>
-<p align="center">
-  <a href="https://pi.dev">pi.dev</a> domain graciously donated by
-  <br /><br />
-  <a href="https://exe.dev"><img src="packages/coding-agent/docs/images/exy.png" alt="Exy mascot" width="48" /><br />exe.dev</a>
-</p>
-
-> New issues and PRs from new contributors are auto-closed by default. Maintainers review auto-closed issues daily. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ---
 
@@ -53,12 +43,6 @@ I regularly publish my own `pi-mono` work sessions here:
 | **[@earendil-works/pi-agent-core](packages/agent)** | Agent runtime with tool calling and state management |
 | **[@earendil-works/pi-coding-agent](packages/coding-agent)** | Interactive coding agent CLI |
 | **[@earendil-works/pi-tui](packages/tui)** | Terminal UI library with differential rendering |
-
-For Slack/chat automation and workflows see [earendil-works/pi-chat](https://github.com/earendil-works/pi-chat).
-
-## Contributing
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution guidelines and [AGENTS.md](AGENTS.md) for project-specific rules (for both humans and agents).
 
 ## Development
 

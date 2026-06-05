@@ -1,6 +1,42 @@
 /**
  * Agent loop that works with AgentMessage throughout.
  * Transforms to Message[] only at the LLM call boundary.
+ *
+ * === 文件总体调用链 ===
+ *
+ * 外部调用入口（公开导出）：
+ *   Agent.prompt()            -> agentLoop()
+ *   Agent.continue()          -> agentLoopContinue()
+ *   AgentHarness.executeTurn() -> agentLoop()
+ *
+ * agentLoop()                -> runAgentLoop()        -> runLoop()
+ * agentLoopContinue()        -> runAgentLoopContinue() -> runLoop()
+ *
+ * runLoop() 内部循环：
+ *   runLoop()
+ *     ├── config.getSteeringMessages()     // 轮询用户中途插话
+ *     ├── streamAssistantResponse()        // 请求一轮模型回复
+ *     │     ├── config.transformContext()   // 高层消息变换（摘要、裁剪）
+ *     │     ├── config.convertToLlm()      // AgentMessage -> LLM Message 边界转换
+ *     │     └── streamFn() / streamSimple()// 调用 pi-ai 的流式 API
+ *     ├── executeToolCalls()               // 工具分发器
+ *     │     ├── executeToolCallsSequential()  // 串行路径
+ *     │     └── executeToolCallsParallel()    // 并行路径
+ *     │       （两者内部共享）:
+ *     │         ├── prepareToolCall()
+ *     │         │     ├── prepareToolCallArguments()
+ *     │         │     ├── validateToolArguments()
+ *     │         │     └── config.beforeToolCall()
+ *     │         ├── executePreparedToolCall()
+ *     │         │     └── tool.execute()
+ *     │         ├── finalizeExecutedToolCall()
+ *     │         │     └── config.afterToolCall()
+ *     │         ├── emitToolExecutionEnd()
+ *     │         ├── createToolResultMessage()
+ *     │         └── emitToolResultMessage()
+ *     ├── config.prepareNextTurn()        // 轮结束后的统一改写钩子
+ *     ├── config.shouldStopAfterTurn()    // 停机判断
+ *     └── config.getFollowUpMessages()    // follow-up 检查
  */
 
 import {
@@ -22,6 +58,7 @@ import type {
 	StreamFn,
 } from "./types.ts";
 
+/** Agent 事件接收器类型：异步或同步回调，用于接收 agent 生命周期中的所有事件。 */
 export type AgentEventSink = (event: AgentEvent) => Promise<void> | void;
 
 /**
@@ -35,6 +72,12 @@ export type AgentEventSink = (event: AgentEvent) => Promise<void> | void;
  * 我调用谁：
  * - `runAgentLoop()` 负责真正执行循环
  * - `createAgentStream()` 把回调式 emit 包装成可遍历事件流
+ *
+ * 内部步骤：
+ * 1. 创建 `EventStream` 供 UI/外层编排消费
+ * 2. 异步启动 `runAgentLoop()`，每次 emit 事件推入 stream
+ * 3. 循环结束后调用 `stream.end()` 传递最终消息列表
+ * 4. 立即返回 stream（调用方可提前订阅）
  */
 export function agentLoop(
 	prompts: AgentMessage[],
@@ -72,6 +115,17 @@ export function agentLoop(
  * 谁调用我：
  * - 直接使用低层流式 API 的应用
  * - 高层 `Agent.continue()` 更常调用 `runAgentLoopContinue()`
+ *
+ * 我调用谁：
+ * - `runAgentLoopContinue()` 负责真正执行循环
+ * - `createAgentStream()` 把回调式 emit 包装成可遍历事件流
+ *
+ * 内部步骤：
+ * 1. 前置校验：context 非空，且最后一条不是 assistant 消息
+ * 2. 创建 `EventStream` 供 UI/外层编排消费
+ * 3. 异步启动 `runAgentLoopContinue()`，不往 context 追加新消息
+ * 4. 循环结束后调用 `stream.end()` 传递最终消息列表
+ * 5. 立即返回 stream
  */
 export function agentLoopContinue(
 	context: AgentContext,
@@ -104,6 +158,24 @@ export function agentLoopContinue(
 	return stream;
 }
 
+/**
+ * runAgentLoop 的真正实现：把新 prompt 消息加入 context，然后启动主循环。
+ *
+ * 谁调用我：
+ * - `agentLoop()` 通过 EventStream 间接调用
+ *
+ * 我调用谁：
+ * - `emit()` 发射 agent_start / turn_start / message_start / message_end 事件
+ * - `runLoop()` 执行真正的 agent 循环
+ *
+ * 内部步骤：
+ * 1. 将 prompts 拷贝到 newMessages，同时追加到 context.messages
+ * 2. 发射 `agent_start` 事件标记整个 agent 运行开始
+ * 3. 发射 `turn_start` 事件标记第一轮开始
+ * 4. 为每条 prompt 消息发射 message_start/message_end 事件
+ * 5. 调用 `runLoop()` 进入主循环
+ * 6. 返回本次 run 产生的所有新消息
+ */
 export async function runAgentLoop(
 	prompts: AgentMessage[],
 	context: AgentContext,
@@ -129,6 +201,23 @@ export async function runAgentLoop(
 	return newMessages;
 }
 
+/**
+ * runAgentLoopContinue 的真正实现：从当前 context 继续，不添加新消息。
+ *
+ * 谁调用我：
+ * - `agentLoopContinue()` 通过 EventStream 间接调用
+ *
+ * 我调用谁：
+ * - `emit()` 发射 agent_start / turn_start 事件
+ * - `runLoop()` 执行真正的 agent 循环
+ *
+ * 内部步骤：
+ * 1. 前置校验：context 非空且最后一条不是 assistant 消息
+ * 2. newMessages 初始化为空数组（本次不产生新的 prompt 消息）
+ * 3. 发射 `agent_start` / `turn_start` 事件
+ * 4. 调用 `runLoop()` 进入主循环
+ * 5. 返回本次 run 产生的所有新消息（仅 assistant 回复和 tool 结果）
+ */
 export async function runAgentLoopContinue(
 	context: AgentContext,
 	config: AgentLoopConfig,
@@ -446,6 +535,17 @@ async function executeToolCalls(
 	return executeToolCallsParallel(currentContext, assistantMessage, toolCalls, config, signal, emit);
 }
 
+/**
+ * 工具调用的执行结果汇总类型。
+ *
+ * 谁使用我：
+ * - `executeToolCallsSequential()` / `executeToolCallsParallel()` 返回此类型
+ * - `runLoop()` 消费 `messages` 和 `terminate` 字段
+ *
+ * 字段说明：
+ * - `messages`: 本批工具产生的 `ToolResultMessage[]`，会追加到 context 和 newMessages
+ * - `terminate`: 若为 true，表示本批所有工具都要求终止，不再继续执行后续工具轮次
+ */
 type ExecutedToolCallBatch = {
 	messages: ToolResultMessage[];
 	terminate: boolean;
@@ -597,6 +697,18 @@ async function executeToolCallsParallel(
 	};
 }
 
+/**
+ * prepareToolCall 的成功返回类型：工具已找到、参数已校验、before hook 已通过。
+ *
+ * 谁产生我：`prepareToolCall()` 在所有检查通过后返回
+ * 谁消费我：`executePreparedToolCall()` 和 `finalizeExecutedToolCall()` 接收此类型
+ *
+ * 字段说明：
+ * - `kind`: 标记为 "prepared"，与 ImmediateToolCallOutcome 做区分
+ * - `toolCall`: 原始工具调用请求
+ * - `tool`: 在 context 中找到的工具定义
+ * - `args`: 经过 prepareArguments + validate 后的最终参数
+ */
 type PreparedToolCall = {
 	kind: "prepared";
 	toolCall: AgentToolCall;
@@ -604,29 +716,103 @@ type PreparedToolCall = {
 	args: unknown;
 };
 
+/**
+ * prepareToolCall 的"短路"返回类型：不需要真正执行工具。
+ *
+ * 触发场景：
+ * - 工具未找到（tool === undefined）
+ * - 参数校验失败（validateToolArguments 抛错）
+ * - beforeToolCall hook 返回 block=true
+ * - AbortSignal 已触发
+ *
+ * 谁产生我：`prepareToolCall()` 在各种错误/阻断路径中返回
+ * 谁消费我：串行/并行路径直接将其转为 `FinalizedToolCallOutcome`
+ */
 type ImmediateToolCallOutcome = {
 	kind: "immediate";
 	result: AgentToolResult<any>;
 	isError: boolean;
 };
 
+/**
+ * 工具真正执行后的结果类型（execute 阶段产出）。
+ *
+ * 谁产生我：`executePreparedToolCall()` 在 tool.execute() 完成后返回
+ * 谁消费我：`finalizeExecutedToolCall()` 接收此类型，再经过 afterToolCall hook 得到最终结果
+ *
+ * 与 FinalizedToolCallOutcome 的区别：
+ * - 此类型不含 toolCall 字段（执行阶段不关心原始请求）
+ * - FinalizedToolCallOutcome 是最终版本，包含 toolCall 且经过 afterToolCall 改写
+ */
 type ExecutedToolCallOutcome = {
 	result: AgentToolResult<any>;
 	isError: boolean;
 };
 
+/**
+ * 工具执行的最终结果类型：包含原始 toolCall 引用，可用于构造 ToolResultMessage。
+ *
+ * 谁产生我：
+ * - `finalizeExecutedToolCall()` 从 ExecutedToolCallOutcome 转换而来
+ * - 串行/并行路径中 immediate 分支直接构造
+ *
+ * 谁消费我：
+ * - `emitToolExecutionEnd()` 发射 tool_execution_end 事件
+ * - `createToolResultMessage()` 构造标准 ToolResultMessage
+ * - `shouldTerminateToolBatch()` 判断是否终止本轮工具批次
+ */
 type FinalizedToolCallOutcome = {
 	toolCall: AgentToolCall;
 	result: AgentToolResult<any>;
 	isError: boolean;
 };
 
+/**
+ * 并行执行路径的中间类型：可以是已完成的结果，也可以是尚未执行的 thunk。
+ *
+ * 为什么需要这个类型：
+ * - `executeToolCallsParallel()` 在 prepare 阶段按顺序处理每个 toolCall
+ * - immediate 结果直接存为 FinalizedToolCallOutcome
+ * - 需要真正执行的工具存为 async thunk，稍后通过 `Promise.all` 并发执行
+ * - 最终通过 `typeof === "function"` 区分两者
+ *
+ * 谁产生我：`executeToolCallsParallel()` 的 prepare 循环
+ * 谁消费我：`executeToolCallsParallel()` 内部的 `Promise.all` 展开
+ */
 type FinalizedToolCallEntry = FinalizedToolCallOutcome | (() => Promise<FinalizedToolCallOutcome>);
 
+/**
+ * 判断本批工具调用是否全部要求终止对话。
+ *
+ * 谁调用我：
+ * - `executeToolCallsSequential()`
+ * - `executeToolCallsParallel()`
+ *
+ * 逻辑：
+ * - 空批次（无 finalized 调用）返回 false，不影响后续流程
+ * - 非空批次中，只有当每一个工具的 result.terminate 都为 true 时才返回 true
+ * - 任一工具未设置 terminate，则本批不终止，内层循环继续下一轮 assistant 请求
+ */
 function shouldTerminateToolBatch(finalizedCalls: FinalizedToolCallOutcome[]): boolean {
 	return finalizedCalls.length > 0 && finalizedCalls.every((finalized) => finalized.result.terminate === true);
 }
 
+/**
+ * 工具参数预处理：调用工具自定义的 prepareArguments 钩子。
+ *
+ * 谁调用我：
+ * - `prepareToolCall()` 在查找工具定义之后、校验参数之前调用
+ *
+ * 我调用谁：
+ * - `tool.prepareArguments()`（如果工具定义了此方法）
+ *
+ * 逻辑：
+ * 1. 若工具未定义 prepareArguments，直接返回原始 toolCall
+ * 2. 调用 prepareArguments，若返回值与原参数引用相同，也直接返回
+ * 3. 否则构造新的 toolCall 对象，替换 arguments 字段
+ *
+ * 典型用途：工具可以用此钩子做参数归一化、默认值填充、敏感字段脱敏等轻量变换。
+ */
 function prepareToolCallArguments(tool: AgentTool<any>, toolCall: AgentToolCall): AgentToolCall {
 	if (!tool.prepareArguments) {
 		return toolCall;
@@ -817,7 +1003,16 @@ async function finalizeExecutedToolCall(
 	};
 }
 
-/** 统一构造错误工具结果，避免每条错误路径重复拼装内容。 */
+/**
+ * 统一构造错误工具结果，避免每条错误路径重复拼装内容。
+ *
+ * 谁调用我：
+ * - `prepareToolCall()` 在工具未找到、参数校验失败、before hook 阻断、abort 等场景
+ * - `executePreparedToolCall()` 在 tool.execute() 抛错时
+ * - `finalizeExecutedToolCall()` 在 afterToolCall hook 抛错时
+ *
+ * 输出格式：固定为 `{ type: "text", text: message }` 的 content 数组，details 为空对象。
+ */
 function createErrorToolResult(message: string): AgentToolResult<any> {
 	return {
 		content: [{ type: "text", text: message }],
@@ -825,7 +1020,16 @@ function createErrorToolResult(message: string): AgentToolResult<any> {
 	};
 }
 
-/** 事件发射和消息落盘拆开处理，便于并行/串行路径复用。 */
+/**
+ * 发射 tool_execution_end 事件，标记单个工具执行完成。
+ *
+ * 谁调用我：
+ * - `executeToolCallsSequential()` 在每个工具执行完毕后
+ * - `executeToolCallsParallel()` 在每个工具执行完毕后（含 immediate 和 thunk 展开后）
+ *
+ * 事件包含：toolCallId、toolName、result、isError。
+ * 与 emitToolResultMessage 分开处理：前者是运行时事件（UI 监听），后者是 transcript 消息（prompt 可见）。
+ */
 async function emitToolExecutionEnd(finalized: FinalizedToolCallOutcome, emit: AgentEventSink): Promise<void> {
 	await emit({
 		type: "tool_execution_end",
@@ -836,7 +1040,25 @@ async function emitToolExecutionEnd(finalized: FinalizedToolCallOutcome, emit: A
 	});
 }
 
-/** 把最终工具执行结果封装成标准 `toolResult` transcript 消息。 */
+/**
+ * 把最终工具执行结果封装成标准 `toolResult` transcript 消息。
+ *
+ * 谁调用我：
+ * - `executeToolCallsSequential()` 在每个工具的 finalized 结果产出后
+ * - `executeToolCallsParallel()` 在 Promise.all 展开后按序调用
+ *
+ * 我调用谁：无（纯数据转换）
+ *
+ * 产出的 ToolResultMessage 会被追加到：
+ * - context.messages（供下一轮 assistant 看到工具返回）
+ * - newMessages（供外层获取本次 run 的完整消息列表）
+ *
+ * 字段映射：
+ * - role: 固定为 "toolResult"
+ * - toolCallId/toolName: 来自 finalized.toolCall
+ * - content/details/isError: 来自 finalized.result
+ * - timestamp: 当前时间戳，用于排序和调试
+ */
 function createToolResultMessage(finalized: FinalizedToolCallOutcome): ToolResultMessage {
 	return {
 		role: "toolResult",
@@ -849,7 +1071,19 @@ function createToolResultMessage(finalized: FinalizedToolCallOutcome): ToolResul
 	};
 }
 
-/** `toolResult` 也是消息，因此沿用 message_start/message_end 事件对。 */
+/**
+ * 为 toolResult 消息发射 message_start/message_end 事件对。
+ *
+ * 谁调用我：
+ * - `executeToolCallsSequential()` 在 createToolResultMessage 之后
+ * - `executeToolCallsParallel()` 在 createToolResultMessage 之后
+ *
+ * 我调用谁：`emit()` 发射两个事件
+ *
+ * 为什么 toolResult 也用 message_start/message_end：
+ * - toolResult 也是 transcript 的一部分，和 assistant/user 消息一样需要被 UI 感知
+ * - 统一使用 message_start/message_end 事件对，便于 UI 层用同一套逻辑渲染所有消息类型
+ */
 async function emitToolResultMessage(toolResultMessage: ToolResultMessage, emit: AgentEventSink): Promise<void> {
 	await emit({ type: "message_start", message: toolResultMessage });
 	await emit({ type: "message_end", message: toolResultMessage });

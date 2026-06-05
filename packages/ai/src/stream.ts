@@ -2,8 +2,7 @@
  * 先导入内置 provider 注册逻辑。
  *
  * 这行 import 的目的不是为了直接使用某个导出，而是触发模块副作用：
- * - `register-builtins.ts` 在加载时会把 OpenAI / Anthropic
- *   provider 注册到全局注册表
+ * - `register-builtins.ts` 在加载时会把 OpenAI / Anthropic provider 注册到全局注册表
  * - 这样后面的 `getApiProvider(model.api)` 才能取到对应实现
  *
  * 如果没有这行，`stream()` 虽然语法上能工作，但运行时会因为注册表为空而找不到 provider。
