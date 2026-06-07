@@ -1,25 +1,22 @@
 /**
- * Removes unpaired Unicode surrogate characters from a string.
+ * Unicode 代理对清理工具模块。
  *
- * Unpaired surrogates (high surrogates 0xD800-0xDBFF without matching low surrogates 0xDC00-0xDFFF,
- * or vice versa) cause JSON serialization errors in many API providers.
+ * 文件定位：
+ * - 提供清理字符串中非法 Unicode 代理字符的功能
+ * - 未配对的代理字符（surrogate）会导致 JSON 序列化错误或 API 拒绝请求
+ * - 正常的 emoji 和 BMP 以外的字符使用配对代理，不受影响
  *
- * Valid emoji and other characters outside the Basic Multilingual Plane use properly paired
- * surrogates and will NOT be affected by this function.
+ * 谁调用我：
+ * - providers/openai-completions.ts：convertMessages() 中清理所有发送给 OpenAI 的文本
+ * - providers/anthropic.ts：convertMessages() 中清理所有发送给 Anthropic 的文本
+ * - providers/openai-responses-shared.ts：convertResponsesMessages() 中清理文本
+ * - providers/images/openrouter.ts：buildParams() 中清理发送给 OpenRouter 的文本
  *
- * @param text - The text to sanitize
- * @returns The sanitized text with unpaired surrogates removed
- *
- * @example
- * // Valid emoji (properly paired surrogates) are preserved
- * sanitizeSurrogates("Hello 🙈 World") // => "Hello 🙈 World"
- *
- * // Unpaired high surrogate is removed
- * const unpaired = String.fromCharCode(0xD83D); // high surrogate without low
- * sanitizeSurrogates(`Text ${unpaired} here`) // => "Text  here"
+ * 调用链路：
+ *   各 provider 的 convertMessages()
+ *     -> sanitizeSurrogates(text)  在发送前清理文本中的非法代理字符
  */
+
 export function sanitizeSurrogates(text: string): string {
-	// Replace unpaired high surrogates (0xD800-0xDBFF not followed by low surrogate)
-	// Replace unpaired low surrogates (0xDC00-0xDFFF not preceded by high surrogate)
 	return text.replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, "");
 }

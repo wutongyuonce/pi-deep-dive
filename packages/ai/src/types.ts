@@ -45,10 +45,6 @@ import type { AssistantMessageEventStream } from "./utils/event-stream.ts";
 /**
  * 内置文本 provider 的 API 协议名。
  * 这些值对应注册表里的 key，也对应 `model.api` 字段。
- *
- * 一个 Provider 可以暴露多个 API 协议，例如：
- * - provider "openai" 有 "openai-completions" 和 "openai-responses" 两种
- * - provider "anthropic" 只有 "anthropic-messages" 一种
  */
 export type KnownApi = "openai-completions" | "openai-responses" | "anthropic-messages";
 
@@ -68,15 +64,7 @@ export type ImagesApi = KnownImagesApi | (string & {});
 // 1.2 Provider 服务商标识
 // ---------------------------------------------------------------------------
 
-/**
- * Provider 表示服务提供商（公司），而不是具体 API 协议。
- *
- * 例如：
- * - provider: "openai"   ->  api: "openai-completions" / "openai-responses"
- * - provider: "anthropic" ->  api: "anthropic-messages"
- *
- * 二者不是一个概念：一个 provider 可能暴露多个 API 形式。
- */
+/** Provider 表示服务提供商（公司），而不是具体 API 协议。 */
 export type KnownProvider = "anthropic" | "openai";
 export type Provider = KnownProvider | string;
 
@@ -568,8 +556,7 @@ export type AssistantMessageEvent =
 // 第 4 组：OpenAI / Anthropic 兼容层配置
 // ============================================================================
 //
-// 不同 provider 的 API 存在细微差异。这些 Compat 接口允许调用方覆盖
-// 基于 URL 的自动检测，为自定义 provider 指定兼容行为。
+// 不同 provider 的 API 存在细微差异。这些 Compat 接口允许调用方覆盖基于 URL 的自动检测，为自定义 provider 指定兼容行为。
 //
 // 使用场景：
 // - 自建 OpenAI 兼容 API（如 vLLM、Ollama）

@@ -1,3 +1,98 @@
+### Minimal agent scaffold 最小代理支架
+
+pi-ai 提供了一个[代理循环](https://github.com/badlogic/pi-mono/blob/main/packages/ai/src/agent/agent-loop.ts)来处理完整的流程编排：处理用户消息、执行工具调用、将结果反馈给 LLM，并重复此过程，直到模型无需工具调用即可生成响应。该循环还支持通过回调进行消息排队：每次循环结束后，它会请求队列中的消息，并在下一次助手响应之前注入这些消息。该循环会为所有操作发出事件，从而可以轻松构建响应式 UI。
+
+代理循环不允许您指定最大步数或类似其他统一 LLM API 中常见的参数。我从未发现过需要这些参数的场景，所以为什么要添加它们呢？循环会一直运行，直到代理发出完成指令。不过，除了循环之外， [pi-agent-core](https://github.com/badlogic/pi-mono/tree/main/packages/agent)还提供了一个 `Agent` 类，其中包含一些真正有用的功能：状态管理、简化的事件订阅、两种模式（一次一条或全部同时）的消息队列、附件处理（图像、文档）以及传输抽象，允许您直接运行代理或通过代理运行代理。
+
+
+
+### pi-ai 是纯粹的"模型通信层"，工具的生命周期管理在 agent 层。
+
+```
+agent 层：注册工具 -> 构建 Context（含 tools 
+定义）-> 调用 pi-ai 的 stream()
+pi-ai 层：把 tools 转成 API 格式 -> 发请求 
+-> 流式解析出 ToolCall -> 返回给 agent
+agent 层：收到 ToolCall -> 执行工具 -> 构造 
+ToolResultMessage -> 塞回 Context -> 再调 
+pi-ai
+pi-ai 层：把 ToolResultMessage 转成 API 格
+式 -> 发下一轮请求...
+```
+pi-ai 内部用的 `Tool` 类型是这样的：
+
+```typescript
+// pi-ai 的统一格式
+{
+  name: "read_file",
+  description: "读取文件内容",
+  parameters: { type: "object", properties: { path: { type: "string" } }, required: ["path"] }
+}
+```
+
+发给 OpenAI API 时，需要转成 OpenAI 要求的格式：
+
+```json
+{
+  "type": "function",
+  "function": {
+    "name": "read_file",
+    "description": "读取文件内容",
+    "parameters": { ... },
+    "strict": false
+  }
+}
+```
+
+发给 Anthropic API 时，又是另一种格式：
+
+```json
+{
+  "name": "read_file",
+  "description": "读取文件内容",
+  "input_schema": { ... }
+}
+```
+
+"转成 API 格式"就是 `convertTools()` 做的事——把同一套 `Tool` 定义，适配成不同 provider 各自要求的结构。这样 agent 层只需要定义一次工具，不用关心底层用的是 OpenAI 还是 Anthropic。
+
+
+
+### 完整的工具调用流程是两轮对话
+
+第一轮：模型请求调用工具
+
+pi-ai 的 provider（如 openai-completions.ts）通过流式 chunk 拼接出这个 tool_calls 数组，连同 id: "call_abc123" 一起放进 AssistantMessage 返回给 agent 层。
+
+agent 层执行工具
+
+```
+agent 收到 AssistantMessage
+  → 发现 content 里有 ToolCall（name: 
+  "read_file", arguments: {path: "/tmp/a.
+  txt"}）
+  → 调用实际的 read_file 函数，拿到结果 
+  "hello world"
+  → 构造 ToolResultMessage: { toolCallId: 
+  "call_abc123", content: "hello world" }
+```
+第二轮：把结果回灌给 API
+
+```
+你的应用 → API: [
+  { role: "user", content: "请帮我读取 /
+  tmp/a.txt" },
+  { role: "assistant", tool_calls: [{ id: 
+  "call_abc123", ... }] },
+  { role: "tool", tool_call_id: 
+  "call_abc123", content: "hello world" },
+  //                     
+  ^^^^^^^^^^^^^^^^^^^^  就是靠这个 id 关联的
+]
+API → 你的应用: "文件内容是 hello world"
+```
+pi-ai 在这个流程中的角色 ：只负责把 ToolCall （含 id）从流式 chunk 里拼出来返回，以及把 ToolResultMessage（含 tool_call_id）转成 API 格式发回去。执行工具和构造 ToolResultMessage 是 agent 层的事。
+
 # [pi-agent-core](https://github.com/badlogic/pi-mono/tree/main/packages/agent)
 
 整个 pi monorepo 的 **agent 引擎层**。
@@ -237,6 +332,13 @@ agent_start
 agent_end
 ```
 
+核心区别：
+
+- AssistantMessageEvent：pi-ai 产出，只覆盖"一条消息的流式拼接"（text/thinking/toolcall 的 start/delta/end）
+- AgentEvent：pi-agent 产出，覆盖"整个 agent 运行周期"（agent/turn/message/tool 四层生命周期），其中 message_update 事件里会透传 assistantMessageEvent 作为嵌套字段
+
+所以 AgentEvent 是 AssistantMessageEvent 的超集包装：它把单条消息的流式事件包进更大的 agent 生命周期里，同时增加了工具执行、轮次管理、agent 启停等 pi-ai 不关心的事件。
+
 ### 3. AgentTool — 工具定义
 
 ```typescript
@@ -327,7 +429,7 @@ flowchart TB
     PollSteering -->|无消息| StreamLLM
     Inject --> StreamLLM[streamAssistantResponse\n调用 LLM]
     
-    StreamLLM --> CheckError{stopReason\nerror/aborted?}
+    StreamLLM --> CheckError{stopReason\n error/aborted?}
     CheckError -->|是| EmitEnd([emit agent_end\n退出])
     
     CheckError -->|否| CheckToolCalls{assistant 消息\n含 toolCall?}
@@ -400,9 +502,8 @@ async function streamAssistantResponse(
 
 **为什么 `transformContext` 和 `convertToLlm` 要分开？**
 
-`transformContext` 操作的是 `AgentMessage[]`，它知道所有自定义消息类型。典型用途是 context window 管理。
-
-`convertToLlm` 操作的是 `AgentMessage[] -> Message[]` 的转换。它过滤掉 LLM 不认识的消息类型。
+* `transformContext` 操作的是 `AgentMessage[]`，它知道所有自定义消息类型。典型用途是 context window 管理。
+* `convertToLlm` 操作的是 `AgentMessage[] -> Message[]` 的转换。它过滤掉 LLM 不认识的消息类型。
 
 如果合成一步，`transformContext` 就必须同时理解 AgentMessage 语义和 LLM 消息格式——关注点耦合了。
 
