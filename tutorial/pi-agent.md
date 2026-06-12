@@ -1,8 +1,4 @@
-### Minimal agent scaffold 最小代理支架
 
-pi-ai 提供了一个[代理循环](https://github.com/badlogic/pi-mono/blob/main/packages/ai/src/agent/agent-loop.ts)来处理完整的流程编排：处理用户消息、执行工具调用、将结果反馈给 LLM，并重复此过程，直到模型无需工具调用即可生成响应。该循环还支持通过回调进行消息排队：每次循环结束后，它会请求队列中的消息，并在下一次助手响应之前注入这些消息。该循环会为所有操作发出事件，从而可以轻松构建响应式 UI。
-
-代理循环不允许您指定最大步数或类似其他统一 LLM API 中常见的参数。我从未发现过需要这些参数的场景，所以为什么要添加它们呢？循环会一直运行，直到代理发出完成指令。不过，除了循环之外， [pi-agent-core](https://github.com/badlogic/pi-mono/tree/main/packages/agent)还提供了一个 `Agent` 类，其中包含一些真正有用的功能：状态管理、简化的事件订阅、两种模式（一次一条或全部同时）的消息队列、附件处理（图像、文档）以及传输抽象，允许您直接运行代理或通过代理运行代理。
 
 
 
@@ -93,11 +89,187 @@ API → 你的应用: "文件内容是 hello world"
 ```
 pi-ai 在这个流程中的角色 ：只负责把 ToolCall （含 id）从流式 chunk 里拼出来返回，以及把 ToolResultMessage（含 tool_call_id）转成 API 格式发回去。执行工具和构造 ToolResultMessage 是 agent 层的事。
 
-# [pi-agent-core](https://github.com/badlogic/pi-mono/tree/main/packages/agent)
+# pi-agent 到 pi-ai 的总流程图
+
+```mermaid
+flowchart TD
+    A[应用 / coding-agent / Agent] --> B[pi-agent: Agent.prompt / agentLoop / runAgentLoop]
+    B --> C[AgentContext]
+    B --> D[AgentLoopConfig]
+    D --> D1["extends SimpleStreamOptions"]
+    D --> D2["Agent 专属字段:
+    model
+    convertToLlm
+    transformContext
+    getApiKey
+    prepareNextTurn
+    shouldStopAfterTurn
+    getSteeringMessages
+    getFollowUpMessages
+    toolExecution
+    beforeToolCall
+    afterToolCall"]
+
+    C --> E[streamAssistantResponse]
+    E --> F["transformContext(messages)"]
+    F --> G["convertToLlm(AgentMessage[]) -> Message[]"]
+    G --> H["构造 pi-ai Context
+    { systemPrompt, messages, tools }"]
+    D1 --> I["pi-ai SimpleStreamOptions
+    reasoning
+    thinkingBudgets
+    + StreamOptions"]
+    E --> J["streamFn(model, Context, options)
+    默认 = streamSimple"]
+
+    H --> J
+    I --> J
+
+    J --> K[pi-ai streamSimple]
+    K --> L[resolveApiProvider]
+    L --> M[provider.streamSimple]
+
+    M --> N["provider 内部逐步构造 partial AssistantMessage"]
+    N --> O["AssistantMessageEventStream
+    EventStream<AssistantMessageEvent, AssistantMessage>"]
+    O --> P["AssistantMessageEvent:
+    start
+    text_*
+    thinking_*
+    toolcall_*
+    done / error"]
+
+    P --> Q["pi-agent 翻译为 AgentEvent:
+    message_start
+    message_update
+    message_end"]
+    Q --> R[runLoop]
+
+    R --> S{"final AssistantMessage
+    是否包含 toolCall?"}
+    S -- 否 --> T[turn_end / shouldStopAfterTurn / follow-up]
+    S -- 是 --> U[executeToolCalls]
+    U --> V["AgentTool.execute ->
+    AgentToolResult"]
+    V --> W["create ToolResultMessage"]
+    W --> X["追加到 currentContext.messages / newMessages"]
+    X --> T
+
+    T --> Y[agent_end]
+```
+
+
+
+```mermaid
+flowchart TD
+    A[调用方: Agent.prompt / agentLoop / runAgentLoop] --> B["pi-agent 输入:
+    prompts: AgentMessage[]
+    context: AgentContext
+    config: AgentLoopConfig"]
+
+    B --> C["runAgentLoop()"]
+    C --> C1["newMessages = [...prompts]"]
+    C --> C2["currentContext = {
+      ...context,
+      messages: [...context.messages, ...prompts]
+    }"]
+    C --> C3["【emit AgentEvent】
+    emit(agent_start) 
+    emit(turn_start) 
+    对每条 prompt:
+    emit(message_start)
+    emit(message_end)"]
+
+    C1 --> D["newMessages
+    含义: 本次 run 新增的全部消息集合
+    初始先放 prompts
+    后续再追加 assistant / toolResult / steering / follow-up"]
+    C2 --> E["currentContext
+    含义: 当前轮实际送往 LLM 的运行时上下文
+    初始 = 旧 context + prompts"]
+
+    E --> F["runLoop(currentContext, newMessages, config)"]
+
+    F --> G["streamAssistantResponse() 请求一轮模型回复"]
+    G --> H["transformContext?(AgentMessage[])"]
+    H --> I["convertToLlm(AgentMessage[]) -> pi-ai Message[]"]
+    I --> J["组装 pi-ai Context:
+    { systemPrompt, messages, tools }"]
+
+    J --> K["streamFn(...)
+    默认 = pi-ai.streamSimple"]
+    K --> L["pi-ai: streamSimple(model, Context, SimpleStreamOptions)"]
+    L --> M["provider.streamSimple"]
+    M --> N["AssistantMessageEventStream"]
+
+    N --> O["AssistantMessageEvent
+    start / text_* / thinking_* / toolcall_* / done / error"]
+    O --> P["pi-agent 翻译成 AgentEvent
+    message_start / message_update / message_end"]
+
+    P --> Q["得到最终 AssistantMessage"]
+    Q --> R{"AssistantMessage.content
+    有无 toolCall?
+    filter(type==='toolCall')"}
+
+    R -- 无 --> S["emit(turn_end)"]
+    R -- 有 --> T["AgentToolCall[]"]
+    T --> U[" executeToolCalls()"]
+    U --> V["AgentTool.execute() -> AgentToolResult"]
+    V --> W["create ToolResultMessage -> pi-ai ToolResultMessage"]
+    W --> S["追加到:
+    currentContext.messages
+    newMessages"]
+    S --> X
+
+    X --> Y["prepareNextTurn? / shouldStopAfterTurn?"]
+    Y --> Z["getSteeringMessages? / getFollowUpMessages?"]
+    Z --> Z1["emit(agent_end, messages: newMessages)"]
+```
+
+## pi-agent 层对 pi-ai 层字段的包装
+
+```mermaid
+flowchart TD
+    A["AgentLoopConfig"] --> A1["继承: SimpleStreamOptions"]
+    A --> A2["新增:
+    model
+    convertToLlm
+    transformContext
+    getApiKey
+    prepareNextTurn
+    shouldStopAfterTurn
+    getSteeringMessages
+    getFollowUpMessages
+    beforeToolCall
+    afterToolCall
+    toolExecution"]
+
+    B["AgentContext
+    { systemPrompt
+    messages: AgentMessage[]
+    tools?: AgentTool<any>[] }"] --> C["transformContext?"]
+    C --> D["convertToLlm
+    AgentMessage[] -> pi-ai Message[]"]
+    D --> E["pi-ai Context
+    {systemPrompt, messages, tools}"]
+
+    F["AgentTool"] --> G["继承 pi-ai Tool"]
+    F --> H["新增 label / prepareArguments / execute / executionMode"]
+```
+
+<img src="img/image-20260612205605048.png" alt="image-20260612205605048" style="zoom: 50%;" />
+
+
+
+
+
+# [pi-agent](https://github.com/badlogic/pi-mono/tree/main/packages/agent)
 
 整个 pi monorepo 的 **agent 引擎层**。
 
-本质是：**围绕一条 assistant 消息，执行"请求模型 -> 产出消息 -> 执行工具 -> 继续下一轮"的循环，并把过程全部事件化。**
+- pi-ai 负责： 模型请求抽象、provider 兼容、流式事件、最终 AssistantMessage
+- pi-agent 负责： 把 pi-ai 的“单次 provider stream 流”包装成“多轮 agent 循环 + 工具执行 + 生命周期事件”
 
 它对上暴露的是：
 
@@ -229,8 +401,8 @@ Transforms to Message[] only at the LLM call boundary.
 
 谁需要它？
 
-- `coding-agent`：直接用 `AgentHarness` 搭建完整会话
-- 任何需要"会话存档 + 历史压缩 + 技能系统"的应用
+- 任何需要"会话存档 + 历史压缩 + 技能系统"但不想自己造轮子的应用
+- 目前主要是测试和示例在用，尚未被 `coding-agent` 采纳
 
 ```
 使用者                          调用哪一层
@@ -238,18 +410,89 @@ Transforms to Message[] only at the LLM call boundary.
 测试代码                        runAgentLoop()（第一层）
 嵌套 agent                      agentLoop()（第一层）
 简单 bot                        new Agent()（第二层）
-coding-agent                    new AgentHarness()（第三层）
+coding-agent                    new Agent() + AgentSession（第二层 + 自建管理层）
+通用应用                        new AgentHarness()（第三层）
 ```
+
+**注意：`coding-agent` 实际上用的是 `Agent`（第二层）+ 自己的 `AgentSession`，而不是 `AgentHarness`。** 原因是 `AgentSession` 在 `AgentHarness` 之前就已存在，它包含了更复杂的业务逻辑（扩展命令、bash 消息管理、模型认证验证、自定义 compaction 策略等），迁移成本大于收益。`AgentHarness` 是后来从 `AgentSession` 中提炼出的通用框架，两者核心调用链相同（都是准备消息 → 调 `runAgentLoop()`），但 `AgentSession` 的业务层更厚。
 
 ## 核心类型层 `types.ts`
 
-`types.ts` 是整个包的协议文件。它定义了循环引擎的"语言"——所有层之间通过这些类型通信。
+`types.ts` 是整个包的协议文件。它定义了循环引擎的"语言"——所有层之间通过这些类型通信。文件按 7 大分类组织，下面逐一对应。
 
-### 1. AgentMessage — 统一消息类型
+### 第 1 组：基础运行模式与配置枚举
+
+包含 `StreamFn`、`ToolExecutionMode`、`QueueMode`、`ThinkingLevel` 四个类型。
+
+#### StreamFn — 流式函数类型
 
 ```typescript
-// 默认的 LLM 消息
-type Message = UserMessage | AssistantMessage | ToolResultMessage;
+export type StreamFn = (
+  ...args: Parameters<typeof streamSimple>
+) => ReturnType<typeof streamSimple> | Promise<ReturnType<typeof streamSimple>>;
+```
+
+`StreamFn` 签名与 `pi-ai` 的 `streamSimple()` 完全一致。默认值就是 `streamSimple`，但上层可以替换它（比如 `coding-agent` 在 `sdk.ts` 里包了一层，附加 apiKey / headers / retry 策略）。
+
+```
+agent-loop.ts 的 streamFn 参数
+  │
+  ├── 来自 Agent → 默认 streamSimple，或调用方通过 AgentOptions 传入
+  │     └── coding-agent/sdk.ts 传入包装版（+apiKey +headers +retry）
+  │
+  └── 来自 AgentHarness → 自己创建包装版（+auth +headers +hook系统）
+        └── 最终也调 streamSimple
+```
+
+> * StreamFunction （pi-ai 层） — "provider 级函数签名"
+>
+>   - 参数是 泛化的 ： Model<TApi> 、 Context 、 TOptions
+>
+>   - 返回值 只能是 AssistantMessageEventStream
+>
+>   - 定位：约束所有 provider 的 stream() 实现都长这样
+>
+>
+> * StreamFn （pi-agent 层） — "agent 循环可替换的函数签名"
+>
+>   - 参数是 从 streamSimple 推导出来的 （ ...args: Parameters<typeof streamSimple> ），不是手写的
+>
+>   - 返回值 多了 Promise<AssistantMessageEventStream> （允许异步返回流）
+>
+>   - 定位：约束 agent 循环内部调用的 streamFn 参数
+>
+> 为什么 StreamFn 要允许 Promise ？因为上层（如 coding-agent/sdk.ts ）的包装函数可能内部有 await，因此函数必须是 async 的：
+>
+> ```
+> // coding-agent/sdk.ts
+> streamFn: async (model, context, options) => {
+>     const auth = await modelRegistry.getApiKeyAndHeaders
+>     (model);  // ← 有 await，getApiKeyAndHeaders() 是异步的
+>     return streamSimple(model, context, { ... });
+> }
+> ```
+> 这个函数的返回值是 Promise<AssistantMessageEventStream> ，不是 AssistantMessageEventStream 。 StreamFn 通过 | Promise<ReturnType<typeof streamSimple>> 兼容了这种情况。
+
+#### ToolExecutionMode / QueueMode / ThinkingLevel
+
+```typescript
+export type ToolExecutionMode = "sequential" | "parallel";
+export type QueueMode = "all" | "one-at-a-time";
+export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
+```
+
+这三个枚举分别控制：
+- `ToolExecutionMode`：`AgentTool.executionMode` 和 `AgentLoopConfig.toolExecution` 的取值类型
+- `QueueMode`：`Agent` 构造时 `steeringMode` / `followUpMode` 的取值类型
+- `ThinkingLevel`：`AgentState.thinkingLevel` 和 `AgentLoopTurnUpdate.thinkingLevel` 的取值类型
+
+### 第 2 组：Message 消息
+
+包含 `CustomAgentMessages` 和 `AgentMessage`。
+
+```typescript
+// pi-ai 包中默认的 LLM 消息
+export type Message = UserMessage | AssistantMessage | ToolResultMessage;
 
 // 应用可通过声明合并扩展的自定义消息
 export interface CustomAgentMessages {
@@ -265,7 +508,7 @@ export type AgentMessage = Message | CustomAgentMessages[keyof CustomAgentMessag
 `CustomAgentMessages` 使用 TypeScript 的声明合并（declaration merging）。应用层可以这样扩展：
 
 ```typescript
-// 在 messages.ts 中
+// /harness/messages.ts 和 coding-agent 包中的 messages.ts
 declare module "../types.ts" {
   interface CustomAgentMessages {
     bashExecution: BashExecutionMessage;
@@ -293,7 +536,104 @@ type AgentMessage =
 
 **为什么不用 `any` 或泛型？** 用 `any` 丢失类型安全。用泛型 `Agent<TMessage>` 会让每个使用 Agent 的地方都要传类型参数。声明合并在全局生效，不需要传递。
 
-### 2. AgentEvent — 事件协议
+### 第 3 组：Tool 工具定义与执行结果
+
+包含 `AgentToolCall`、`AgentToolResult`、`AgentToolUpdateCallback`、`AgentTool`。
+
+#### AgentToolCall — 工具调用内容块提取
+
+```typescript
+export type AgentToolCall = Extract<AssistantMessage["content"][number], { type: "toolCall" }>;
+```
+
+从 `AssistantMessage.content` 联合类型中提取 `type: "toolCall"` 的成员。用于钩子上下文（`BeforeToolCallContext.toolCall`、`AfterToolCallContext.toolCall`）的类型标注。
+
+#### AgentToolResult — 工具执行结果
+
+```typescript
+export interface AgentToolResult<T> {
+  content: (TextContent | ImageContent)[];  // 返回给模型的文本或图片
+  details: T;                                // 用于日志/UI 的任意结构化详情
+  terminate?: boolean;                       // 提示 Agent 应在当前工具批次后停止
+}
+```
+
+工具的 `execute` 函数返回这个结构。`content` 会被送回 LLM 作为工具结果消息，`details` 留给 UI 渲染或日志。`terminate` 是软信号——仅当批次中**所有**已完成的工具结果都设为 `true` 时才触发提前终止。
+
+#### AgentToolUpdateCallback — 流式更新回调
+
+```typescript
+export type AgentToolUpdateCallback<T = any> = (partialResult: AgentToolResult<T>) => void;
+```
+
+工具执行函数的第四个参数 `onUpdate`。长时间运行的工具（如 bash 命令）可以通过它实时推送部分结果，UI 可以据此显示进度。
+
+#### AgentTool — 工具定义接口
+
+```typescript
+export interface AgentTool<TParameters extends TSchema = TSchema, TDetails = any>
+  extends Tool<TParameters> {
+  label: string;
+  prepareArguments?: (args: unknown) => Static<TParameters>;
+  execute: (
+    toolCallId: string,
+    params: Static<TParameters>,
+    signal?: AbortSignal,
+    onUpdate?: AgentToolUpdateCallback<TDetails>,
+  ) => Promise<AgentToolResult<TDetails>>;
+  executionMode?: ToolExecutionMode;
+}
+```
+
+`AgentTool` 扩展了 `pi-ai` 的 `Tool`（包含 name、description、parameters schema），增加了：
+
+- `label`：UI 显示用的人类可读标签
+- `prepareArguments`：参数预处理钩子（兼容性适配）
+- `execute`：真正的执行函数
+- `executionMode`：单工具级别的串行/并行覆盖
+
+### 第 4 组：Agent 运行时状态与上下文
+
+包含 `AgentContext` 和 `AgentState`。
+
+#### AgentContext — 上下文快照
+
+```typescript
+export interface AgentContext {
+  systemPrompt: string;       // 随请求包含的系统提示
+  messages: AgentMessage[];   // 模型可见的对话记录
+  tools?: AgentTool<any>[];   // 本次运行可用的工具
+}
+```
+
+这是传给 `agent-loop.ts` 的最小上下文单元。每次 LLM 请求前，`convertToLlm` 会把 `messages`（AgentMessage[]）转换成 LLM 能理解的 `Message[]`。
+
+#### AgentState — 公开状态
+
+```typescript
+export interface AgentState {
+  systemPrompt: string;
+  model: Model<any>;
+  thinkingLevel: ThinkingLevel;
+  set tools(tools: AgentTool<any>[]);  get tools(): AgentTool<any>[];
+  set messages(messages: AgentMessage[]);  get messages(): AgentMessage[];
+  readonly isStreaming: boolean;
+  readonly streamingMessage?: AgentMessage;
+  readonly pendingToolCalls: ReadonlySet<string>;
+  readonly errorMessage?: string;
+}
+```
+
+`AgentState` 是 `Agent` 对外暴露的可观察状态。与 `AgentContext` 的区别：
+
+- `AgentContext`：每轮 LLM 请求的快照，传给底层循环，用完即弃
+- `AgentState`：`Agent` 实例的长期状态，UI 可以随时读取（`agent.state.messages`）、写入（`agent.state.messages = [...]`）
+
+`tools` 和 `messages` 使用 setter/getter，赋值时会**复制数组**（防止外部引用意外修改内部状态）。
+
+### 第 5 组：AgentEvent 事件协议
+
+包含 `AgentEvent`。
 
 ```typescript
 export type AgentEvent =
@@ -337,33 +677,82 @@ agent_end
 - AssistantMessageEvent：pi-ai 产出，只覆盖"一条消息的流式拼接"（text/thinking/toolcall 的 start/delta/end）
 - AgentEvent：pi-agent 产出，覆盖"整个 agent 运行周期"（agent/turn/message/tool 四层生命周期），其中 message_update 事件里会透传 assistantMessageEvent 作为嵌套字段
 
-所以 AgentEvent 是 AssistantMessageEvent 的超集包装：它把单条消息的流式事件包进更大的 agent 生命周期里，同时增加了工具执行、轮次管理、agent 启停等 pi-ai 不关心的事件。
+所以 **AgentEvent 是 AssistantMessageEvent 的超集包装：它把单条消息的流式事件包进更大的 agent 生命周期里，同时增加了工具执行、轮次管理、agent 启停等 pi-ai 不关心的事件。**
 
-### 3. AgentTool — 工具定义
+### 第 6 组：Agent 循环钩子结果与上下文
+
+包含 `BeforeToolCallResult`、`AfterToolCallResult`、`BeforeToolCallContext`、`AfterToolCallContext`、`ShouldStopAfterTurnContext`、`AgentLoopTurnUpdate`、`PrepareNextTurnContext`。
+
+这些类型是 `AgentLoopConfig` 中各钩子函数的参数和返回值。
+
+#### 工具调用钩子结果
 
 ```typescript
-export interface AgentTool<TParameters extends TSchema = TSchema, TDetails = any>
-  extends Tool<TParameters> {
-  label: string;
-  prepareArguments?: (args: unknown) => Static<TParameters>;
-  execute: (
-    toolCallId: string,
-    params: Static<TParameters>,
-    signal?: AbortSignal,
-    onUpdate?: AgentToolUpdateCallback<TDetails>,
-  ) => Promise<AgentToolResult<TDetails>>;
-  executionMode?: ToolExecutionMode;
+/** beforeToolCall 返回值：阻止执行 + 原因 */
+export interface BeforeToolCallResult {
+  block?: boolean;
+  reason?: string;
+}
+
+/** afterToolCall 返回值：部分覆盖工具结果 */
+export interface AfterToolCallResult {
+  content?: (TextContent | ImageContent)[];  // 替换完整 content 数组
+  details?: unknown;                          // 替换 details 载荷
+  isError?: boolean;                          // 替换错误标志
+  terminate?: boolean;                        // 替换提前终止提示
 }
 ```
 
-`AgentTool` 扩展了 `pi-ai` 的 `Tool`（包含 name、description、parameters schema），增加了：
+`BeforeToolCallResult` 只需要"要不要阻止"和"为什么"。`AfterToolCallResult` 的每个字段都是可选的——省略的字段保留原始工具结果值。
 
-- `label`：UI 显示用的人类可读标签
-- `prepareArguments`：参数预处理钩子（兼容性适配）
-- `execute`：真正的执行函数
-- `executionMode`：单工具级别的串行/并行覆盖
+#### 工具调用钩子上下文
 
-### 4. AgentLoopConfig — 循环引擎的全部知识
+```typescript
+/** beforeToolCall / afterToolCall 共享的上下文字段 */
+interface ToolCallContextBase {
+  assistantMessage: AssistantMessage;  // 请求工具调用的助手消息
+  toolCall: AgentToolCall;             // 原始工具调用块
+  args: unknown;                       // 已验证的工具参数
+  context: AgentContext;               // 当前 Agent 上下文
+}
+
+/** beforeToolCall 上下文 */
+export interface BeforeToolCallContext extends ToolCallContextBase {}
+
+/** afterToolCall 上下文，额外携带已执行的结果 */
+export interface AfterToolCallContext extends ToolCallContextBase {
+  result: AgentToolResult<any>;  // 执行前的工具结果
+  isError: boolean;              // 是否被当作错误处理
+}
+```
+
+#### 轮次停止判断与轮次更新
+
+```typescript
+/** shouldStopAfterTurn 上下文 */
+export interface ShouldStopAfterTurnContext {
+  message: AssistantMessage;          // 完成该轮次的助手消息
+  toolResults: ToolResultMessage[];   // 该轮次的工具结果
+  context: AgentContext;              // 追加后的当前上下文
+  newMessages: AgentMessage[];        // 如果此时退出，循环将返回的消息
+}
+
+/** prepareNextTurn 的返回值：替换下一轮的运行时状态 */
+export interface AgentLoopTurnUpdate {
+  context?: AgentContext;        // 新上下文
+  model?: Model<any>;            // 新模型
+  thinkingLevel?: ThinkingLevel; // 新思考级别
+}
+
+/** prepareNextTurn 上下文（与 shouldStopAfterTurn 完全一致） */
+export interface PrepareNextTurnContext extends ShouldStopAfterTurnContext {}
+```
+
+`ShouldStopAfterTurnContext.newMessages` 是关键——它告诉钩子"如果现在停止，这次调用会返回什么"，方便判断是否还有未处理的工作。
+
+### 第 7 组：AgentLoopConfig 循环配置
+
+包含 `AgentLoopConfig`。
 
 ```typescript
 export interface AgentLoopConfig extends SimpleStreamOptions {
@@ -387,15 +776,46 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 - 其他所有字段都是**可选的**（不提供就不使用该功能）
 - 多数回调有"不得抛异常"的契约；`beforeToolCall` / `afterToolCall` 例外（被 try-catch 保护）
 
-### 5. StreamFn — 流式函数类型
+#### 上层如何填充 AgentLoopConfig
 
-```typescript
-export type StreamFn = (
-  ...args: Parameters<typeof streamSimple>
-) => ReturnType<typeof streamSimple> | Promise<ReturnType<typeof streamSimple>>;
-```
+`agent-loop.ts` 不关心这些字段从哪来，它只管"调一次，拿到值，继续循环"。实际有两个上层各自实现了 `createLoopConfig()` 方法，把内部状态和钩子映射成这个纯配置对象。
 
-`StreamFn` 签名与 `pi-ai` 的 `streamSimple()` 完全一致。默认值就是 `streamSimple`，但上层可以替换它（比如 `coding-agent` 在 `sdk.ts` 里包了一层，附加 apiKey / headers / retry 策略）。
+**`Agent`（agent.ts）** — 轻量上层，字段来源是构造函数选项 + 内部队列：
+
+| 字段 | 来源 | 说明 |
+|------|------|------|
+| `model` | `this._state.model` | 从 AgentState 取当前模型 |
+| `convertToLlm` | 用户传入 → `AgentOptions.convertToLlm`，不传则用 `defaultConvertToLlm`（只保留 user/assistant/toolResult 三种角色） | 唯一必须字段，但 Agent 也提供了默认实现 |
+| `transformContext` | 用户传入 → `AgentOptions.transformContext` | 可选，不传就不做变换 |
+| `getApiKey` | 用户传入 → `AgentOptions.getApiKey` | 可选，用于短期 OAuth 令牌等场景 |
+| `shouldStopAfterTurn` | **未提供** | Agent 不使用此钩子 |
+| `prepareNextTurn` | 用户传入 → `AgentOptions.prepareNextTurn`，包装为闭包透传 signal | 可选 |
+| `getSteeringMessages` | 内部 `steeringQueue.drain()` | 从 PendingMessageQueue 排空消息；continue 时跳过首次 poll 避免重复消费 |
+| `getFollowUpMessages` | 内部 `followUpQueue.drain()` | 同上 |
+| `toolExecution` | 用户传入 → `AgentOptions.toolExecution`，默认 `"parallel"` | — |
+| `beforeToolCall` | 用户传入 → `AgentOptions.beforeToolCall` | 原样透传 |
+| `afterToolCall` | 用户传入 → `AgentOptions.afterToolCall` | 原样透传 |
+
+**`AgentHarness`（harness/agent-harness.ts）** — 高层上层，字段来源是 session + hook 系统：
+
+| 字段 | 来源 | 说明 |
+|------|------|------|
+| `model` | `turnState.model` | 从 session 的 turn state 取 |
+| `convertToLlm` | 内置的 `convertToLlm`（来自 `harness/messages.ts`） | 比 Agent 的默认版本更丰富：额外处理 `bashExecution` → user 文本、`custom` → user、`branchSummary` / `compactionSummary` → user 摘要 |
+| `transformContext` | 调用 `emitHook({ type: "context" })` | 让 hook 系统有机会在每轮 LLM 请求前修改消息（如上下文裁剪） |
+| `getApiKey` | 通过 `getApiKeyAndHeaders` 包装 | 把高层的 `getApiKeyAndHeaders(model)` 拆成 apiKey 和 headers |
+| `shouldStopAfterTurn` | **未提供** | 同 Agent，不使用此钩子 |
+| `prepareNextTurn` | 调用 `flushPendingSessionWrites()` + `createTurnState()` | 刷新待写入的 session 数据，重建 turn state，返回新的 context/model/thinkingLevel |
+| `getSteeringMessages` | `drainQueuedMessages(steerQueue, steeringQueueMode)` | 支持配置队列模式（"all" 或 "one-at-a-time"） |
+| `getFollowUpMessages` | `drainQueuedMessages(followUpQueue, followUpQueueMode)` | 同上 |
+| `toolExecution` | **未提供** | 使用循环默认值（"parallel"） |
+| `beforeToolCall` | 调用 `emitHook({ type: "tool_call" })` | 把 hook 结果转换为 `BeforeToolCallResult` |
+| `afterToolCall` | 调用 `emitHook({ type: "tool_result" })` | 把 hook 结果转换为 `AfterToolCallResult` |
+
+对比要点：
+- `Agent` 更"裸"——大部分钩子是透传用户选项，适合直接编程使用
+- `AgentHarness` 更"厚"——通过 hook 系统和 session 管理层间接实现，适合上层应用框架
+- 两者都没有提供 `shouldStopAfterTurn`，说明这个钩子是留个更上层（或测试）按需使用的
 
 ## 无状态引擎层 `agent-loop.ts`
 
@@ -457,11 +877,182 @@ flowchart TB
 
 **外层循环**负责"被唤醒"：当内层循环结束（agent 本来要停下来），检查有没有 follow-up 消息。
 
+为什么要分两层？因为 steering 和 follow-up 的语义不同：
+
+- **Steering**（转向）：用户在 agent 工作过程中插入一条新指令，比如"别改那个文件，换一种方式"。它在当前 turn 的工具执行完成后注入，影响下一次 LLM 调用。
+- **Follow-up**（追加）：用户在 agent 完成后追加一条新任务，比如"好的，现在写测试"。它只在 agent 本来要退出时才被消费。
+
+这两种消息的消费时机不同，所以需要两层循环来区分。如果只有一层循环，就没法区分"agent 还在干活时插入的指令"和"agent 干完活后追加的新任务"。
+
+```ts
+/** Agent 事件接收器函数：异步或同步回调，用于接收 agent 生命周期中的所有事件。 */
+export type AgentEventSink = (event: AgentEvent) => Promise<void> | void;
+
+runLoop()
+     ├── config.getSteeringMessages()     // 轮询用户中途插话
+     ├── streamAssistantResponse()        // 请求一轮模型回复
+     │     ├── config.transformContext()   // 高层消息变换（摘要、裁剪）
+     │     ├── config.convertToLlm()      // AgentMessage -> LLM Message 边界转换
+     │     └── streamFn() / streamSimple()// 调用 pi-ai 的流式 API
+     ├── executeToolCalls()               // 工具分发器
+     │     ├── executeToolCallsSequential()  // 串行路径
+     │     └── executeToolCallsParallel()    // 并行路径
+     │       （两者内部共享）:
+     │         ├── prepareToolCall()
+     │         │     ├── prepareToolCallArguments()
+     │         │     ├── validateToolArguments()
+     │         │     └── config.beforeToolCall()
+     │         ├── executePreparedToolCall()
+     │         │     └── tool.execute()
+     │         ├── finalizeExecutedToolCall()
+     │         │     └── config.afterToolCall()
+     │         ├── emitToolExecutionEnd()
+     │         ├── createToolResultMessage()
+     │         └── emitToolResultMessage()
+     ├── config.prepareNextTurn()        // 轮结束后的统一改写钩子
+     ├── config.shouldStopAfterTurn()    // 停机判断
+     └── config.getFollowUpMessages()    // follow-up 检查
+```
+
+
+
+```ts
+async function runLoop(
+	initialContext: AgentContext,
+	newMessages: AgentMessage[],
+	initialConfig: AgentLoopConfig,
+	signal: AbortSignal | undefined,
+	emit: AgentEventSink,
+	streamFn?: StreamFn,
+): Promise<void> {
+	let currentContext = initialContext;
+	let config = initialConfig;
+	let firstTurn = true;
+	// 先看是否已经有 steering 消息排队。
+	// 这让 agent 在发出第一轮请求前，就能把“用户中途插话”合并进 transcript。
+	let pendingMessages: AgentMessage[] = (await config.getSteeringMessages?.()) || [];
+
+	// 外层 while 负责“agent 本来该停，但又收到了 follow-up”的情况。
+	while (true) {
+		let hasMoreToolCalls = true;
+
+		// 内层 while 处理一条完整工作链：
+		// 注入 pending 消息 -> 请求 assistant -> 执行 tool calls -> 决定是否继续本轮。
+		while (hasMoreToolCalls || pendingMessages.length > 0) {
+            // 第一轮的 turn_start 在 runAgentLoop 已经发过了，这里要跳过，只有后续的 turn 才发
+			if (!firstTurn) {
+				await emit({ type: "turn_start" });
+			} else {
+				firstTurn = false;
+			}
+
+			// pending 消息会先落入 transcript，再去请求 assistant。
+			// 这样模型能在“最新上下文”上继续推理。
+			if (pendingMessages.length > 0) {
+				for (const message of pendingMessages) {
+					await emit({ type: "message_start", message });
+					await emit({ type: "message_end", message });
+					currentContext.messages.push(message);
+					newMessages.push(message);
+				}
+				pendingMessages = [];
+			}
+
+			// 请求一轮 assistant 回复；这个函数内部会把流式事件翻译成 AgentEvent。
+			const message = await streamAssistantResponse(currentContext, config, signal, emit, streamFn);
+			newMessages.push(message);
+
+			// error / aborted 都视为本次 run 到此结束，不再继续进入 tool 或 follow-up。
+			if (message.stopReason === "error" || message.stopReason === "aborted") {
+				await emit({ type: "turn_end", message, toolResults: [] });
+				await emit({ type: "agent_end", messages: newMessages });
+				return;
+			}
+
+			// assistant 最终消息里若包含 toolCall block，就进入工具执行阶段。
+			const toolCalls = message.content.filter((c) => c.type === "toolCall");
+
+			const toolResults: ToolResultMessage[] = [];
+			hasMoreToolCalls = false;
+			if (toolCalls.length > 0) {
+				// executeToolCalls 会自行决定串行还是并行，并返回本批工具结果。
+				const executedToolBatch = await executeToolCalls(currentContext, message, config, signal, emit);
+				toolResults.push(...executedToolBatch.messages);
+				// terminate=true 表示“这批工具已经明确要求对话在此终止”。
+				hasMoreToolCalls = !executedToolBatch.terminate;
+
+				// toolResult 也是 transcript 的一部分，必须追加到 context/newMessages，
+				// 否则下一轮 assistant 将看不到工具返回。
+				for (const result of toolResults) {
+					currentContext.messages.push(result);
+					newMessages.push(result);
+				}
+			}
+
+			await emit({ type: "turn_end", message, toolResults });
+
+			// prepareNextTurn 是一个“每轮结束后的统一改写钩子”。
+			// 它可以替换 context、切换 model，或更新 thinkingLevel。
+			const nextTurnContext = {
+				message,
+				toolResults,
+				context: currentContext,
+				newMessages,
+			};
+			const nextTurnSnapshot = await config.prepareNextTurn?.(nextTurnContext);
+			if (nextTurnSnapshot) {
+				currentContext = nextTurnSnapshot.context ?? currentContext;
+				config = {
+					...config,
+					model: nextTurnSnapshot.model ?? config.model,
+					reasoning:
+						nextTurnSnapshot.thinkingLevel === undefined
+							? config.reasoning
+							: nextTurnSnapshot.thinkingLevel === "off"
+								? undefined
+								: nextTurnSnapshot.thinkingLevel,
+				};
+			}
+
+			// shouldStopAfterTurn 是在“turn 已经完整结束”后的最后停机判断。
+			if (
+				await config.shouldStopAfterTurn?.({
+					message,
+					toolResults,
+					context: currentContext,
+					newMessages,
+				})
+			) {
+				await emit({ type: "agent_end", messages: newMessages });
+				return;
+			}
+
+			// 在每一轮末尾再轮询一次 steering，允许用户在流式输出或工具执行期间插话。
+			pendingMessages = (await config.getSteeringMessages?.()) || [];
+		}
+
+		// 走到这里表示：没有更多 toolCall，且也没有 pending steering。
+		// 这时 agent“理论上可以结束”，但还要检查 follow-up 队列。
+		const followUpMessages = (await config.getFollowUpMessages?.()) || [];
+		if (followUpMessages.length > 0) {
+			// follow-up 被重新塞进 pending，让内层循环按“用户新增消息”同样的路径处理。
+			pendingMessages = followUpMessages;
+			continue;
+		}
+
+		// 没有 follow-up，说明本次 agent run 真的结束了。
+		break;
+	}
+
+	await emit({ type: "agent_end", messages: newMessages });
+}
+```
+
 ### `streamAssistantResponse()` — 与 pi-ai 的桥接点
 
 这是整个系统里最有代表性的桥接函数。它完成 4 层转换：
 
-```typescript
+```ts
 async function streamAssistantResponse(
   context: AgentContext, config: AgentLoopConfig,
   signal: AbortSignal | undefined, emit: AgentEventSink, streamFn?: StreamFn,
@@ -676,6 +1267,8 @@ sequenceDiagram
 3. **parallel 模式下工具之间无法共享中间状态**。如果两个工具调用之间有依赖关系（比如"先读文件再编辑"），parallel 模式会产生竞态。pi 的解决方案是让 LLM 自己管理依赖——如果两个操作有依赖，LLM 应该在两个不同的 turn 中分别发起。
 
 ## 有状态壳层 `agent.ts`
+
+**除了循环之外， [pi-agent-core](https://github.com/badlogic/pi-mono/tree/main/packages/agent)还提供了一个 `Agent` 类，其中包含一些真正有用的功能：状态管理、简化的事件订阅、两种模式（一次一条或全部同时）的消息队列、附件处理（图像、文档）以及传输抽象，允许您直接运行代理或通过代理运行代理。**
 
 `Agent` 是对低层 `runAgentLoop*()` 的有状态封装。约 878 行代码。
 

@@ -62,8 +62,8 @@ import type {
 export type AgentEventSink = (event: AgentEvent) => Promise<void> | void;
 
 /**
- * Start an agent loop with a new prompt message.
- * The prompt is added to the context and events are emitted for it.
+ * 使用新的提示消息启动 Agent 循环。
+ * 提示消息会被添加到上下文中，并为其发出相应事件。
  *
  * 谁调用我：
  * - 更底层场景可直接使用本函数
@@ -105,12 +105,12 @@ export function agentLoop(
 }
 
 /**
- * Continue an agent loop from the current context without adding a new message.
- * Used for retries - context already has user message or tool results.
+ * 从当前上下文继续 Agent 循环，不添加新消息。
+ * 用于重试场景——上下文中已有用户消息或工具结果。
  *
- * **Important:** The last message in context must convert to a `user` or `toolResult` message
- * via `convertToLlm`. If it doesn't, the LLM provider will reject the request.
- * This cannot be validated here since `convertToLlm` is only called once per turn.
+ * **重要：** 上下文中的最后一条消息必须能通过 `convertToLlm` 转换为 `user` 或 `toolResult` 消息。
+ * 如果不能，LLM 提供商将拒绝请求。
+ * 这里无法提前验证，因为 `convertToLlm` 仅在每个轮次开始时调用一次。
  *
  * 谁调用我：
  * - 直接使用低层流式 API 的应用
@@ -159,7 +159,7 @@ export function agentLoopContinue(
 }
 
 /**
- * runAgentLoop 的真正实现：把新 prompt 消息加入 context，然后启动主循环。
+ * agentLoop 的真正实现：把新 prompt 消息加入 context，然后启动主循环。
  *
  * 谁调用我：
  * - `agentLoop()` 通过 EventStream 间接调用
@@ -202,7 +202,7 @@ export async function runAgentLoop(
 }
 
 /**
- * runAgentLoopContinue 的真正实现：从当前 context 继续，不添加新消息。
+ * agentLoopContinue 的真正实现：从当前 context 继续，不添加新消息。
  *
  * 谁调用我：
  * - `agentLoopContinue()` 通过 EventStream 间接调用
@@ -252,7 +252,7 @@ function createAgentStream(): EventStream<AgentEvent, AgentMessage[]> {
 }
 
 /**
- * Main loop logic shared by agentLoop and agentLoopContinue.
+ * agentLoop 和 agentLoopContinue 共享的主循环逻辑。
  *
  * 这是 `packages/agent` 的主控制流：
  * - 外层 while: 处理“本来要停，但 follow-up 又来了”的情况
@@ -289,6 +289,7 @@ async function runLoop(
 		// 内层 while 处理一条完整工作链：
 		// 注入 pending 消息 -> 请求 assistant -> 执行 tool calls -> 决定是否继续本轮。
 		while (hasMoreToolCalls || pendingMessages.length > 0) {
+			// 第一轮的 turn_start 在 runAgentLoop 已经发过了，这里要跳过，只有后续的 turn 才发
 			if (!firstTurn) {
 				await emit({ type: "turn_start" });
 			} else {
@@ -319,6 +320,7 @@ async function runLoop(
 			}
 
 			// assistant 最终消息里若包含 toolCall block，就进入工具执行阶段。
+			// filter 从助手消息的 content 数组中，取出 type 为 "toolCall" 的内容块组成新数组。
 			const toolCalls = message.content.filter((c) => c.type === "toolCall");
 
 			const toolResults: ToolResultMessage[] = [];
@@ -340,17 +342,28 @@ async function runLoop(
 
 			await emit({ type: "turn_end", message, toolResults });
 
-			// prepareNextTurn 是一个“每轮结束后的统一改写钩子”。
-			// 它可以替换 context、切换 model，或更新 thinkingLevel。
+			// ========================
+			// 轮次后处理阶段：prepareNextTurn + shouldStopAfterTurn
+			// 这两个钩子在 turn_end 之后、下一轮 LLM 请求之前执行。
+			// ========================
+
+			// prepareNextTurn：允许上层在每轮结束后"改写"下一轮的运行参数。
+			// 典型用途：
+			// - AgentHarness 用它来刷新 session 写入、重建 turn state（可能切换模型）
+			// - Agent 用它来透传用户传入的 prepareNextTurn 回调
+			// 返回 undefined 表示不做任何修改，继续用当前配置。
 			const nextTurnContext = {
-				message,
-				toolResults,
-				context: currentContext,
-				newMessages,
+				message,                    // 本轮的助手回复
+				toolResults,                // 本轮的工具执行结果
+				context: currentContext,     // 当前上下文（已追加本轮消息）
+				newMessages,                // 本次 runAgentLoop 累计的新消息
 			};
 			const nextTurnSnapshot = await config.prepareNextTurn?.(nextTurnContext);
 			if (nextTurnSnapshot) {
+				// 如果钩子返回了新上下文，替换当前上下文
 				currentContext = nextTurnSnapshot.context ?? currentContext;
+				// 如果钩子返回了新模型或思考级别，合并到 config 中
+				// 注意：thinkingLevel 需要转换为 reasoning 格式（"off" → undefined，其他值透传）
 				config = {
 					...config,
 					model: nextTurnSnapshot.model ?? config.model,
@@ -363,7 +376,11 @@ async function runLoop(
 				};
 			}
 
-			// shouldStopAfterTurn 是在“turn 已经完整结束”后的最后停机判断。
+			// shouldStopAfterTurn：最终的停机判断。
+			// 与 prepareNextTurn 不同，这个钩子不能修改任何状态，只能决定"停还是不停"。
+			// 返回 true → 发出 agent_end 事件，结束整个循环。
+			// 返回 false/undefined → 继续下一轮（检查 steering/follow-up 消息）。
+			// 典型用途：上下文即将超出容量时优雅退出。
 			if (
 				await config.shouldStopAfterTurn?.({
 					message,
@@ -397,8 +414,8 @@ async function runLoop(
 }
 
 /**
- * Stream an assistant response from the LLM.
- * This is where AgentMessage[] gets transformed to Message[] for the LLM.
+ * 从 LLM 流式获取助手响应。
+ * 这里是 AgentMessage[] 被转换为 LLM 兼容的 Message[] 的地方。
  *
  * 关键调用链：
  * - `runLoop()` 调这里发起一轮模型请求
@@ -513,7 +530,7 @@ async function streamAssistantResponse(
 }
 
 /**
- * Execute tool calls from an assistant message.
+ * 执行助手消息中的工具调用。
  *
  * 决策职责只有一件事：本批工具调用走串行还是并行。
  * 真正执行分别落到 `executeToolCallsSequential()` / `executeToolCallsParallel()`。

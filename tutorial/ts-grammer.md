@@ -1,6 +1,4 @@
-### ts 前置知识
-
-#### 什么是 TypeScript？
+## ts
 
 TypeScript 是 JavaScript 的"加强版"，它在 JavaScript 基础上加了**类型标注**。
 写代码时声明变量是什么类型（字符串、数字、对象等），编译器会在运行前帮你检查错误。
@@ -19,11 +17,104 @@ function add(a: number, b: number): number {
 }
 ```
 
-TypeScript 的类型标注只在开发阶段有用，编译成 JavaScript 后会被去掉，运行时跟普通 JS 一样。
+**只有类型相关的语法（泛型、类型注解、`as`、`satisfies` 等）是 TS 特有的，其余所有控制流、内置对象、异步模式等都属于 JavaScript。**
+
+### 类型系统
+
+TypeScript 的类型标注只在开发阶段有用，编译成 JavaScript 后会被去掉，运行时跟普通 JS 一样。因此 TypeScript 的类型系统是**编译时**的，它主要保护：
+
+- 防止**类型不匹配**（如把字符串传给期望数字的参数）。
+- 捕获**拼写错误**或访问不存在的属性。
+- 确保函数调用时**参数数量和形状正确**。
+- 提供**智能提示**和**重构安全**。
+
+但它无法保护**运行时**的数据安全——比如从 API、JSON.parse、用户输入等来源获得的数据，TypeScript 会盲目信任你声明的类型，实际值可能完全不符合。
+
+**Zod 能帮它做的事情**：
+
+- 在**运行时**验证数据并给出明确的错误信息。
+- 允许你定义与 TypeScript 类型**同步**的 schema（`z.object({...})`），既用于运行时校验，又自动推导出静态类型。
+- 对数据进行**转换/净化**（如将字符串 `"123"` 转为数字 `123`），确保数据真正符合类型要求。
+- 提供 `.parse()`（失败抛异常）或 `.safeParse()`（返回结果对象），让你安全地处理外部数据。
+
+#### 1、只使用 TypeScript（编译时检查，运行时无保护）
+
+```typescript
+// 定义类型
+interface User {
+  id: number;
+  name: string;
+  email: string;
+}
+
+// 一个需要 User 对象的函数
+function sendWelcomeEmail(user: User) {
+  console.log(`Sending email to ${user.email}`);
+}
+
+// 模拟从 API 获取的数据（实际运行时是 JSON.parse 的结果）
+const rawData = JSON.parse(`{"id": "123", "name": "Alice", "email": "alice@example.com"}`);
+
+// TypeScript 会信任我们声明的类型，但实际 rawData.id 是字符串 "123"
+sendWelcomeEmail(rawData as User);  // 编译通过，但运行时可能出错
+```
+
+**问题**：TypeScript 无法阻止运行时的错误类型数据传入，因为类型断言 `as User` 绕过了检查。如果不用 `as User` 断言，依然能通过 TypeScript 编译，因为 `JSON.parse(...)` 的返回值类型是 `any`，而 `any` 类型可以赋值给任何类型（包括 `User`）。
+
+#### 2、TypeScript + Zod 合作（最佳实践）
+
+在程序边界处用 Zod 验证，通过后得到类型安全的值，后续逻辑全用 TypeScript 类型保护。
+
+```typescript
+import { z } from 'zod';
+
+// 1. 定义 schema（一份定义，同时用于运行时验证和静态类型）
+const UserSchema = z.object({
+  id: z.number(),
+  name: z.string().min(1),
+  email: z.string().email(),
+  // 可选字段可以有默认值
+  role: z.enum(['admin', 'user']).default('user'),
+});
+type User = z.infer<typeof UserSchema>;
+
+// 2. 一个需要 User 的业务函数（只依赖 TypeScript 类型）
+function updateUserProfile(user: User, newName: string): User {
+  return { ...user, name: newName };
+}
+
+// 3. 在“边界”处理外部数据（如 API 请求）
+async function handleRequest(rawBody: unknown) {
+  // 运行时验证
+  const validationResult = UserSchema.safeParse(rawBody);
+  if (!validationResult.success) {
+    // 可以返回 400 错误，并打印详细错误
+    console.error(validationResult.error);
+    return { status: 400, body: 'Invalid user data' };
+  }
+
+  // 从这里开始，validUser 的类型就是 User，TypeScript 会保证后续代码的类型安全
+  const validUser = validationResult.data;
+
+  // 安全地调用业务函数
+  const updated = updateUserProfile(validUser, 'New Name');
+  
+  return { status: 200, body: updated };
+}
+
+// 测试调用
+handleRequest(JSON.parse(`{"id": 123, "name": "Alice", "email": "alice@example.com"}`));
+// 成功：因为 id 是数字
+
+handleRequest(JSON.parse(`{"id": "123", "name": "Alice", "email": "alice@example.com"}`));
+// 失败：id 不是数字，返回 400
+```
+
+### 类型声明关键字
 
 #### let / const
 
-`let` `const` 用于声明一个**块级作用域**的变量。基本语法如下：
+`let` `const` 用于声明一个**块级作用域**的变量/常量。基本语法如下：
 
 ```
 let/const 变量名: 类型 = 初始值;
@@ -37,21 +128,139 @@ const **允许对象/数组内容修改**（const 只保证变量引用不变，
 - **使用 `let`**：当变量的值确实会变化时（例如 `let sum = 0; sum += x;`）。
 - **避免使用 `var`**：在 TypeScript/现代 JavaScript 中，不再需要 `var`。
 
-#### 什么是 interface（接口）？
+#### interface / type
 
-`interface` 用来定义一个对象"长什么样"，它只描述结构，不产生实际代码：
+```text
+                TypeScript 类型系统
+                        │
+                        │  核心判断规则
+                        ▼
+                 结构兼容（structural typing）
+              “看起来像，就可以当成那个类型”
+                        │
+        ┌───────────────┼───────────────┐
+        │               │               │
+        ▼               ▼               ▼
+     type            interface        implements
+   类型别名            接口            类上的显式声明
+        │               │               │
+        │               │               │
+        │               │               └── 只用于 class
+        │               │                   作用：让编译器检查类是否满足接口
+        │               │
+        │               └── 常用于对象结构、可扩展接口、声明合并
+        │
+        └── 常用于函数签名、联合类型、交叉类型、别名
+```
 
-```typescript
-// 定义一个接口：StreamOptions 必须有这些字段
-interface StreamOptions {
-  temperature?: number;    // ? 表示可选，可以不传
-  maxTokens?: number;      // ? 表示可选
-  signal?: AbortSignal;    // ? 表示可选，类型是 AbortSignal
-  apiKey?: string;         // ? 表示可选，类型是字符串
+1、`type` 就是**给一个类型起别名**。
+
+```ts
+type User = {
+  id: string;
+  name: string;
+};
+
+type Add = (a: number, b: number) => number;
+```
+
+它适合：
+- 函数类型
+- 联合类型
+- 交叉类型
+- 一次性类型别名
+
+比如：
+
+```ts
+type Status = "idle" | "running" | "done";
+```
+
+这个只能用 `type`，不能用 `interface`。
+
+2、`interface` 主要是**描述对象/类实例长什么样**。
+
+```ts
+interface User {
+  id: string;
+  name: string;
 }
 ```
 
-#### 什么是泛型 `<T>`？
+它适合：
+- 对象结构
+- class 的实例形状
+- 需要被扩展的协议
+- 声明合并
+
+比如：
+
+```ts
+interface User {
+  id: string;
+}
+
+interface User {
+  name: string;
+}
+```
+
+会自动合并成：
+
+```ts
+interface User {
+  id: string;
+  name: string;
+}
+```
+
+这就是 `interface` 的一个重要特性，`type` 做不到。
+
+3、`implements` 是是 **class 上的检查语法**。
+
+```ts
+interface User {
+  id: string;
+  name: string;
+}
+
+class Person implements User {
+  id: string;
+  name: string;
+
+  constructor(id: string, name: string) {
+    this.id = id;
+    this.name = name;
+  }
+}
+```
+
+它的作用是：
+
+```text
+“这个类承诺自己符合 User 接口，请编译器帮我检查”
+```
+
+注意：
+- `implements` 只给 `class` 用
+- 它不是类型兼容的根本依据
+- 真正的兼容依据仍然是结构兼容
+
+#### 类型断言、交叉类型
+
+```ts
+const code = (error as Error & { code?: unknown }).code;
+```
+
+拆开看：
+
+* error as ... 类型断言：我知道 TS 认为 error 的类型不完全匹配，但我确信可以这样用 
+
+* Error & { code?: unknown } 交叉类型：在 Error 的基础上加一个可选的 code 字段，类型是 unknown 
+* code?: unknown ? = 可选（可能不存在）， unknown = 不确定是 string/number/其他 
+* .code 读取这个字段，不存在就是 undefined
+
+#### 泛型 `<T>`？
 
 泛型是一种"参数化的类型"，让函数/类可以处理不同类型的数据，同时保持类型安全：
 
@@ -73,7 +282,7 @@ getFirst(["a", "b"])      // T 被推断为 string，返回 string
 
 在 pi 的代码中，`EventStream<T, R>` 的 `T` 是事件类型，`R` 是最终结果类型。
 
-#### 什么是 AsyncIterable（异步可迭代）？
+### AsyncIterable（异步可迭代）？
 
 普通数组可以用 `for...of` 遍历：
 
@@ -92,7 +301,7 @@ for await (const chunk of openaiStream) {
 }
 ```
 
-#### 什么是 AbortController / AbortSignal？
+### AbortController / AbortSignal（JS）
 
 这是 JavaScript 的标准 API，用于取消正在进行的异步操作：
 
@@ -123,7 +332,7 @@ function fetch(url, options) {
 }
 ```
 
-#### 什么是 IIFE（立即执行函数表达式）？
+### IIFE（立即执行函数表达式）
 
 `(async () => { ... })()` 这种写法是"定义一个函数并立即执行它"：
 
@@ -140,9 +349,9 @@ doWork();  // 调用
 })();
 ```
 
-#### 什么是 yield？
+### function* 和 yield
 
-`yield` 用在"生成器函数"里，每次产出一个值后暂停，等下次被请求时再继续：
+`yield` 用在"生成器函数" function* 里，每次产出一个值后暂停，等下次被请求时再继续：
 
 ```typescript
 // 生成器函数（注意 function* 星号）
@@ -160,17 +369,147 @@ for (const n of count()) {
 // 而不是等所有数据到齐才开始处理。
 ```
 
-#### 类型断言、交叉类型
+### "点火即忘"（fire and forget）模式
+
+```typescript
+export function agentLoop(
+	prompts: AgentMessage[],
+	context: AgentContext,
+	config: AgentLoopConfig,
+	signal?: AbortSignal,
+	streamFn?: StreamFn,
+): EventStream<AgentEvent, AgentMessage[]> {
+	const stream = createAgentStream();
+
+	void runAgentLoop(
+		prompts,
+		context,
+		config,
+		async (event) => {
+			stream.push(event);
+		},
+		signal,
+		streamFn,
+	).then((messages) => {
+		stream.end(messages);
+	});
+
+	return stream;
+}
+
+export async function runAgentLoop(...):
+```
+
+`async` 函数返回 `Promise`，但 `agentLoop()` 这里需要返回 `EventStream`（一个可以持续产出多个值的流）。所以函数本身是同步的——它创建流、启动后台任务、**立刻**返回流。
+
+```typescript
+void runAgentLoop(...).then((messages) => {
+    stream.end(messages);
+});
+```
+
+`agentLoop()` 内的这段代码是 fire and forget 模式：
+
+- `runAgentLoop()` 是 async 异步的，返回 `Promise`
+- `void` 表示"我不等它完成，也不关心返回值"
+
+整个函数的执行顺序是：
 
 ```
-const code = (error as Error & { code?: 
-unknown }).code;
+agentLoop() 被调用
+  1. const stream = createAgentStream()     ← 同步，创建空流
+  2. void runAgentLoop(...).then(...)        ← 同步，启动后台任务（不等待）
+  3. return stream                           ← 同步，立刻返回流
+  
+  （后台）runAgentLoop 执行中...
+    → 每产生一个事件就 stream.push(event)    ← 流里有数据了
+    → 循环结束 → stream.end(messages)        ← 流关闭
 ```
 
-拆开看：
+调用方拿到 `stream` 后可以立刻 `for await` 开始消费，事件会陆续到来。
 
-* error as ... 类型断言：我知道 TS 认为 error 的类型不完全匹配，但我确信可以这样用 
+如果这么写：
 
-* Error & { code?: unknown } 交叉类型：在 Error 的基础上加一个可选的 code 字段，类型是 unknown 
-* code?: unknown ? = 可选（可能不存在）， unknown = 不确定是 string/number/其他 
-* .code 读取这个字段，不存在就是 undefined
+```typescript
+async function agentLoop(): Promise<EventStream<...>> {
+    await runAgentLoop(...);  // 调用方必须 await 才能拿到 stream
+    return stream;            // 但此时循环已经结束了！
+}
+
+// 当前的写法（同步启动，异步填充）
+function agentLoop(): EventStream<...> {
+    void runAgentLoop(...);   // 后台启动，不等待
+    return stream;            // 立刻返回，调用方可以边循环边消费
+}
+```
+
+关键区别：用 `async` 的话，调用方必须 `await agentLoop()` 才能拿到 `stream`，但 `await` 会等到整个循环结束——那就失去了"实时流式消费"的意义。当前写法让调用方拿到流时，循环还在后台跑着，事件边产生边推入流。
+
+## ...xxx 展开语法 spread syntax
+### 在数组里
+```ts
+[...prompts]
+```
+意思是把 prompts 这个数组里的元素一个个展开，放进新数组。
+
+例如：
+
+```ts
+const prompts = ["a", "b"];
+const x = [...prompts];
+// x = ["a", "b"]
+```
+它的作用通常是： 复制数组 。
+
+再看这个：
+
+```ts
+[...context.messages, ...prompts]
+```
+
+意思是把两个数组拼起来：
+
+```ts
+const a = [1, 2];
+const b = [3, 4];
+const c = [...a, ...b];
+// c = [1, 2, 3, 4]
+```
+
+### 在对象里
+
+```ts
+{
+  ...context,
+  messages: ...
+}
+```
+
+意思是把 context 对象的所有字段展开到一个新对象里。
+
+例如：
+
+```ts
+const context = {
+  systemPrompt: "hi",
+  messages: [1, 2],
+  tools: ["t1"],
+};
+
+const x = {
+  ...context,
+  messages: [1, 2, 3],
+};
+```
+
+结果相当于：
+
+```ts
+const x = {
+  systemPrompt: "hi",
+  messages: [1, 2, 3], // 覆盖原来的 messages
+  tools: ["t1"],
+};
+```
+
+注意： 后面同名字段会覆盖前面的字段 。

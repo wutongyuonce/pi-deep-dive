@@ -79,13 +79,12 @@ export type QueueMode = "all" | "one-at-a-time";
 export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
 
 // ============================================================================
-// 第 2 组：Message / Content 消息与内容
+// 第 2 组：Message 消息
 // ============================================================================
 //
 // 这组类型定义了：
 // - 可扩展的自定义应用消息接口（通过声明合并扩展）
 // - Agent 消息联合类型（LLM 标准消息 + 自定义消息）
-// - 助手消息中的工具调用内容块提取类型
 
 /**
  * 可扩展的自定义应用消息接口。
@@ -112,17 +111,12 @@ export interface CustomAgentMessages {
  */
 export type AgentMessage = Message | CustomAgentMessages[keyof CustomAgentMessages];
 
-/** 助手消息中发出的单个工具调用内容块。 */
-export type AgentToolCall = Extract<AssistantMessage["content"][number], { type: "toolCall" }>;
-
 // ============================================================================
 // 第 3 组：Tool 工具定义与执行结果
 // ============================================================================
-//
-// 这组类型定义了：
-// - 工具执行产生的结果结构
-// - 流式更新部分结果的回调类型
-// - Agent 运行时的完整工具定义接口（含执行、参数适配、执行模式覆盖）
+
+/** 助手消息中发出的单个工具调用内容块。 */
+export type AgentToolCall = Extract<AssistantMessage["content"][number], { type: "toolCall" }>;
 
 /** 工具产生的最终或部分结果。 */
 export interface AgentToolResult<T> {

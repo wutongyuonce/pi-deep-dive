@@ -1,9 +1,3 @@
-uv tool install "python-lsp-server[all]"
-
-npm install -g typescript-language-server
-
-go install golang.org/x/tools/gopls@latest
-
 # [pi](https://github.com/earendil-works/pi/tree/main/packages/coding-agent)
 
 > 资料：
@@ -929,6 +923,33 @@ export type ImagesFunction<TApi extends ImagesApi = ImagesApi, TOptions extends 
 ) => Promise<AssistantImages>;
 ```
 
+和具体实现的关系可以这样理解：
+
+```text
+StreamFunction         = 函数类型（描述长相）
+stream()               = 一个具体实现
+streamSimple()         = 另一个具体实现
+provider.stream()      = 更底层的具体实现
+```
+
+例如 `stream.ts` 里的：
+
+- `stream(model, context, options?: ProviderStreamOptions): AssistantMessageEventStream`
+- `streamSimple(model, context, options?: SimpleStreamOptions): AssistantMessageEventStream`
+
+它们的签名都满足 `StreamFunction`，只是 `options` 的具体类型不同：
+
+- `stream()` 更接近 `StreamFunction<TApi, ProviderStreamOptions>`
+- `streamSimple()` 更接近 `StreamFunction<TApi, SimpleStreamOptions>`
+
+所以这一层的价值主要有两个：
+
+1. 给“可替换的流式函数”提供统一类型约束  
+   比如上层要接收一个自定义 stream wrapper，就可以直接标成 `StreamFunction`
+
+2. 把“函数长什么样”与“函数怎么实现”分开  
+   这样 `stream()`、`streamSimple()`、mock 实现、带重试/日志的包装实现，都能共享同一套签名约束
+
 ## 二、模型信息生成层 `scripts/` `models.ts`
 
 generate-models.ts 脚本在 npm run build 时自动构建 models.generated.ts，包含 `MODELS`（所有的 `Model` 类）
@@ -1403,9 +1424,7 @@ if (data.deepseek?.models) {
 
 ## Context handoff 跨模型上下文交接
 
-pi-ai 从设计之初就考虑到了不同提供商之间的上下文切换。由于每个提供商都有自己追踪工具调用和思维轨迹的方式，因此只能尽力而为。例如，如果在会话中途从 Anthropic 切换到 OpenAI，Anthropic 的 thinking 块会被降级为普通文本块（丢失 thinkingSignature），这种做法是否合理尚待商榷，因为 Anthropic 和 OpenAI 返回的思维轨迹实际上并不能反映幕后发生的情况。
-
-这些提供程序还会将已签名的数据块插入到事件流中，后续包含相同消息的请求必须重放这些数据块。在同一提供程序内切换模型时，也会出现这种情况。这导致后台存在繁琐的抽象和转换管道。
+pi-ai 从设计之初就考虑到了不同提供商之间的上下文切换。由于每个提供商都有自己追踪工具调用和思维轨迹的方式，因此只能尽力而为。例如，如果在会话中途从 Anthropic 切换到 OpenAI，Anthropic 的 thinking 块会被降级为普通文本块（丢失 thinkingSignature）。
 
 ```typescript
 import { getModel, complete, Context } from '@mariozechner/pi-ai';
@@ -1442,6 +1461,8 @@ const continuation = await complete(claude, restored);
 直觉上，LLM 消息就是"角色 + 文本"。但实际上，每家厂商的消息格式都携带了 provider 特有的元数据。
 
 `transformMessages()` 函数解决了这些问题。它的策略可以概括为一句话：**尽可能保留，不能保留的安全降级，绝不让变换导致 API 调用失败。**
+
+**跨模型转换发生的位置**：在 provider 内部 streamXxx 每次发 HTTP 请求之前调用 buildParams()->convertMessages()->transformMessages()
 
 ### 变换策略：同模型保持，跨模型降级
 
@@ -1493,15 +1514,11 @@ flowchart TD
 Thinking block 是整个变换逻辑中最复杂的部分。这不是因为代码多，而是因为 thinking 块有多种形态，每种的处理策略不同。先看类型定义：
 
 ```typescript
-// packages/ai/src/types.ts:143-151
-
+// packages/ai/src/types.ts
 export interface ThinkingContent {
   type: "thinking";
   thinking: string;
   thinkingSignature?: string;
-  /** When true, the thinking content was redacted by safety filters.
-   *  The opaque encrypted payload is stored in `thinkingSignature`
-   *  so it can be passed back to the API for multi-turn continuity. */
   redacted?: boolean;
 }
 ```
@@ -1795,7 +1812,7 @@ if (assistantMsg.stopReason === "error"
 
 ## Structured split tool results 结构化拆分工具结果
 
-### 核心思想：将工具返回结果拆分为“给 LLM 看的”和“给 UI 显示的”
+**核心思想：将工具返回结果拆分为“给 LLM 看的”和“给 UI 显示的”**
 
 大多数统一 LLM API 只让工具返回一段文本/JSON 给 LLM，但这段文本不一定包含 UI 需要展示的所有信息（例如图表、富文本）。开发者不得不**解析文本输出再重组 UI 数据**，很麻烦。
 
@@ -1807,8 +1824,8 @@ pi-ai 允许工具同时返回：
 并且：
 
 - 工具参数通过 **TypeBox schema + AJV** 自动校验，失败时给出详细错误。
-- 可以返回**图片附件**（转成 base64 及 MIME 类型），以各提供商原生格式传递。
-          
+- 可以返回**图片附件**（转成 base64 及 MIME 类型），以各提供商原生格式传递。        
+
 这个概念在代码中体现在三层：
 
 **1. 类型定义层 — `ToolResultMessage.details`**
@@ -1827,7 +1844,6 @@ TUI 渲染时通过 `renderResult(result, options, theme)` 回调读取 `result.
 **3. 扩展系统层 — 扩展可以修改 details**
 
 coding-agent/src/core/extensions/runner.ts：扩展的 `tool_result` handler 可以同时修改 `content`（给 LLM 的）和 `details`（给 UI 的），实现扩展对工具结果的拦截和增强。
-
 
 
 
