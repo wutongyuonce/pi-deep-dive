@@ -1,164 +1,4 @@
-
-
-
-
-### pi-ai 是纯粹的"模型通信层"，工具的生命周期管理在 agent 层。
-
-```
-agent 层：注册工具 -> 构建 Context（含 tools 
-定义）-> 调用 pi-ai 的 stream()
-pi-ai 层：把 tools 转成 API 格式 -> 发请求 
--> 流式解析出 ToolCall -> 返回给 agent
-agent 层：收到 ToolCall -> 执行工具 -> 构造 
-ToolResultMessage -> 塞回 Context -> 再调 
-pi-ai
-pi-ai 层：把 ToolResultMessage 转成 API 格
-式 -> 发下一轮请求...
-```
-pi-ai 内部用的 `Tool` 类型是这样的：
-
-```typescript
-// pi-ai 的统一格式
-{
-  name: "read_file",
-  description: "读取文件内容",
-  parameters: { type: "object", properties: { path: { type: "string" } }, required: ["path"] }
-}
-```
-
-发给 OpenAI API 时，需要转成 OpenAI 要求的格式：
-
-```json
-{
-  "type": "function",
-  "function": {
-    "name": "read_file",
-    "description": "读取文件内容",
-    "parameters": { ... },
-    "strict": false
-  }
-}
-```
-
-发给 Anthropic API 时，又是另一种格式：
-
-```json
-{
-  "name": "read_file",
-  "description": "读取文件内容",
-  "input_schema": { ... }
-}
-```
-
-"转成 API 格式"就是 `convertTools()` 做的事——把同一套 `Tool` 定义，适配成不同 provider 各自要求的结构。这样 agent 层只需要定义一次工具，不用关心底层用的是 OpenAI 还是 Anthropic。
-
-
-
-### 完整的工具调用流程是两轮对话
-
-第一轮：模型请求调用工具
-
-pi-ai 的 provider（如 openai-completions.ts）通过流式 chunk 拼接出这个 tool_calls 数组，连同 id: "call_abc123" 一起放进 AssistantMessage 返回给 agent 层。
-
-agent 层执行工具
-
-```
-agent 收到 AssistantMessage
-  → 发现 content 里有 ToolCall（name: 
-  "read_file", arguments: {path: "/tmp/a.
-  txt"}）
-  → 调用实际的 read_file 函数，拿到结果 
-  "hello world"
-  → 构造 ToolResultMessage: { toolCallId: 
-  "call_abc123", content: "hello world" }
-```
-第二轮：把结果回灌给 API
-
-```
-你的应用 → API: [
-  { role: "user", content: "请帮我读取 /
-  tmp/a.txt" },
-  { role: "assistant", tool_calls: [{ id: 
-  "call_abc123", ... }] },
-  { role: "tool", tool_call_id: 
-  "call_abc123", content: "hello world" },
-  //                     
-  ^^^^^^^^^^^^^^^^^^^^  就是靠这个 id 关联的
-]
-API → 你的应用: "文件内容是 hello world"
-```
-pi-ai 在这个流程中的角色 ：只负责把 ToolCall （含 id）从流式 chunk 里拼出来返回，以及把 ToolResultMessage（含 tool_call_id）转成 API 格式发回去。执行工具和构造 ToolResultMessage 是 agent 层的事。
-
 # pi-agent 到 pi-ai 的总流程图
-
-```mermaid
-flowchart TD
-    A[应用 / coding-agent / Agent] --> B[pi-agent: Agent.prompt / agentLoop / runAgentLoop]
-    B --> C[AgentContext]
-    B --> D[AgentLoopConfig]
-    D --> D1["extends SimpleStreamOptions"]
-    D --> D2["Agent 专属字段:
-    model
-    convertToLlm
-    transformContext
-    getApiKey
-    prepareNextTurn
-    shouldStopAfterTurn
-    getSteeringMessages
-    getFollowUpMessages
-    toolExecution
-    beforeToolCall
-    afterToolCall"]
-
-    C --> E[streamAssistantResponse]
-    E --> F["transformContext(messages)"]
-    F --> G["convertToLlm(AgentMessage[]) -> Message[]"]
-    G --> H["构造 pi-ai Context
-    { systemPrompt, messages, tools }"]
-    D1 --> I["pi-ai SimpleStreamOptions
-    reasoning
-    thinkingBudgets
-    + StreamOptions"]
-    E --> J["streamFn(model, Context, options)
-    默认 = streamSimple"]
-
-    H --> J
-    I --> J
-
-    J --> K[pi-ai streamSimple]
-    K --> L[resolveApiProvider]
-    L --> M[provider.streamSimple]
-
-    M --> N["provider 内部逐步构造 partial AssistantMessage"]
-    N --> O["AssistantMessageEventStream
-    EventStream<AssistantMessageEvent, AssistantMessage>"]
-    O --> P["AssistantMessageEvent:
-    start
-    text_*
-    thinking_*
-    toolcall_*
-    done / error"]
-
-    P --> Q["pi-agent 翻译为 AgentEvent:
-    message_start
-    message_update
-    message_end"]
-    Q --> R[runLoop]
-
-    R --> S{"final AssistantMessage
-    是否包含 toolCall?"}
-    S -- 否 --> T[turn_end / shouldStopAfterTurn / follow-up]
-    S -- 是 --> U[executeToolCalls]
-    U --> V["AgentTool.execute ->
-    AgentToolResult"]
-    V --> W["create ToolResultMessage"]
-    W --> X["追加到 currentContext.messages / newMessages"]
-    X --> T
-
-    T --> Y[agent_end]
-```
-
-
 
 ```mermaid
 flowchart TD
@@ -259,10 +99,6 @@ flowchart TD
 ```
 
 <img src="img/image-20260612205605048.png" alt="image-20260612205605048" style="zoom: 50%;" />
-
-
-
-
 
 # [pi-agent](https://github.com/badlogic/pi-mono/tree/main/packages/agent)
 
@@ -653,6 +489,19 @@ export type AgentEvent =
   | { type: "tool_execution_end"; toolCallId: string; toolName: string; result: any; isError: boolean };
 ```
 
+| 事件                    | 触发时机                                              |
+| ----------------------- | ----------------------------------------------------- |
+| `agent_start`           | `Agent`开始处理                                       |
+| `agent_end`             | `Agent`处理完成（所有订阅者`await`结束后才`resolve`） |
+| `turn_start`            | 新一轮`LLM`调用开始                                   |
+| `turn_end`              | 本轮`LLM`调用结束（含工具执行结果）                   |
+| `message_start`         | 任意消息开始（`user/assistant/toolResult`）           |
+| `message_update`        | 仅限`assistant`消息，包含流式增量`delta`              |
+| `message_end`           | 消息完整接收                                          |
+| `tool_execution_start`  | 工具开始执行                                          |
+| `tool_execution_update` | 工具流式进度更新                                      |
+| `tool_execution_end`    | 工具执行结束                                          |
+
 事件形成一个完整的生命周期：
 
 ```
@@ -672,12 +521,21 @@ agent_start
 agent_end
 ```
 
-核心区别：
+**无工具调用时的事件序列：**
 
-- AssistantMessageEvent：pi-ai 产出，只覆盖"一条消息的流式拼接"（text/thinking/toolcall 的 start/delta/end）
-- AgentEvent：pi-agent 产出，覆盖"整个 agent 运行周期"（agent/turn/message/tool 四层生命周期），其中 message_update 事件里会透传 assistantMessageEvent 作为嵌套字段
+<img src="img/image-20260422100108701.png" alt="image-20260422100108701" style="zoom:40%;" />
 
-所以 **AgentEvent 是 AssistantMessageEvent 的超集包装：它把单条消息的流式事件包进更大的 agent 生命周期里，同时增加了工具执行、轮次管理、agent 启停等 pi-ai 不关心的事件。**
+**有工具调用时的事件序列：**
+
+<img src="img/image-20260422100128007.png" alt="image-20260422100128007" style="zoom:40%;" />
+
+> **AssistantMessageEvent 和 AgentEvent 的核心区别：**
+>
+> - AssistantMessageEvent：pi-ai 产出，只覆盖"一条消息的流式拼接"（text/thinking/toolcall 的 start/delta/end）
+> - AgentEvent：pi-agent 产出，覆盖"整个 agent 运行周期"（agent/turn/message/tool 四层生命周期），其中 message_update 事件里会透传 assistantMessageEvent 作为嵌套字段
+>
+> 所以 **AgentEvent 是 AssistantMessageEvent 的超集包装：它把单条消息的流式事件包进更大的 agent 生命周期里，同时增加了工具执行、轮次管理、agent 启停等 pi-ai 不关心的事件。**
+>
 
 ### 第 6 组：Agent 循环钩子结果与上下文
 
@@ -839,216 +697,162 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 
 ### 双层循环：`runLoop()`
 
-`runLoop()` 是整个引擎的核心。它的设计可以用一张图概括：
+`runLoop()` 是整个引擎的核心。公开 API 内部都调用了它：
 
-```mermaid
-flowchart TB
-    Start([runLoop 启动]) --> PollSteering{getSteeringMessages}
-    
-    PollSteering -->|有消息| Inject[注入 pending 消息到 context]
-    PollSteering -->|无消息| StreamLLM
-    Inject --> StreamLLM[streamAssistantResponse\n调用 LLM]
-    
-    StreamLLM --> CheckError{stopReason\n error/aborted?}
-    CheckError -->|是| EmitEnd([emit agent_end\n退出])
-    
-    CheckError -->|否| CheckToolCalls{assistant 消息\n含 toolCall?}
-    
-    CheckToolCalls -->|有| ExecuteTools[executeToolCalls\n执行工具]
-    ExecuteTools --> CheckTerminate{所有工具\n都 terminate?}
-    CheckTerminate -->|是| ExitInner
-    CheckTerminate -->|否| CheckSteering2{getSteeringMessages}
-    CheckSteering2 -->|有消息| Inject
-    CheckSteering2 -->|无消息| CheckToolCalls
-    
-    CheckToolCalls -->|无| ExitInner[内层循环结束]
-    
-    ExitInner --> PrepareNextTurn[prepareNextTurn\n改写 context/model]
-    PrepareNextTurn --> ShouldStop{shouldStopAfterTurn?}
-    ShouldStop -->|是| EmitEnd
-    
-    ShouldStop -->|否| CheckFollowUp{getFollowUpMessages}
-    CheckFollowUp -->|有消息| SetPending[设为 pending\n重新进入内层]
-    SetPending --> PollSteering
-    CheckFollowUp -->|无消息| Done([emit agent_end\n退出])
+```
+agentLoop()                -> runAgentLoop()        -> runLoop()
+agentLoopContinue()        -> runAgentLoopContinue() -> runLoop()
 ```
 
-**内层循环**负责"持续工作"：调用 LLM -> 执行工具 -> 检查 steering -> 再调用 LLM。
+它的设计分为两层循环：<img src="img/image-20260613152250435.png" alt="image-20260613152250435" style="zoom:55%;" />
 
-**外层循环**负责"被唤醒"：当内层循环结束（agent 本来要停下来），检查有没有 follow-up 消息。
+* 内层循环一次迭代的完整时序：
 
-为什么要分两层？因为 steering 和 follow-up 的语义不同：
+  ```
+  用户消息 / steering / follow-up 注入
+      ↓
+  LLM 请求（transformContext → convertToLlm → streamSimple）
+      ↓
+  得到 assistantMessage
+      ↓
+  有 toolCall? ──是──→ 执行工具 → 追加 toolResult → turn_end
+      │                     ↓
+      │               hasMoreToolCalls? ──是──→ 回到内层顶部（再调 LLM）
+      │                     │
+      │                     否（terminate=true）
+      │                     ↓
+      └──否────────────→ turn_end
+                            ↓
+                     prepareNextTurn()
+                            ↓
+                     shouldStopAfterTurn() ──是──→ agent_end → return
+                            │
+                            否
+                            ↓
+                     getSteeringMessages() ──有──→ 回到内层顶部
+                            │
+                            无
+                            ↓
+                     内层循环结束 → 跳到外层
+  ```
 
-- **Steering**（转向）：用户在 agent 工作过程中插入一条新指令，比如"别改那个文件，换一种方式"。它在当前 turn 的工具执行完成后注入，影响下一次 LLM 调用。
-- **Follow-up**（追加）：用户在 agent 完成后追加一条新任务，比如"好的，现在写测试"。它只在 agent 本来要退出时才被消费。
+* 外层循环的唯一职责：
 
-这两种消息的消费时机不同，所以需要两层循环来区分。如果只有一层循环，就没法区分"agent 还在干活时插入的指令"和"agent 干完活后追加的新任务"。
+  ```
+  内层循环结束（意味着：没有工具要执行，也没有 steering）
+      ↓
+  getFollowUpMessages() ──有──→ pending = follow-up → continue → 重入内层
+      │
+      无
+      ↓
+  break → agent_end
+  ```
+
+Pi 支持在 `Agent` 运行期间注入**转向消息与跟进消息**，无需等待 `Agent` 停止：
+
+```typescript
+// agent.ts 提供了消息队列操作
+// 向正在工作的 Agent 发送转向指令
+agent.steer({ role: "user", content: "Stop! Focus on file X instead.", timestamp: Date.now() });
+
+// 等 Agent 彻底完成后追加任务
+agent.followUp({ role: "user", content: "Now write a summary.", timestamp: Date.now() });
+```
+
+为什么要分两层？因为 steering 和 follow-up 的语义不同、消费时机不同：
+
+- **Steering**（转向消息）：用户在 agent 工作过程中插入一条新指令，比如"别改那个文件，换一种方式"。它在当前 turn 的工具执行完成后注入，影响下一次 LLM 调用。
+- **Follow-up**（追加消息）：用户在 agent 完成后追加一条新任务，比如"好的，现在写测试"。它只在 agent 本来要退出时才被消费。
+
+如果只有一层循环，就没法区分"agent 还在干活时插入的指令"和"agent 干完活后追加的新任务"。
+
+**函数总流程：**
 
 ```ts
 /** Agent 事件接收器函数：异步或同步回调，用于接收 agent 生命周期中的所有事件。 */
 export type AgentEventSink = (event: AgentEvent) => Promise<void> | void;
 
-runLoop()
-     ├── config.getSteeringMessages()     // 轮询用户中途插话
-     ├── streamAssistantResponse()        // 请求一轮模型回复
-     │     ├── config.transformContext()   // 高层消息变换（摘要、裁剪）
-     │     ├── config.convertToLlm()      // AgentMessage -> LLM Message 边界转换
-     │     └── streamFn() / streamSimple()// 调用 pi-ai 的流式 API
-     ├── executeToolCalls()               // 工具分发器
-     │     ├── executeToolCallsSequential()  // 串行路径
-     │     └── executeToolCallsParallel()    // 并行路径
-     │       （两者内部共享）:
-     │         ├── prepareToolCall()
-     │         │     ├── prepareToolCallArguments()
-     │         │     ├── validateToolArguments()
-     │         │     └── config.beforeToolCall()
-     │         ├── executePreparedToolCall()
-     │         │     └── tool.execute()
-     │         ├── finalizeExecutedToolCall()
-     │         │     └── config.afterToolCall()
-     │         ├── emitToolExecutionEnd()
-     │         ├── createToolResultMessage()
-     │         └── emitToolResultMessage()
-     ├── config.prepareNextTurn()        // 轮结束后的统一改写钩子
-     ├── config.shouldStopAfterTurn()    // 停机判断
-     └── config.getFollowUpMessages()    // follow-up 检查
+runLoop(initialContext, newMessages, initialConfig, signal, emit, streamFn)
+│
+│   初始化：
+│   ├── currentContext = initialContext
+│   ├── config = initialConfig
+│   ├── firstTurn = true
+│   └── pendingMessages = config.getSteeringMessages()  // 第一次轮询用户中途插话
+│
+│   ┌─────────────────── 外层 while(true) ───────────────────────┐
+│   │   职责："被唤醒"                                             │
+│   │   条件：内层循环结束后，检查 follow-up 队列                     │
+│   │   退出：没有 follow-up → break → agent_end                   │
+│   │                                                            │
+│   │   let hasMoreToolCalls = true                              │
+│   │                                                            │
+│   │   ┌─── 内层 while (hasMoreToolCalls || pending.length>0) ──┐│
+│   │   │   职责："持续工作"                                       ││
+│   │   │   条件：还有工具要执行 或 有待注入消息                      ││
+│   │   │   退出：无工具 且 无 pending → 跳到外层                    ││
+│   │   │                                                        ││
+│   │   │   1. emit(turn_start)  								 ││
+│   │   │   // 非首轮才发，首轮的已经在 runLoop 外部发了              ││
+│   │   │                                                        ││
+│   │   │   2. 注入 pendingMessages 到 transcript                 ││
+│   │   │      ├── emit(message_start) / emit(message_end)       ││
+│   │   │      ├── currentContext.messages.push(msg)             ││
+│   │   │      └── newMessages.push(msg)                         ││
+│   │   │                                                        ││
+│   │   │   3. streamAssistantResponse() → 请求一轮模型回复，得到 assistantMessage ││
+│   │   │      ├── config.transformContext() // 高层消息变换（摘要、裁剪）││
+│   │   │      ├── config.convertToLlm() // AgentMessage -> LLM Message 边界转换 ││
+│   │   │      └── streamFn() / streamSimple() // 调用 pi-ai 的流式 API ││
+│   │   │                                                        ││
+│   │   │   4. 若 stopReason === "error" || "aborted"            ││
+│   │   │      → emit(turn_end) → emit(agent_end) → return       ││
+│   │   │                                                        ││
+│   │   │   5. 从 assistantMessage.content 提取 toolCalls         ││
+│   │   │                                                        ││
+│   │   │   6. 若有 toolCalls                                     ││
+│   │   │      ├── executeToolCalls() → toolResults // 工具分发器，具体流程见后文 ││
+│   │   │      ├── hasMoreToolCalls = !terminate                 ││
+│   │   │      └── 追加 toolResults 到 context + newMessages      ││
+│   │   │                                                        ││
+│   │   │   7. emit(turn_end)                                    ││
+│   │   │                                                        ││
+│   │   │   8. config.prepareNextTurn() // 轮结束后的统一改写钩子    ││
+│   │   │      → 可替换 context / model / thinkingLevel           ││
+│   │   │                                                        ││
+│   │   │   9. config.shouldStopAfterTurn() // 停机判断			   ││
+│   │   │      → true → emit(agent_end) → return                 ││
+│   │   │                                                        ││
+│   │   │   10. pendingMessages = config.getSteeringMessages()   ││
+│   │   │       // 再次轮询，允许用户在工具执行期间插话                ││
+│   │   │                                                        ││
+│   │   └───────────── 内层循环结束 ←──────────────────────────────┘│
+│   │                                                             │
+│   │   // 走到这里：无 toolCall 且 无 pending steering              │
+│   │   11. followUpMessages = config.getFollowUpMessages()       │
+│   │                                                             │
+│   │   12. 若有 follow-up                                         │
+│   │       → pendingMessages = followUpMessages                  │
+│   │       → continue （回到外层循环顶部，重新进入内层循环）           │
+│   │                                                             │
+│   │   13. 若无 follow-up                                         │
+│   │       → break                                               │
+│   └─────────────────────────────────────────────────────────────┘
+│
+└── emit({ type: "agent_end", messages: newMessages })
 ```
 
+注意几个设计细节：
 
+1. **`pendingMessages` 的复用**。无论是 steering 消息还是 follow-up 消息，都通过同一个 `pendingMessages` 变量注入内层循环。外层循环的唯一动作就是把 follow-up 消息赋值给 `pendingMessages`，然后 `continue` 重新进入内层。两种消息共享同一条注入通道，但消费时机不同。
 
-```ts
-async function runLoop(
-	initialContext: AgentContext,
-	newMessages: AgentMessage[],
-	initialConfig: AgentLoopConfig,
-	signal: AbortSignal | undefined,
-	emit: AgentEventSink,
-	streamFn?: StreamFn,
-): Promise<void> {
-	let currentContext = initialContext;
-	let config = initialConfig;
-	let firstTurn = true;
-	// 先看是否已经有 steering 消息排队。
-	// 这让 agent 在发出第一轮请求前，就能把“用户中途插话”合并进 transcript。
-	let pendingMessages: AgentMessage[] = (await config.getSteeringMessages?.()) || [];
+2. **错误通过 `stopReason` 传递，而不是异常**。当 LLM 调用失败时，`streamAssistantResponse` 不会抛异常 — 它返回一个 `stopReason` 为 `"error"` 的消息。这和 pi-ai 层流式机制的"错误编码进事件流"设计一脉相承。循环引擎不需要 try-catch，它只需要检查 `stopReason`。
 
-	// 外层 while 负责“agent 本来该停，但又收到了 follow-up”的情况。
-	while (true) {
-		let hasMoreToolCalls = true;
+3. **函数签名是纯函数式的**。`runLoop` 接收 context、config、signal，返回 void（通过 `newMessages` 数组收集产出）。它不持有任何状态，不修改任何外部变量（除了 `currentContext.messages` 和 `newMessages` 这两个被调用者传入的可变引用）。
 
-		// 内层 while 处理一条完整工作链：
-		// 注入 pending 消息 -> 请求 assistant -> 执行 tool calls -> 决定是否继续本轮。
-		while (hasMoreToolCalls || pendingMessages.length > 0) {
-            // 第一轮的 turn_start 在 runAgentLoop 已经发过了，这里要跳过，只有后续的 turn 才发
-			if (!firstTurn) {
-				await emit({ type: "turn_start" });
-			} else {
-				firstTurn = false;
-			}
+### `streamAssistantResponse()` — 与 pi-ai 的桥接点，请求一轮模型回复
 
-			// pending 消息会先落入 transcript，再去请求 assistant。
-			// 这样模型能在“最新上下文”上继续推理。
-			if (pendingMessages.length > 0) {
-				for (const message of pendingMessages) {
-					await emit({ type: "message_start", message });
-					await emit({ type: "message_end", message });
-					currentContext.messages.push(message);
-					newMessages.push(message);
-				}
-				pendingMessages = [];
-			}
-
-			// 请求一轮 assistant 回复；这个函数内部会把流式事件翻译成 AgentEvent。
-			const message = await streamAssistantResponse(currentContext, config, signal, emit, streamFn);
-			newMessages.push(message);
-
-			// error / aborted 都视为本次 run 到此结束，不再继续进入 tool 或 follow-up。
-			if (message.stopReason === "error" || message.stopReason === "aborted") {
-				await emit({ type: "turn_end", message, toolResults: [] });
-				await emit({ type: "agent_end", messages: newMessages });
-				return;
-			}
-
-			// assistant 最终消息里若包含 toolCall block，就进入工具执行阶段。
-			const toolCalls = message.content.filter((c) => c.type === "toolCall");
-
-			const toolResults: ToolResultMessage[] = [];
-			hasMoreToolCalls = false;
-			if (toolCalls.length > 0) {
-				// executeToolCalls 会自行决定串行还是并行，并返回本批工具结果。
-				const executedToolBatch = await executeToolCalls(currentContext, message, config, signal, emit);
-				toolResults.push(...executedToolBatch.messages);
-				// terminate=true 表示“这批工具已经明确要求对话在此终止”。
-				hasMoreToolCalls = !executedToolBatch.terminate;
-
-				// toolResult 也是 transcript 的一部分，必须追加到 context/newMessages，
-				// 否则下一轮 assistant 将看不到工具返回。
-				for (const result of toolResults) {
-					currentContext.messages.push(result);
-					newMessages.push(result);
-				}
-			}
-
-			await emit({ type: "turn_end", message, toolResults });
-
-			// prepareNextTurn 是一个“每轮结束后的统一改写钩子”。
-			// 它可以替换 context、切换 model，或更新 thinkingLevel。
-			const nextTurnContext = {
-				message,
-				toolResults,
-				context: currentContext,
-				newMessages,
-			};
-			const nextTurnSnapshot = await config.prepareNextTurn?.(nextTurnContext);
-			if (nextTurnSnapshot) {
-				currentContext = nextTurnSnapshot.context ?? currentContext;
-				config = {
-					...config,
-					model: nextTurnSnapshot.model ?? config.model,
-					reasoning:
-						nextTurnSnapshot.thinkingLevel === undefined
-							? config.reasoning
-							: nextTurnSnapshot.thinkingLevel === "off"
-								? undefined
-								: nextTurnSnapshot.thinkingLevel,
-				};
-			}
-
-			// shouldStopAfterTurn 是在“turn 已经完整结束”后的最后停机判断。
-			if (
-				await config.shouldStopAfterTurn?.({
-					message,
-					toolResults,
-					context: currentContext,
-					newMessages,
-				})
-			) {
-				await emit({ type: "agent_end", messages: newMessages });
-				return;
-			}
-
-			// 在每一轮末尾再轮询一次 steering，允许用户在流式输出或工具执行期间插话。
-			pendingMessages = (await config.getSteeringMessages?.()) || [];
-		}
-
-		// 走到这里表示：没有更多 toolCall，且也没有 pending steering。
-		// 这时 agent“理论上可以结束”，但还要检查 follow-up 队列。
-		const followUpMessages = (await config.getFollowUpMessages?.()) || [];
-		if (followUpMessages.length > 0) {
-			// follow-up 被重新塞进 pending，让内层循环按“用户新增消息”同样的路径处理。
-			pendingMessages = followUpMessages;
-			continue;
-		}
-
-		// 没有 follow-up，说明本次 agent run 真的结束了。
-		break;
-	}
-
-	await emit({ type: "agent_end", messages: newMessages });
-}
-```
-
-### `streamAssistantResponse()` — 与 pi-ai 的桥接点
+`runLoop()` 把"调 LLM"委托给了 `streamAssistantResponse()`。这个函数做了一件非常重要的事：**把 AgentMessage 世界和 LLM Message 世界桥接起来**。
 
 这是整个系统里最有代表性的桥接函数。它完成 4 层转换：
 
@@ -1100,11 +904,167 @@ async function streamAssistantResponse(
 
 ### 工具执行管道：三阶段设计
 
-工具执行不是简单的"找到工具，传参数，拿结果"。它是一条三阶段管道：
+pi-ai 是纯粹的"模型通信层"，工具的生命周期管理在 agent 层。
 
 ```
-prepare → execute → finalize
+agent 层：注册工具 -> 构建 Context（含 tools 
+定义）-> 调用 pi-ai 的 stream()
+pi-ai 层：把 tools 转成 API 格式 -> 发请求 
+-> 流式解析出 ToolCall -> 返回给 agent
+agent 层：收到 ToolCall -> 执行工具 -> 构造 
+ToolResultMessage -> 塞回 Context -> 再调 
+pi-ai
+pi-ai 层：把 ToolResultMessage 转成 API 格
+式 -> 发下一轮请求...
 ```
+
+pi-ai 内部用的 `Tool` 类型是这样的：
+
+```typescript
+// pi-ai 的统一格式
+{
+  name: "read_file",
+  description: "读取文件内容",
+  parameters: { type: "object", properties: { path: { type: "string" } }, required: ["path"] }
+}
+```
+
+发给 OpenAI API 时，需要转成 OpenAI 要求的格式：
+
+```json
+{
+  "type": "function",
+  "function": {
+    "name": "read_file",
+    "description": "读取文件内容",
+    "parameters": { ... },
+    "strict": false
+  }
+}
+```
+
+发给 Anthropic API 时，又是另一种格式：
+
+```json
+{
+  "name": "read_file",
+  "description": "读取文件内容",
+  "input_schema": { ... }
+}
+```
+
+"转成 API 格式"就是具体的 provider `convertTools()` 做的事——把同一套 `Tool` 定义，适配成不同 provider 各自要求的结构。这样 agent 层只需要定义一次工具，不用关心底层用的是 OpenAI 还是 Anthropic。
+
+pi-agent 层的流程则是：
+
+```typescript
+// agent-loop.ts 
+
+// runLoop 函数内部
+    // assistant 最终消息里若包含 toolCall block，就进入工具执行阶段。
+    // filter 从助手消息的 content 数组中，取出 type 为 "toolCall" 的内容块组成新数组。
+    const toolCalls = message.content.filter((c) => c.type === "toolCall");
+
+    const toolResults: ToolResultMessage[] = [];
+    hasMoreToolCalls = false;
+    if (toolCalls.length > 0) {
+        // executeToolCalls 会自行决定串行还是并行，并返回本批工具结果。
+        const executedToolBatch = await executeToolCalls(currentContext, message, config, signal, emit);
+        toolResults.push(...executedToolBatch.messages);
+        // terminate=true 表示“这批工具已经明确要求对话在此终止”。
+        hasMoreToolCalls = !executedToolBatch.terminate;
+
+        // toolResult 也是 transcript 的一部分，必须追加到 context/newMessages，
+        // 否则下一轮 assistant 将看不到工具返回。
+        for (const result of toolResults) {
+            currentContext.messages.push(result);
+            newMessages.push(result);
+        }
+    }
+
+/**
+ * 工具调用的执行结果汇总类型。
+ *
+ * 谁使用我：
+ * - `executeToolCallsSequential()` / `executeToolCallsParallel()` 返回此类型
+ * - `runLoop()` 消费 `messages` 和 `terminate` 字段
+ *
+ * 字段说明：
+ * - `messages`: 本批工具产生的 `ToolResultMessage[]`，会追加到 context 和 newMessages
+ * - `terminate`: 若为 true，表示本批所有工具都要求终止，不再继续执行后续工具轮次
+ */
+type ExecutedToolCallBatch = {
+	messages: ToolResultMessage[];
+	terminate: boolean;
+};
+
+/**
+ * 执行助手消息中的工具调用。
+ *
+ * 决策职责只有一件事：本批工具调用走串行还是并行。
+ * 真正执行分别落到 `executeToolCallsSequential()` / `executeToolCallsParallel()`。
+ */
+async function executeToolCalls(
+	currentContext: AgentContext,
+	assistantMessage: AssistantMessage,
+	config: AgentLoopConfig,
+	signal: AbortSignal | undefined,
+	emit: AgentEventSink,
+): Promise<ExecutedToolCallBatch> {
+	const toolCalls = assistantMessage.content.filter((c) => c.type === "toolCall");
+	// 检查本次批次中是否有任何工具在定义时标记为 executionMode === "sequential"。
+	// 这是单工具级别的覆盖——即使全局配置为并行，只要有一个工具要求串行，整个批次就降级为串行。
+	const hasSequentialToolCall = toolCalls.some(
+		(tc) => currentContext.tools?.find((t) => t.name === tc.name)?.executionMode === "sequential",
+	);
+	if (config.toolExecution === "sequential" || hasSequentialToolCall) {
+		return executeToolCallsSequential(currentContext, assistantMessage, toolCalls, config, signal, emit);
+	}
+	return executeToolCallsParallel(currentContext, assistantMessage, toolCalls, config, signal, emit);
+}
+```
+
+`executeToolCallsSequential()` 串行执行函数 和 `executeToolCallsParallel()`并行执行函数共享完全相同的子步骤，即一条三阶段管道，核心区别只有一个： execute 这一步串行还是并行：
+
+```
+prepare → execute → finalize( → emit)
+```
+
+* 串行 executeToolCallsSequential：
+
+  ```ts
+  for (const toolCall of toolCalls) {
+      prepare → execute → finalize → emit     ← 一个个来，上一个完
+      成才开始下一个
+  }
+  ```
+
+* 并行 executeToolCallsParallel：
+
+  ```ts
+  // 第一阶段：按顺序做 prepare（串行）
+  for (const toolCall of toolCalls) {
+      prepare → 存入 finalizedCalls 数组      ← 只准备，不执行
+  }
+  
+  // 第二阶段：并发执行
+  await Promise.all(finalizedCalls)            ← 所有工具同时执行
+  // 但结果按原始顺序排列
+  
+  // 第三阶段：按顺序发消息
+  for (const finalized of orderedFinalizedCalls) {
+      emit(resultMessage)                      ← 按原始顺序发，避
+      免乱序
+  }
+  ```
+
+  
+
+为什么 prepare 要串行，execute 可以并行？
+
+- prepare 包含 beforeToolCall 钩子，可能有校验、阻断逻辑，需要按 assistant 输出顺序稳定执行
+- execute 是真正的工具执行（如发 HTTP 请求、跑 bash 命令），互不影响，可以同时跑
+并行的一个细节： finalizedCalls 数组里存的不是结果，而是 函数（thunk） 。只有等所有 prepare 都完成后，才用 Promise.all 一起执行。这样保证结果顺序和原始 toolCalls 顺序一致。
 
 #### 阶段 1：Prepare — `prepareToolCall()`
 
@@ -1129,6 +1089,29 @@ async function prepareToolCall(...): Promise<PreparedToolCall | ImmediateToolCal
   // 5. 全部通过
   return { kind: "prepared", toolCall, tool, args: validatedArgs };
 }
+
+// prepareToolCall 的成功返回类型：工具已找到、参数已校验、before hook 已通过。
+type PreparedToolCall = {
+	kind: "prepared";
+	toolCall: AgentToolCall;
+	tool: AgentTool<any>;
+	args: unknown;
+};
+
+/**
+ * prepareToolCall 的"短路"返回类型：不需要真正执行工具。
+ *
+ * 触发场景：
+ * - 工具未找到（tool === undefined）
+ * - 参数校验失败（validateToolArguments 抛错）
+ * - beforeToolCall hook 返回 block=true
+ * - AbortSignal 已触发
+ */
+type ImmediateToolCallOutcome = {
+	kind: "immediate";
+	result: AgentToolResult<any>;
+	isError: boolean;
+};
 ```
 
 返回类型是判别联合：`kind: "prepared"` 表示可以执行，`kind: "immediate"` 表示直接返回错误。
@@ -1192,6 +1175,11 @@ async function executeToolCalls(...): Promise<ExecutedToolCallBatch> {
 }
 ```
 
+| 模式               | 说明                                                         |
+| ------------------ | ------------------------------------------------------------ |
+| `parallel`（默认） | 对所有工具调用先逐个做`preflight`验证，然后并发执行允许的工具，结果按`assistant`返回顺序发出 |
+| `sequential`       | 工具调用逐个准备、执行并`finalize`，模拟历史默认行为         |
+
 **Sequential 模式**：每个工具独立完成整条管道（prepare -> execute -> finalize），然后才开始下一个。
 
 **Parallel 模式**的设计更微妙：
@@ -1202,24 +1190,24 @@ async function executeToolCalls(...): Promise<ExecutedToolCallBatch> {
 
 ```mermaid
 sequenceDiagram
-    participant Loop as Agent Loop
+    participant AgentLoop as Agent Loop
     participant P as Prepare
     participant E as Execute
     participant F as Finalize
 
-    Note over Loop: === Sequential ===
-    Loop->>P: prepare(tool_1)
+    Note over AgentLoop: === Sequential ===
+    AgentLoop->>P: prepare(tool_1)
     P-->>E: execute(tool_1)
     E-->>F: finalize(tool_1)
-    Loop->>P: prepare(tool_2)
+    AgentLoop->>P: prepare(tool_2)
     P-->>E: execute(tool_2)
     E-->>F: finalize(tool_2)
 
-    Note over Loop: === Parallel ===
-    Loop->>P: prepare(tool_1)
-    Loop->>P: prepare(tool_2)
-    Loop->>E: execute(tool_1) 同时
-    Loop->>E: execute(tool_2) 同时
+    Note over AgentLoop: === Parallel ===
+    AgentLoop->>P: prepare(tool_1)
+    AgentLoop->>P: prepare(tool_2)
+    AgentLoop->>E: execute(tool_1) 同时
+    AgentLoop->>E: execute(tool_2) 同时
     E-->>F: finalize(tool_1) 按源顺序
     E-->>F: finalize(tool_2) 按源顺序
 ```
@@ -1270,7 +1258,47 @@ sequenceDiagram
 
 **除了循环之外， [pi-agent-core](https://github.com/badlogic/pi-mono/tree/main/packages/agent)还提供了一个 `Agent` 类，其中包含一些真正有用的功能：状态管理、简化的事件订阅、两种模式（一次一条或全部同时）的消息队列、附件处理（图像、文档）以及传输抽象，允许您直接运行代理或通过代理运行代理。**
 
-`Agent` 是对低层 `runAgentLoop*()` 的有状态封装。约 878 行代码。
+`Agent` 是对低层 `runAgentLoop*()` 的有状态封装。
+
+```typescript
+const agent = new Agent({
+  initialState: {
+    systemPrompt: 'You are a helpful assistant.',
+    model: getModel('anthropic', 'claude-sonnet-4-20250514'),
+    thinkingLevel: 'medium',  // off | minimal | low | medium | high | xhigh
+    tools: [],
+    messages: [],
+  },
+
+  // 将 AgentMessage[] 转换为 LLM 可理解的 Message[]
+  convertToLlm: (messages) => messages.filter(
+    m => m.role === 'user' || m.role === 'assistant' || m.role === 'toolResult'
+  ),
+
+  // 每次 LLM 调用前对上下文进行裁剪或注入
+  transformContext: async (messages, signal) => pruneOldMessages(messages),
+
+  // 工具调用前的拦截钩子（可阻断执行）
+  beforeToolCall: async ({ toolCall, args, context }) => {
+    if (toolCall.name === 'bash' && args.command.includes('rm -rf')) {
+      return { block: true, reason: 'Dangerous command blocked' };
+    }
+  },
+
+  // 工具调用后的后处理钩子
+  afterToolCall: async ({ toolCall, result, isError, context }) => {
+    if (!isError) {
+      return { details: { ...result.details, audited: true } };
+    }
+  },
+
+  toolExecution: 'parallel',       // parallel | sequential
+  steeringMode: 'one-at-a-time',   // one-at-a-time | all
+  followUpMode: 'one-at-a-time',   // one-at-a-time | all
+});
+```
+
+
 
 ### Agent 拥有什么
 

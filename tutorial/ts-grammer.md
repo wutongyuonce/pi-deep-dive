@@ -1,4 +1,4 @@
-## ts
+## Typescript 语法
 
 TypeScript 是 JavaScript 的"加强版"，它在 JavaScript 基础上加了**类型标注**。
 写代码时声明变量是什么类型（字符串、数字、对象等），编译器会在运行前帮你检查错误。
@@ -445,8 +445,8 @@ function agentLoop(): EventStream<...> {
 
 关键区别：用 `async` 的话，调用方必须 `await agentLoop()` 才能拿到 `stream`，但 `await` 会等到整个循环结束——那就失去了"实时流式消费"的意义。当前写法让调用方拿到流时，循环还在后台跑着，事件边产生边推入流。
 
-## ...xxx 展开语法 spread syntax
-### 在数组里
+### ...xxx 展开语法 spread syntax
+#### 在数组里
 ```ts
 [...prompts]
 ```
@@ -476,7 +476,7 @@ const c = [...a, ...b];
 // c = [1, 2, 3, 4]
 ```
 
-### 在对象里
+#### 在对象里
 
 ```ts
 {
@@ -513,3 +513,40 @@ const x = {
 ```
 
 注意： 后面同名字段会覆盖前面的字段 。
+
+### [number] 和 Extract<联合类型, 条件>
+
+```ts
+export type AgentToolCall = Extract<AssistantMessage["content"][number], { type: "toolCall" }>;
+```
+
+第一步： AssistantMessage["content"]
+
+AssistantMessage 的 content 字段是一个数组：
+
+```ts
+content: (TextContent | ThinkingContent | ToolCall)[]
+```
+第二步： [number]
+
+这是 TypeScript 的索引访问语法。 数组[number] 取的是"数组元素的类型"：
+
+```ts
+(TextContent | ThinkingContent | ToolCall)[number]
+= TextContent | ThinkingContent | ToolCall
+```
+就像 string[] 取 [number] 就是 string 。
+
+第三步： Extract<联合类型, 条件>
+
+Extract 是 TypeScript 内置工具类型，从联合类型中 筛选出匹配条件的成员 ：
+
+```ts
+Extract<TextContent | ThinkingContent | ToolCall, { type: 
+"toolCall" }>
+= ToolCall
+```
+因为只有 ToolCall 满足 { type: "toolCall" } 。
+
+
+

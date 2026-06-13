@@ -6,7 +6,10 @@
 >
 > https://github.com/ZhangHanDong/pi-book（🌟🌟🌟）
 >
+> https://guangzhengli.com/notes/pi-ai-and-agent-core-course（🌟🌟）
+>
 > https://github.com/cellinlab/how-pi-agent-works（🌟）
+>
 
 > Pi 奉行近乎激进的可扩展性，因此无需、也不愿替你规定工作流。许多在别的工具中“内建”的能力，在这里都可通过 extensions、skills，或安装第三方 pi packages 来实现。这样既能让核心保持精简，又能让你按自己的工作方式塑造 Pi。
 >
@@ -57,9 +60,9 @@ pi-mono 通过在根 `package.json` 的 `build` 脚本中**手动编排构建顺
 也就是说，它对上暴露的是：
 
 - 统一模型查询接口
-- 统一的 `stream()` / `complete()` / `streamSimple()` / `completeSimple()`
-- 统一的 `AssistantMessage`
-- 统一的 `AssistantMessageEventStream`
+- 统一的流式/非流式函数 `stream()` / `complete()` / `streamSimple()` / `completeSimple()`
+- 统一的返回消息 `AssistantMessage`
+- 统一的事件流 `AssistantMessageEventStream`
 - 统一的工具 schema / tool call / tool result 协议
 
 - 统一的 usage / cost / abort / cache / reasoning 抽象
@@ -70,6 +73,43 @@ pi-mono 通过在根 `package.json` 的 `build` 脚本中**手动编排构建顺
 - 构造每家自己的 payload
 - 把每家的增量流式事件翻译回统一协议
 - 兼容跨 provider 的上下文 handoff
+
+**基本使用示例：**
+
+```typescript
+import { Type, getModel, stream, complete, Context, Tool } from '@mariozechner/pi-ai';
+
+const model = getModel('anthropic', 'claude-sonnet-4-20250514');
+
+const tools: Tool[] = [{
+  name: 'get_weather',
+  description: 'Get current weather for a location',
+  parameters: Type.Object({
+    city: Type.String({ description: 'City name' })
+  })
+}];
+
+const context: Context = {
+  systemPrompt: 'You are a helpful assistant.',
+  messages: [{ role: 'user', content: 'What is the weather in Tokyo?' }],
+  tools
+};
+
+const s = stream(model, context);
+
+for await (const event of s) {
+  if (event.type === 'text_delta') {
+    process.stdout.write(event.delta);
+  } else if (event.type === 'toolcall_end') {
+    console.log(`Tool called: ${event.toolCall.name}`);
+  } else if (event.type === 'done') {
+    console.log(`Stop reason: ${event.reason}`);
+  }
+}
+
+const finalMessage = await s.result();
+console.log(`Cost: $${finalMessage.usage.cost.total.toFixed(4)}`);
+```
 
 ## 整个包的分层图
 
@@ -159,9 +199,8 @@ provider 适配层
 | validation.ts       | 工具参数校验       | `validateToolCall` 等                        | 外部调用者、agent loop         |
 | typebox-helpers.ts  | TypeBox 语法辅助   | `StringEnum` 等                              | 外部调用者、tool schema        |
 | overflow.ts         | 上下文溢出辅助     | 溢出检测 / 相关错误处理                      | provider、上层逻辑             |
-| node-http-proxy.ts  | 代理请求支持       | Node 侧 HTTP/HTTPS proxy                     | 需要代理的 provider            |
 
-typebox-helpers.ts 帮你 写 schema， validation.ts 用 schema 校验参数。
+typebox-helpers.ts 帮你写 schema， validation.ts 用 schema 校验参数。
 
 ### `scripts/` 
 
@@ -1426,6 +1465,8 @@ if (data.deepseek?.models) {
 
 pi-ai 从设计之初就考虑到了不同提供商之间的上下文切换。由于每个提供商都有自己追踪工具调用和思维轨迹的方式，因此只能尽力而为。例如，如果在会话中途从 Anthropic 切换到 OpenAI，Anthropic 的 thinking 块会被降级为普通文本块（丢失 thinkingSignature）。
 
+`Context` 可序列化，支持在不同提供商之间无缝传递对话上下文。
+
 ```typescript
 import { getModel, complete, Context } from '@mariozechner/pi-ai';
 
@@ -1844,7 +1885,6 @@ TUI 渲染时通过 `renderResult(result, options, theme)` 回调读取 `result.
 **3. 扩展系统层 — 扩展可以修改 details**
 
 coding-agent/src/core/extensions/runner.ts：扩展的 `tool_result` handler 可以同时修改 `content`（给 LLM 的）和 `details`（给 UI 的），实现扩展对工具结果的拦截和增强。
-
 
 
 

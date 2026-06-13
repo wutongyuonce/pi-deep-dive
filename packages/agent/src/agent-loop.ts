@@ -11,32 +11,6 @@
  *
  * agentLoop()                -> runAgentLoop()        -> runLoop()
  * agentLoopContinue()        -> runAgentLoopContinue() -> runLoop()
- *
- * runLoop() 内部循环：
- *   runLoop()
- *     ├── config.getSteeringMessages()     // 轮询用户中途插话
- *     ├── streamAssistantResponse()        // 请求一轮模型回复
- *     │     ├── config.transformContext()   // 高层消息变换（摘要、裁剪）
- *     │     ├── config.convertToLlm()      // AgentMessage -> LLM Message 边界转换
- *     │     └── streamFn() / streamSimple()// 调用 pi-ai 的流式 API
- *     ├── executeToolCalls()               // 工具分发器
- *     │     ├── executeToolCallsSequential()  // 串行路径
- *     │     └── executeToolCallsParallel()    // 并行路径
- *     │       （两者内部共享）:
- *     │         ├── prepareToolCall()
- *     │         │     ├── prepareToolCallArguments()
- *     │         │     ├── validateToolArguments()
- *     │         │     └── config.beforeToolCall()
- *     │         ├── executePreparedToolCall()
- *     │         │     └── tool.execute()
- *     │         ├── finalizeExecutedToolCall()
- *     │         │     └── config.afterToolCall()
- *     │         ├── emitToolExecutionEnd()
- *     │         ├── createToolResultMessage()
- *     │         └── emitToolResultMessage()
- *     ├── config.prepareNextTurn()        // 轮结束后的统一改写钩子
- *     ├── config.shouldStopAfterTurn()    // 停机判断
- *     └── config.getFollowUpMessages()    // follow-up 检查
  */
 
 import {
@@ -543,9 +517,14 @@ async function executeToolCalls(
 	emit: AgentEventSink,
 ): Promise<ExecutedToolCallBatch> {
 	const toolCalls = assistantMessage.content.filter((c) => c.type === "toolCall");
+
+	// 检查本次批次中是否有任何工具在定义时标记为 executionMode === "sequential"。
+	// 这是单工具级别的覆盖——即使全局配置为并行，只要有一个工具要求串行，整个批次就降级为串行。
 	const hasSequentialToolCall = toolCalls.some(
 		(tc) => currentContext.tools?.find((t) => t.name === tc.name)?.executionMode === "sequential",
 	);
+
+	// 执行模式判断：全局串行 或 任一工具要求串行 → 走串行路径，否则走并行路径。
 	if (config.toolExecution === "sequential" || hasSequentialToolCall) {
 		return executeToolCallsSequential(currentContext, assistantMessage, toolCalls, config, signal, emit);
 	}
