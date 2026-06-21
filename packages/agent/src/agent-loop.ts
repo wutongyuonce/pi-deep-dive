@@ -436,7 +436,7 @@ async function streamAssistantResponse(
 	});
 
 	let partialMessage: AssistantMessage | null = null;
-	let addedPartial = false;
+	let addedPartial = false; // 状态标志，用来追踪是否已经将 partial message 添加到了 context.messages 中，避免重复添加
 
 	// 消费 provider 的统一流式事件，并把它们重新翻译成 AgentEvent。
 	for await (const event of response) {
@@ -445,7 +445,7 @@ async function streamAssistantResponse(
 				// `start` 提供一个可增量修改的 assistant message 雏形。
 				partialMessage = event.partial;
 				context.messages.push(partialMessage);
-				addedPartial = true;
+				addedPartial = true; // ← 标记已添加
 				await emit({ type: "message_start", message: { ...partialMessage } });
 				break;
 
@@ -548,12 +548,17 @@ type ExecutedToolCallBatch = {
 };
 
 /**
- * 串行执行路径：适合有顺序依赖、会改共享状态、或显式声明 sequential 的工具。
+ * 串行执行路径：逐个处理工具调用，一个完成后再执行下一个。
+ *
+ * 适用场景：
+ * - 全局配置 `config.toolExecution === "sequential"`
+ * - 批次中某个工具声明了 `executionMode === "sequential"`（单工具覆盖）
  *
  * 链路：
- * - `runLoop()` -> `executeToolCalls()` -> 本函数
- * - 本函数内部依次调用 `prepareToolCall()` -> `executePreparedToolCall()` ->
- *   `finalizeExecutedToolCall()` -> `emitToolExecutionEnd()` / `emitToolResultMessage()`
+ * `runLoop()` -> `executeToolCalls()` -> 本函数
+ * 对每个 toolCall 依次执行：
+ *   emit(tool_execution_start) -> prepareToolCall() -> [executePreparedToolCall() ->
+ *   finalizeExecutedToolCall()] -> emitToolExecutionEnd() -> emitToolResultMessage()
  */
 async function executeToolCallsSequential(
 	currentContext: AgentContext,
@@ -563,30 +568,43 @@ async function executeToolCallsSequential(
 	signal: AbortSignal | undefined,
 	emit: AgentEventSink,
 ): Promise<ExecutedToolCallBatch> {
+	// 收集器：存储每个工具的最终结果（含原始 toolCall + 执行结果 + isError 标记）
+	// 用于最后调用 shouldTerminateToolBatch() 判断是否终止整个批次
 	const finalizedCalls: FinalizedToolCallOutcome[] = [];
+	// 收集器：存储转换后的 ToolResultMessage，返回给上层添加到上下文供下次 LLM 调用
 	const messages: ToolResultMessage[] = [];
 
+	// 串行遍历每个工具调用，for...of + await 保序：一个工具完全结束后才开始下一个
 	for (const toolCall of toolCalls) {
-		// start 事件先发出去，便于 UI 立即显示“哪个工具开始执行了”。
+		// 【步骤 1】立即发送 tool_execution_start 运行时事件
+		// 目的：UI 立即显示"哪个工具开始执行了"，即使后续 prepare 失败用户也能看到
+		// 这是运行时事件，不进入上下文，仅用于 UI 消费
 		await emit({
 			type: "tool_execution_start",
-			toolCallId: toolCall.id,
-			toolName: toolCall.name,
-			args: toolCall.arguments,
+			toolCallId: toolCall.id,   // LLM 生成的工具调用唯一 ID（如 "call_abc123"）
+			toolName: toolCall.name,   // 工具名称（如 "read_file"、"bash"）
+			args: toolCall.arguments,  // 工具参数，已经是解析后的对象（非 JSON 字符串）
 		});
 
-		// prepare 阶段做查找工具、参数预处理、schema 校验、before hook、abort 检查。
+		// 【步骤 2】准备阶段：查找工具定义、参数预处理、schema 校验、执行 before hook、检查 abort
+		// 返回值 preparation 有两种 kind：
+		//   "immediate" → 不需要真正执行，直接返回结果（工具不存在/参数无效/hook 阻断）
+		//   "prepared"  → 准备完成，包含解析后的工具定义和参数，可进入 execute
 		const preparation = await prepareToolCall(currentContext, assistantMessage, toolCall, config, signal);
 		let finalized: FinalizedToolCallOutcome;
 		if (preparation.kind === "immediate") {
-			// immediate 表示不需要真正执行工具，通常是：找不到工具、参数无效、被 hook 阻断。
+			// 【步骤 2a】immediate 分支——跳过 execute，直接组装最终结果
+			// 典型场景：工具名在上下文中找不到、参数不合法、before hook 返回了阻断值
 			finalized = {
-				toolCall,
-				result: preparation.result,
-				isError: preparation.isError,
+				toolCall,                    // 保留原始 toolCall 信息（id、name、arguments）
+				result: preparation.result,  // 准备阶段生成的结果（通常是错误提示文本）
+				isError: preparation.isError, // 标记为错误结果
 			};
 		} else {
+			// 【步骤 2b】prepared 分支——真正执行工具
+			// executePreparedToolCall：调用工具的 execute 函数，拿到原始执行结果
 			const executed = await executePreparedToolCall(preparation, signal, emit);
+			// 【步骤 3】finalize 阶段：执行 after hook（可修改/增强结果），生成最终 FinalizedToolCallOutcome
 			finalized = await finalizeExecutedToolCall(
 				currentContext,
 				assistantMessage,
@@ -597,19 +615,30 @@ async function executeToolCallsSequential(
 			);
 		}
 
-		// end 事件和 toolResult transcript 分开发送：
-		// 前者是运行时事件，后者是后续 prompt 可见的持久消息。
+		// 【步骤 4】发送 tool_execution_end 运行时事件（不进入上下文，仅用于 UI 显示执行完成、耗时等）
 		await emitToolExecutionEnd(finalized, emit);
+
+		// 【步骤 5】将结果转为 ToolResultMessage 并通过 emit 发送
+		// 与上面的 end 事件分开的原因：
+		//   - tool_execution_end 是 UI 消费的运行时事件
+		//   - ToolResultMessage 是 LLM 消费的 transcript 持久消息，会进入上下文
 		const toolResultMessage = createToolResultMessage(finalized);
 		await emitToolResultMessage(toolResultMessage, emit);
-		finalizedCalls.push(finalized);
-		messages.push(toolResultMessage);
 
+		// 【步骤 6】将结果推入两个收集器
+		finalizedCalls.push(finalized);    // 用于 shouldTerminateToolBatch 判断是否终止
+		messages.push(toolResultMessage);  // 用于返回给上层添加到 context
+
+		// 【步骤 7】检查 abort 信号——用户取消时立即跳出循环，不再执行后续工具
+		// signal?.aborted 使用可选链：signal 可能是 undefined（未传入），安全访问
 		if (signal?.aborted) {
 			break;
 		}
 	}
 
+	// 【返回】
+	// messages: 所有工具的 ToolResultMessage 数组（追加到 context 和 newMessages，供下次 LLM 调用）
+	// terminate: 是否应终止整个工具批次（由 shouldTerminateToolBatch 根据 finalizedCalls 判断）
 	return {
 		messages,
 		terminate: shouldTerminateToolBatch(finalizedCalls),

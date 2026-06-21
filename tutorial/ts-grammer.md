@@ -282,7 +282,252 @@ getFirst(["a", "b"])      // T 被推断为 string，返回 string
 
 在 pi 的代码中，`EventStream<T, R>` 的 `T` 是事件类型，`R` 是最终结果类型。
 
-### AsyncIterable（异步可迭代）？
+#### readonly
+
+`readonly` 是 TypeScript 专用的关键字，用于在接口或类型中声明**只读属性**。赋值操作会在编译时报错，但编译后完全擦除，JS 运行时没有限制。
+
+```ts
+interface AgentState {
+  readonly isStreaming: boolean;
+  readonly errorMessage?: string;
+}
+
+const state: AgentState = { isStreaming: true };
+state.isStreaming = false; // Error: Cannot assign to 'isStreaming'
+```
+
+`readonly` 也可用于数组和元组：
+
+```ts
+const arr: readonly number[] = [1, 2, 3];
+arr.push(4);    // Error: Property 'push' does not exist on type 'readonly number[]'
+arr[0] = 99;    // Error: Index signature in type 'readonly number[]' only permits reading
+```
+
+`readonly` 是**纯编译时约束**，运行时不存在。如果需要运行时不可变，要靠 `Object.freeze()`。
+
+#### get / set 存取器
+
+`get`/`set` 是 JavaScript 原生关键字（编译后保留），让属性的读写经过函数，而不是直接访问数据。
+
+**在对象和 class 中使用（JS 原生，运行时生效）：**
+
+```ts
+class Temperature {
+  #celsius;
+
+  constructor(c: number) {
+    this.#celsius = c;
+  }
+
+  get fahrenheit() {
+    return this.#celsius * 9 / 5 + 32;
+  }
+
+  set fahrenheit(f: number) {
+    this.#celsius = (f - 32) * 5 / 9;
+  }
+}
+
+const t = new Temperature(100);
+console.log(t.fahrenheit); // 212 —— 看起来像属性访问，实际调用了 get 函数
+t.fahrenheit = 32;          // 看起来像赋值，实际触发了 set 函数
+```
+
+**在接口中声明（TS 类型语法，编译后擦除）：**
+
+```ts
+interface AgentState {
+  set tools(tools: AgentTool<any>[]);
+  get tools(): AgentTool<any>[];
+}
+```
+
+这意味着实现该接口的对象，`tools` 不是普通数据属性，而是通过存取器函数访问。常见用途是在 setter 中**复制数组**，防止外部引用意外修改内部状态：
+
+```ts
+class Agent implements AgentState {
+  private _tools: AgentTool<any>[] = [];
+
+  set tools(tools: AgentTool<any>[]) {
+    this._tools = tools.slice(); // 复制数组，断开外部引用
+  }
+
+  get tools(): AgentTool<any>[] {
+    return this._tools;
+  }
+}
+
+const myTools = [toolA, toolB];
+agent.state.tools = myTools;  // 触发 setter，内部存的是副本
+myTools.push(toolC);          // 修改原数组
+// agent.state.tools.length 仍然是 2，不受影响
+```
+
+### 工具类型 Utility Types
+
+TypeScript 的工具类型（Utility Types）是内置的"类型函数"，能基于现有类型变换出新类型，从而**避免重复定义类型，提升开发效率与代码可维护性**。它们全局可用，无需导入。
+
+注意：工具类型**不是语言关键字**，而是 TypeScript 标准库里预定义的泛型类型别名（写在 `lib.es5.d.ts` 中的用户态代码）。`Omit`、`Record`、`Partial` 等本质上和你自己写的 `type MyType<T> = ...` 没有区别，只是 TS 帮你写好了。这和 `readonly`、`get`/`set` 等语言关键字不同——后者是语法的一部分，由编译器直接处理。
+
+#### 对象类型操作 (最常用)
+
+- **`Partial<T>`**：将类型 `T` 的所有属性变为**可选** (`?`)。
+
+  **适用场景**：非常适用于**更新操作**（如PATCH请求），因为客户端可能只传递需要修改的部分字段。
+
+  ```ts
+  interface User { id: number; name: string; email: string; }
+  // 假设要更新用户，所有字段都是可选的
+  type UserUpdate = Partial<User>;
+  // 等同于 { id?: number; name?: string; email?: string; }
+  function updateUser(id: number, updateData: UserUpdate) { /* ... */ }
+  updateUser(1, { name: "New Name" }); // OK
+  ```
+
+  **原理**：通过映射类型 `[P in keyof T]?` 为每个属性添加 `?` 修饰符。
+
+- **`Required<T>`**：与 `Partial<T>` 相反，将类型 `T` 的所有**可选**属性变为**必选** (`-?`)。
+
+  **适用场景**：当你需要一个类型的**完整版本**，确保所有属性都存在时使用。
+
+  ```ts
+  interface Props { a?: number; b?: string; }
+  // 确保组件接收所有必需的 props
+  type RequiredProps = Required<Props>;
+  // 等同于 { a: number; b: string; }
+  ```
+
+- **`Readonly<T>`**：将类型 `T` 的所有属性变为**只读** (`readonly`)。
+
+  **适用场景**：用于定义**不可变对象**，防止其属性被意外修改。
+
+  ```ts
+  interface Config { apiUrl: string; timeout: number; }
+  // 确保配置对象在初始化后不被修改
+  type ImmutableConfig = Readonly<Config>;
+  const config: ImmutableConfig = { apiUrl: '...', timeout: 5000 };
+  // config.apiUrl = 'new url'; // Error: 无法分配到 "apiUrl" ，因为它是只读属性
+  ```
+
+- **`Pick<T, K>`**：从类型 `T` 中**挑选**一组属性 `K` 来构造新类型。
+
+  **适用场景**：当你需要一个类型中的**部分属性**时非常有用，例如从一个大对象中提取视图需要的数据。
+
+  ```ts
+  interface User { id: number; name: string; email: string; password: string; }
+  // 创建一个只包含公开信息的类型
+  type PublicUserInfo = Pick<User, 'id' | 'name' | 'email'>;
+  // 等同于 { id: number; name: string; email: string; }
+  ```
+
+- **`Omit<T, K>`**：与 `Pick<T, K>` 相反，从类型 `T` 中**排除**一组属性 `K` 来构造新类型。
+
+  **适用场景**：在**隐藏敏感信息**（如密码）或创建一个**不包含某些字段**的类型时使用。
+
+  ```ts
+  interface User { id: number; name: string; email: string; password: string; }
+  // 创建一个不包含密码的用户类型，用于返回给前端
+  type SafeUser = Omit<User, 'password'>;
+  // 等同于 { id: number; name: string; email: string; }
+  ```
+
+- **`Record<K, T>`**：创建一个对象类型，其**属性键**的类型为 `K`，**属性值**的类型为 `T`。
+
+  **适用场景**：非常适合用于**字典**、**映射**或**具有统一值类型**的对象，例如定义枚举的映射或API响应映射。
+
+  ```ts
+  // 定义一个对象，其键是字符串，值是数字
+  type NumberDictionary = Record<string, number>;
+  const scores: NumberDictionary = { 'Alice': 90, 'Bob': 85 };
+  
+  // 与联合类型结合，限制键的范围
+  type Page = 'home' | 'about' | 'contact';
+  type PageInfo = Record<Page, { title: string; path: string }>;
+  const pages: PageInfo = {
+      home: { title: 'Home', path: '/' },
+      about: { title: 'About', path: '/about' },
+      contact: { title: 'Contact', path: '/contact' }
+  };
+  ```
+
+#### 联合类型与类型过滤
+
+- **`Exclude<T, U>`**：从联合类型 `T` 中**排除**所有可赋值给联合类型 `U` 的成员。
+
+  ```ts
+  type T = 'a' | 'b' | 'c';
+  type U = 'a';
+  type Result = Exclude<T, U>; // Result 为 'b' | 'c'
+  ```
+
+- **`Extract<T, U>`**：从联合类型 `T` 中**提取**所有可赋值给联合类型 `U` 的成员。
+
+  ```ts
+  type T = 'a' | 'b' | 'c';
+  type U = 'a' | 'd';
+  type Result = Extract<T, U>; // Result 为 'a'
+  ```
+
+- **`NonNullable<T>`**：从类型 `T` 中**排除** `null` 和 `undefined`。
+
+  ```ts
+  type T = string | number | null | undefined;
+  type Result = NonNullable<T>; // Result 为 string | number
+  ```
+
+#### 函数类型操作
+
+- **`ReturnType<T>`**：获取函数类型 `T` 的**返回值类型**。
+
+  **适用场景**：当你需要**复用某个函数的返回类型**，但又不想显式声明时非常有用。
+
+  ```ts
+  function createUser() {
+      return { id: 1, name: 'Alice' };
+  }
+  // 自动推断 createUser 函数的返回值类型
+  type User = ReturnType<typeof createUser>;
+  // User 的类型为 { id: number; name: string; }
+  ```
+
+* **`Parameters<T>`**：获取函数类型 `T` 的**参数类型**，结果是一个**元组**类型。
+
+  ```ts
+  function greet(name: string, age: number): void {}
+  type GreetParams = Parameters<typeof greet>; // GreetParams 为 [string, number]
+  ```
+
+#### 异步与高级类型
+
+- **`Awaited<T>`**：递归地**解包** `Promise` 类型 `T`，获取其最终 resolved 的值类型。
+
+  **适用场景**：在处理**异步操作**时，准确获取 `Promise` 内部的实际数据类型。
+
+  ```ts
+  type A = Awaited<Promise<string>>; // A 为 string
+  type B = Awaited<Promise<Promise<number>>>; // B 为 number
+  type C = Awaited<boolean | Promise<number>>; // C 为 boolean | number
+  ```
+
+- **`ThisParameterType<T>`**：提取函数类型 `T` 的 `this` 参数类型，如果函数没有 `this` 参数则返回 `unknown`。
+
+- **`OmitThisParameter<T>`**：从函数类型 `T` 中移除 `this` 参数。
+
+#### 字符串类型操作 (Template Literal Types)
+
+- **`Uppercase<S>`**：将字符串字面量类型 `S` 转换为大写。
+- **`Lowercase<S>`**：将字符串字面量类型 `S` 转换为小写。
+- **`Capitalize<S>`**：将字符串字面量类型 `S` 的首字母转换为大写。
+- **`Uncapitalize<S>`**：将字符串字面量类型 `S` 的首字母转换为小写。
+
+这些字符串工具类型在需要**规范化**或**转换**字符串字面量类型时非常有用，常用于定义事件的命名约定等场景。
+
+### JSON 相关方法
+
+![image-20260615150927201](img/image-20260615150927201.png)
+
+### AsyncIterable（异步可迭代）
 
 普通数组可以用 `for...of` 遍历：
 
@@ -301,7 +546,7 @@ for await (const chunk of openaiStream) {
 }
 ```
 
-### AbortController / AbortSignal（JS）
+### AbortController / AbortSignal
 
 这是 JavaScript 的标准 API，用于取消正在进行的异步操作：
 
@@ -548,5 +793,32 @@ Extract<TextContent | ThinkingContent | ToolCall, { type:
 ```
 因为只有 ToolCall 满足 { type: "toolCall" } 。
 
+### map 数组方法
 
+`map` 是 JavaScript 数组的一个**迭代方法**，它会**遍历原数组**，对每个元素执行一个回调函数，然后将回调函数的返回值组成一个长度相同的**新数组**返回。
 
+```ts
+const newArray = array.map((element, index, array) => {
+  // 处理 element
+  return 处理后的值;
+});
+```
+
+- `element`：当前被处理的元素。
+- `index`（可选）：当前元素的索引。
+- `array`（可选）：调用 `map` 的原始数组。
+
+```ts
+// 1. 数字加倍
+const nums = [1, 2, 3];
+const doubled = nums.map(n => n * 2);   // [2, 4, 6]
+
+// 2. 提取对象属性
+const users = [{ name: 'Alice' }, { name: 'Bob' }];
+const names = users.map(u => u.name);   // ['Alice', 'Bob']
+
+// 3. 带索引使用
+const arr = ['a', 'b'];
+const result = arr.map((letter, idx) => `${idx}:${letter}`);
+// ['0:a', '1:b']
+```

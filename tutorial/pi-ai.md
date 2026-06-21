@@ -1,54 +1,3 @@
-# [pi](https://github.com/earendil-works/pi/tree/main/packages/coding-agent)
-
-> 资料：
->
-> https://mariozechner.at/posts/2025-11-30-pi-coding-agent/（🌟🌟🌟）
->
-> https://github.com/ZhangHanDong/pi-book（🌟🌟🌟）
->
-> https://guangzhengli.com/notes/pi-ai-and-agent-core-course（🌟🌟）
->
-> https://github.com/cellinlab/how-pi-agent-works（🌟）
->
-
-> Pi 奉行近乎激进的可扩展性，因此无需、也不愿替你规定工作流。许多在别的工具中“内建”的能力，在这里都可通过 extensions、skills，或安装第三方 pi packages 来实现。这样既能让核心保持精简，又能让你按自己的工作方式塑造 Pi。
->
-> 不做 MCP。 你可以构建带有 README 的 CLI 工具（见 Skills），也可以编写 extension，为 Pi 增加 MCP 支持。为何如此？
->
-> 不设 sub-agents。 实现路径有很多：可借助 tmux 启动多个 Pi 实例，或用 extensions 自行搭建，亦可安装按你思路实现的软件包。
->
-> 不弹 permission popups。 你可以在容器中运行，或通过 extensions 构建与自身环境及安全要求相匹配的确认流程。
->
-> 不设 plan mode。 计划可直接写入文件，或借助 extensions 自行实现，或安装相应软件包。
->
-> 不内置 to-dos。 它们容易让模型困惑。请使用 TODO.md，或用 extensions 自定义。
->
-> 不提供后台 bash。 请使用 tmux：全程可观测，交互更直接。
-
-`OpenClaw` 底层的 Agent 正是基于 `Pi Agent` 框架实现的（具体而言，`OpenClaw`通过 `RPC` 模式或 `SDK` 方式集成了 `pi-coding-agent`）
-
-```
-pi-tui (终端渲染库)  ← 零内部依赖，纯 UI / 渲染层
-
-pi-ai  (LLM 统一 API) — 模型、provider、流式事件、成本/usage	 ← 零内部依赖，纯 AI 层
-
-pi-agent-core (agent 引擎) — agent loop、工具执行、事件分发、状态管理  ← 依赖 pi-ai
-    
-pi-coding-agent (完整 CLI 终端应用) — 会话、命令、工具、TUI、扩展系统  ← 依赖以上三个
-```
-
-pi-mono 是一个 npm workspace monorepo，包含四个包。
-
-npm workspace 不保证构建顺序。如果你运行 `npm run build`，npm 会并行构建所有包 — 但包之间有依赖关系，并行构建会失败。
-
-pi-mono 通过在根 `package.json` 的 `build` 脚本中**手动编排构建顺序**来解决这个问题：
-
-```json
-{
-  "build": "cd packages/tui && npm run build && cd ../ai && npm run build && cd ../agent && npm run build && cd ../coding-agent && npm run build"
-}
-```
-
 # [pi-ai](https://github.com/badlogic/pi-mono/tree/main/packages/ai)
 
 整个 pi monorepo 的**统一 LLM API 层**。
@@ -113,29 +62,30 @@ console.log(`Cost: $${finalMessage.usage.cost.total.toFixed(4)}`);
 
 ## 整个包的分层图
 
-从底层往上层看，`packages/ai/src` 可以分成 6 层：
+`packages/ai/src` 可以分成四层：
 
 ```
+四、Provider 懒加载 → 注册表调度 → 公共 API
 对外入口层
    index.ts / stream.ts / images.ts
-
-provider 适配层
-   providers/*.ts / providers/images/*.ts
 
 注册表与模型元信息层
    api-registry.ts / images-api-registry.ts / models.ts / image-models.ts
    env-api-keys.ts / session-resources.ts
+   
+中间：provider 适配层
+   providers/*.ts / providers/images/*.ts
 
-核心类型层
-   types.ts
-
+三、统一事件流机制 EventStream
 共享基础设施层
    utils/event-stream.ts / validation.ts / json-parse.ts / headers.ts / ...
 
-模型信息生成层
-   model.ts
+二、模型信息生成层
    models.generated.ts / image-models.generated.ts
    scripts/generate-models.ts / scripts/generate-image-models.ts
+
+一、核心类型层
+   types.ts
 ```
 
 ### `src/`
@@ -330,7 +280,7 @@ generateImages(model, context, options)
 
 ## 一、核心类型层 `types.ts`
 
-### API / ImagesApi / Provider / ImagesProvider / Thinking推理级别相关 / 统一 options — 协议标识与请求配置
+### 1、API / ImagesApi / Provider / ImagesProvider / Thinking推理级别相关 / 统一 options — 协议标识与请求配置
 
 #### API 协议标识
 
@@ -591,7 +541,7 @@ export interface SimpleStreamOptions extends StreamOptions {
 
   * `ProviderResponse` 是 `onResponse` 回调的参数类型。 
 
-### Message / Content / Tool / Usage — 会话数据结构
+### 2、Message / Content / Tool / Usage — 会话数据结构
 
 #### 三种 Message 消息类型（User/Assistant/ToolResult）
 
@@ -844,7 +794,7 @@ export interface AssistantImages {
 }
 ```
 
-### EventStream 事件协议 — 流式事件的类型定义
+### 3、EventStream 事件协议 — 流式事件的类型定义
 
 ```typescript
 /** 重导出事件流类型。 */
@@ -854,7 +804,7 @@ export type { AssistantMessageEventStream } from "./utils/event-stream.ts";
 export type AssistantMessageEvent = ...
 ```
 
-### OpenAI / Anthropic 兼容层配置 — provider 差异化的兼容选项
+### 4、OpenAI / Anthropic 兼容层配置 — provider 差异化的兼容选项
 
 不同 provider 的 API 存在细微差异。这些 Compat 接口允许调用方覆盖基于 URL 的自动检测，为自定义 provider 指定兼容行为。
 
@@ -867,7 +817,7 @@ export interface OpenAIResponsesCompat {...}
 export interface AnthropicMessagesCompat {...}
 ```
 
-### Model / ImagesModel 统一模型元信息 — 模型的静态描述
+### 5、Model / ImagesModel 统一模型元信息 — 模型的静态描述
 
 ```typescript
 /** 统一模型元信息。 */
@@ -933,7 +883,7 @@ export interface ImagesModel<TApi extends ImagesApi>
 }
 ```
 
-### 对外暴露的函数类型 — StreamFunction / ImagesFunction
+### 6、对外暴露的函数类型 — StreamFunction / ImagesFunction
 
 ```typescript
 /**
@@ -1455,12 +1405,6 @@ if (data.deepseek?.models) {
 
 见 [pi-ai-streaming-architecture.md](./pi-ai-streaming-architecture.md)
 
-<u>**简历写法 — 统一事件流机制：**</u>
-
-* 基于生产者-消费者模型，设计双缓冲队列 + Promise 挂起/唤醒机制的异步事件流引擎（AssistantMessageEventStream），支持多消费者独立订阅与并行消费；实现 LLM 流式输出期间并行执行工具调用，消除传统 for-loop 架构下"等流结束才能执行工具"的阻塞瓶颈
-
-* 封装增量事件协议（text_delta / thinking_delta / toolcall_delta），在统一抽象层内完成多 SDK 流格式归一化、成本追踪与错误归一化；通过 AbortSignal 全链路透传实现流式中断下的部分结果保全
-
 ## Context handoff 跨模型上下文交接
 
 pi-ai 从设计之初就考虑到了不同提供商之间的上下文切换。由于每个提供商都有自己追踪工具调用和思维轨迹的方式，因此只能尽力而为。例如，如果在会话中途从 Anthropic 切换到 OpenAI，Anthropic 的 thinking 块会被降级为普通文本块（丢失 thinkingSignature）。
@@ -1850,43 +1794,3 @@ if (assistantMsg.stopReason === "error"
 这种不一致是有原因的：text block 的字段少且稳定（`type`、`text`、`textSignature`），白名单实现简单且安全。Tool call 的字段多且关键（`id`、`name`、`arguments` 都不能丢），白名单实现需要枚举所有需要保留的字段，增加了维护负担和遗漏风险。但这种不一致也带来了未来的风险 — 如果 `ToolCall` 类型增加了新的 provider 特有字段，黑名单策略需要记得更新变换代码。
 
 核心判断：**有损交接好过不能交接。** 丢失一些 thinking 细节，比"切换模型后对话完全中断"要好得多。
-
-## Structured split tool results 结构化拆分工具结果
-
-**核心思想：将工具返回结果拆分为“给 LLM 看的”和“给 UI 显示的”**
-
-大多数统一 LLM API 只让工具返回一段文本/JSON 给 LLM，但这段文本不一定包含 UI 需要展示的所有信息（例如图表、富文本）。开发者不得不**解析文本输出再重组 UI 数据**，很麻烦。
-
-pi-ai 允许工具同时返回：
-
-- **`output`**（或 content 中的 `text` 块）→ 给 LLM 理解使用。
-- **`details`**（或额外的 `image` 块）→ 直接供 UI 渲染，无需再解析。
-
-并且：
-
-- 工具参数通过 **TypeBox schema + AJV** 自动校验，失败时给出详细错误。
-- 可以返回**图片附件**（转成 base64 及 MIME 类型），以各提供商原生格式传递。        
-
-这个概念在代码中体现在三层：
-
-**1. 类型定义层 — `ToolResultMessage.details`**
-
-types.ts：`details?: TDetails` 字段，泛型参数默认 `any`，供 UI 使用但不发给 LLM。`content` 字段（text + image）才是发给 LLM 的。
-
-**2. 具体工具层 — 每个工具各自填充 details**
-
-每个工具返回不同的结构化 details 供 TUI 渲染：
-
-- coding-agent/src/core/tools/edit.ts：`details.diff`（diff 字符串）、`details.firstChangedLine`（首行变更行号）→ TUI 用这些渲染文件编辑预览
-- coding-agent/src/core/tools/find.ts：`details.resultLimitReached`（结果数量限制）、`details.truncation`（截断信息）→ TUI 用这些显示截断警告
-
-TUI 渲染时通过 `renderResult(result, options, theme)` 回调读取 `result.details` 来构建富文本 UI，而 `result.content` 里的文本只给 LLM 看。
-
-**3. 扩展系统层 — 扩展可以修改 details**
-
-coding-agent/src/core/extensions/runner.ts：扩展的 `tool_result` handler 可以同时修改 `content`（给 LLM 的）和 `details`（给 UI 的），实现扩展对工具结果的拦截和增强。
-
-
-
-
-
