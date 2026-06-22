@@ -1026,12 +1026,6 @@ index.ts（barrel file）
 
 ## 三、Provider 懒加载 → 注册表调度 → 公共 API
 
-<u>**简历写法 — Provider 懒加载与注册表调度**：</u>
-
-* <u>设计泛型类型擦除 + 运行时 API 校验的 Provider 注册表，实现同一协议（如 OpenAI Completions）跨多服务商复用</u>
-
-* <u>通过 import() 动态导入 + Promise 缓存的懒加载包装器，将 10+ Provider 的 SDK 加载延迟至首次调用，启动零成本</u>
-
 ### `env-api-keys.ts` 提供 apikey
 
 ```typescript

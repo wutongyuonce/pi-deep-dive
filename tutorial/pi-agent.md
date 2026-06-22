@@ -434,15 +434,26 @@ export interface PrepareNextTurnContext extends ShouldStopAfterTurnContext {}
 
 ```typescript
 export interface AgentState {
-  systemPrompt: string;
-  model: Model<any>;
-  thinkingLevel: ThinkingLevel;
-  set tools(tools: AgentTool<any>[]);  get tools(): AgentTool<any>[];
-  set messages(messages: AgentMessage[]);  get messages(): AgentMessage[];
-  readonly isStreaming: boolean;
-  readonly streamingMessage?: AgentMessage;
-  readonly pendingToolCalls: ReadonlySet<string>;
-  readonly errorMessage?: string;
+	/** 随每次模型请求发送的系统提示。 */
+	systemPrompt: string;
+	/** 用于后续轮次的活跃模型。 */
+	model: Model<any>;
+	/** 后续轮次请求的推理级别。 */
+	thinkingLevel: ThinkingLevel;
+	/** 可用工具。赋新数组会复制顶层数组。 */
+	set tools(tools: AgentTool<any>[]);
+	get tools(): AgentTool<any>[];
+	/** 对话记录。赋新数组会复制顶层数组。 */
+	set messages(messages: AgentMessage[]);
+	get messages(): AgentMessage[];
+	/** 当 Agent 正在处理提示或继续时为 true。在等待的 `agent_end` 监听器完成之前一直保持 true。 */
+	readonly isStreaming: boolean;
+	/** 当前流式响应的部分助手消息（如有）。 */
+	readonly streamingMessage?: AgentMessage;
+	/** 当前正在执行的工具调用 ID。 */
+	readonly pendingToolCalls: ReadonlySet<string>;
+	/** 最近一次失败或中止的助手轮次的错误消息（如有）。 */
+	readonly errorMessage?: string;
 }
 ```
 
@@ -736,9 +747,19 @@ private createLoopConfig(
 - AgentHarness 更"厚"：通过 emitHook() 桥接 hook 系统， prepareNextTurn 包含 session 刷新和 turn state 重建
 - 两者都没有提供 `shouldStopAfterTurn`，说明这个钩子是留个更上层（或测试）按需使用的
 
-#### prepareNextTurn 轮次间钩子
+##### 上层 prepareNextTurn 轮次间钩子的实现
 
-允许上层在每轮结束后、下一轮开始前，动态修改下一轮的配置（模型、上下文、思考级别等）。
+```ts
+// AgentLoopConfig 中的定义
+prepareNextTurn?: (
+    context: PrepareNextTurnContext,
+  ) => AgentLoopTurnUpdate | undefined | Promise<AgentLoopTurnUpdate | undefined>;
+```
+
+**调用位置**：在 `agent-loop.ts` 的 `runLoop()` 函数中，`turn_end` 事件之后、下一轮 LLM 请求之前，动态修改下一轮的配置（模型、上下文、思考级别等）。
+
+* **返回值**是 `undefined`，不做修改，继续用当前配置；
+* **返回值**是 `AgentLoopTurnUpdate`，包含**可选的新上下文、新模型、新思考级别**，替换下一轮的对应参数。
 
 ```
 第 1 轮 LLM 请求
@@ -751,8 +772,6 @@ prepareNextTurn() ← 可以修改下一轮的参数
     ↓
 第 2 轮 LLM 请求（使用修改后的参数）
 ```
-
-调用位置：在 `agent-loop.ts` 的 `runLoop()` 函数中，`turn_end` 事件之后、下一轮 LLM 请求之前。
 
 ```typescript
 // agent-loop.ts
@@ -781,12 +800,43 @@ if (nextTurnSnapshot) {
 }
 ```
 
+**上层的实现：**他们都覆盖了原有的定义，都没有使用循环引擎中 prepareNextTurn 允许接受的 context 参数，Agent 只能访问 signal，AgentHarness 则能通过 this 访问实例状态。
+
+1、**Agent 透传 signal 终止信号，让用户可以在每轮后做自定义逻辑**
+
 ```ts
-// Agent — 透传
+// agent.ts 中的 createLoopConfig()
 prepareNextTurn: this.prepareNextTurn
             ? async () => await this.prepareNextTurn?.(this.signal) : undefined,
+```
 
-// AgentHarness — 自己实现
+```ts
+const agent = new Agent({
+    prepareNextTurn: async (signal) => {
+        // 如果已被中止，不做任何修改，快速返回
+        if (signal?.aborted) {
+            return undefined;
+        }
+        
+        // 正常逻辑：每 5 轮切换一次模型
+        if (turnCount % 5 === 0) {
+            return { model: cheaperModel };
+        }
+        return undefined;
+    }
+});
+
+// 外部中止 agent
+agent.abort();  // 触发 signal.aborted = true
+
+// 下一轮 prepareNextTurn 调用时：
+// signal.aborted === true → 返回 undefined，不做任何修改
+```
+
+2、**AgentHarness 自己实现，刷新 session 写入、重建 turn state**（可能切换模型、裁剪上下文）
+
+```ts
+// agent-harness.ts 中的 createLoopConfig()
 prepareNextTurn: async () => {
     await this.flushPendingSessionWrites();
     const nextTurnState = await this.createTurnState();
@@ -797,55 +847,6 @@ prepareNextTurn: async () => {
         thinkingLevel: nextTurnState.thinkingLevel,
     };
 },
-```
-
-上层 用途 
-
-Agent 透传 直接传递用户传入的回调，让用户可以在每轮后做自定义逻辑 
-
-AgentHarness 自己实现 刷新 session 写入、重建 turn state（可能切换模型、裁剪上下文）
-
-### 3. 返回值 AgentLoopTurnUpdate
-
-| 返回                                | 效果                           |
-| ----------------------------------- | ------------------------------ |
-| `undefined`                         | 不做修改，继续用当前配置       |
-| `{ model, context, thinkingLevel }` | 替换下一轮的对应参数（均可选） |
-
-### 4. 两种上层的实现方式
-
-| 上层           | 实现方式     | 说明                                            |
-| -------------- | ------------ | ----------------------------------------------- |
-| `Agent`        | **透传**     | 直接传递用户传入的回调 signal，Agent 不干预逻辑 |
-| `AgentHarness` | **自己实现** | 内置 session 刷新、turn state 重建等框架逻辑    |
-
-### 5. 透传的含义
-
-
-
-```typescript
-// Agent — 透传
-prepareNextTurn: this.prepareNextTurn 
-    ? async () => await this.prepareNextTurn?.(this.signal) 
-    : undefined,
-
-// AgentHarness — 自己实现
-prepareNextTurn: async () => {
-    await this.flushPendingSessionWrites();
-    const nextTurnState = await this.createTurnState();
-    setTurnState(nextTurnState);
-    return { context: ..., model: ..., thinkingLevel: ... };
-},
-```
-
-- **透传** = 不加工、不拦截、直接传递。Agent 把控制权交给用户。
-- **自己实现** = 框架统一管理，用户无法替换。AgentHarness 把控制权留给自己。
-
-### 6. 设计意图
-
-```
-Agent        = 轻量封装（你告诉它做什么，它就做什么）
-AgentHarness = 高层框架（内置规则，自动管理，你只能配置）
 ```
 
 #### 上层如何填充 AgentContext
@@ -904,28 +905,14 @@ private createContext(
 
 一个直觉上的答案是"越多越好"——循环引擎应该知道怎么管理会话、怎么重试失败的请求、怎么压缩超长上下文、怎么持久化中间状态。毕竟，这些都是"循环过程中"会遇到的问题。
 
-但 pi 给出了一个反直觉的答案：**循环引擎应该知道尽可能少的东西。**
+但 pi 给出了一个反直觉的答案：**循环引擎应该知道尽可能少的东西。**它只管把消息送进 LLM、把 LLM 的响应拿回来、如果响应里有工具调用就执行工具、然后决定要不要继续。它不知道消息从哪来，不知道消息要存到哪去，不知道哪些工具应该被允许，不知道上下文快溢出了。它**最终只返回 newMessages，包含本轮所有新消息（含工具结果）**。
 
-`agent-loop.ts` 文件头的注释只有一句话：
-
-```
-Agent loop that works with AgentMessage throughout.
-Transforms to Message[] only at the LLM call boundary.
-```
-
-这句话定义了整个循环引擎的边界：它只管把消息送进 LLM、把 LLM 的响应拿回来、如果响应里有工具调用就执行工具、然后决定要不要继续。它不知道消息从哪来，不知道消息要存到哪去，不知道哪些工具应该被允许，不知道上下文快溢出了。
-
-**这个选择的代价是**：所有这些"循环之外"的功能都必须由上层来实现——会话持久化、错误重试、context 压缩、UI 渲染，全都不在循环引擎的职责范围内。
-
-**这个选择的收益是**：循环引擎可以被任何上层随意组合——终端 CLI、Slack bot、Web UI、甚至一个测试用例，都可以用同一个循环，只要提供不同的配置。
-
-如果循环引擎自己管理会话，Slack bot（用 channel 做会话）和 CLI（用 JSONL 文件做会话）就需要不同的循环实现。如果循环引擎自己重试，有些场景（自动化管道）想要快速失败，有些场景（交互式 CLI）想要无限重试，循环就要为不同的重试策略膨胀。
-
-**把循环做薄，是为了让上层做厚时有足够的自由度。**
+* **代价**：所有这些"循环之外"的功能都必须由上层来实现——会话持久化、错误重试、context 压缩、UI 渲染，全都不在循环引擎的职责范围内。
+* **收益**：循环引擎可以被任何上层随意组合——终端 CLI、Slack bot、Web UI、甚至一个测试用例，都可以用同一个循环，只要提供不同的配置。**把循环做薄，是为了让上层做厚时有足够的自由度。**
 
 这个哲学贯穿了整个包的三层设计：每一层只知道它必须知道的东西，其余的委托给上层。
 
-### 公开 API
+### 公开 API `runAgentLoop()`
 
 agent-loop.ts 导出 4 个函数，形成两对：
 
@@ -942,6 +929,40 @@ agent-loop.ts 导出 4 个函数，形成两对：
 实际使用中，`Agent` 类调用的是 Promise 版本（`runAgentLoop` / `runAgentLoopContinue`）。
 
 ```ts
+export function agentLoop(
+	prompts: AgentMessage[],
+	context: AgentContext,
+	config: AgentLoopConfig,
+	signal?: AbortSignal,
+	streamFn?: StreamFn,
+): EventStream<AgentEvent, AgentMessage[]> {
+	const stream = createAgentStream(); // 创建 `EventStream` 供 UI/外层编排消费
+
+    // 异步启动 `runAgentLoop()`，每次 emit 事件推入 stream
+	void runAgentLoop(
+		prompts,
+		context,
+		config,
+		async (event) => {
+			stream.push(event);
+		},
+		signal,
+		streamFn,
+	).then((messages) => {
+		stream.end(messages); // 循环结束后调用 `stream.end()` 传递最终消息列表
+	});
+
+	return stream; // 立即返回 stream（调用方可提前订阅）
+}
+
+/** 把低层事件流封装成 `EventStream<AgentEvent, AgentMessage[]>`，供 UI 或外层编排消费。 */
+function createAgentStream(): EventStream<AgentEvent, AgentMessage[]> {
+	return new EventStream<AgentEvent, AgentMessage[]>(
+		(event: AgentEvent) => event.type === "agent_end",
+		(event: AgentEvent) => (event.type === "agent_end" ? event.messages : []),
+	);
+}
+
 export async function runAgentLoop(
   messages: AgentMessage[],
   context: AgentContext,
@@ -949,7 +970,25 @@ export async function runAgentLoop(
   emit: (event: AgentEvent) => Promise<void>,  // ← 回调
   signal?: AbortSignal,
   streamFn?: StreamFn,
-): Promise<AgentMessage[]>
+): Promise<AgentMessage[]> {
+    // 将 prompts 拷贝到 newMessages，同时追加到 context.messages
+	const newMessages: AgentMessage[] = [...prompts];
+	const currentContext: AgentContext = {
+		...context,
+		messages: [...context.messages, ...prompts],
+	};
+
+	await emit({ type: "agent_start" }); // 发射 `agent_start` 事件标记整个 agent 运行开始
+	await emit({ type: "turn_start" }); // 发射 `turn_start` 事件标记第一轮开始
+    // 为每条 prompt 消息发射 message_start/message_end 事件
+	for (const prompt of prompts) {
+		await emit({ type: "message_start", message: prompt });
+		await emit({ type: "message_end", message: prompt });
+	}
+
+	await runLoop(currentContext, newMessages, config, signal, emit, streamFn); // 调用 `runLoop()` 进入主循环
+	return newMessages; // 返回本次 run 产生的所有新消息
+}
 ```
 
 ### 双层循环 `runLoop()` — steer/followup
@@ -992,7 +1031,7 @@ agentLoopContinue()        -> runAgentLoopContinue() -> runLoop()
   │      │
   ├─ 6. prepareNextTurn()（允许上层改写下一轮参数）
   │      │
-  ├─ 7. shouldStopAfterTurn()?
+  ├─ 7. shouldStopAfterTurn()?（判断现在是否应该停止）
   │      │
   │   ┌──是──→ agent_end → return
   │   │
@@ -1007,6 +1046,37 @@ agentLoopContinue()        -> runAgentLoopContinue() -> runLoop()
   └─ 9. 内层循环结束 → 跳到外层
   ```
 
+  prepareNextTurn() 和 shouldStopAfterTurn() 两者输入相同，PrepareNextTurnContext extends ShouldStopAfterTurnContext 结构完全一致，但职责不同：
+
+  - prepareNextTurn 是"修改者"，负责调整下一轮参数
+  - shouldStopAfterTurn 是"裁判"，负责决定是否继续
+
+  ```ts
+  prepareNextTurn: async (context) => {
+      // 场景 1：切换模型（先用强模型思考，再用弱模型执行）
+      if (context.newMessages.length > 10) {
+          return { model: cheaperModel };
+      }
+      // 场景 2：裁剪上下文
+      if (context.context.messages.length > 100) {
+          return { context: { ...context.context, messages: context.context.messages.slice(-50) } };
+      }
+      return undefined; // 不修改
+  }
+  
+  shouldStopAfterTurn: async (context) => {
+      // 场景 1：上下文即将超出容量
+      if (estimateTokens(context.context) > MAX_TOKENS * 0.9) {
+          return true; // 停止
+      }
+      // 场景 2：已完成目标
+      if (context.message.stopReason === "end_turn") {
+          return true; // 停止
+      } 
+      return false; // 继续
+  }
+  ```
+
 * 外层循环的唯一职责：
 
   ```
@@ -1019,7 +1089,7 @@ agentLoopContinue()        -> runAgentLoopContinue() -> runLoop()
   break → agent_end
   ```
 
-Pi 支持在 `Agent` 运行期间注入**转向消息与跟进消息**，无需等待 `Agent` 停止：
+pi 支持在 `Agent` 运行期间注入**转向消息与跟进消息**，无需等待 `Agent` 停止：
 
 ```typescript
 // agent.ts 提供了消息队列操作
@@ -1150,9 +1220,9 @@ async function streamAssistantResponse(
   const resolvedApiKey = (config.getApiKey ? await config.getApiKey(config.model.provider) : undefined) || config.apiKey;
   const response = await streamFunction(config.model, llmContext, { ...config, apiKey: resolvedApiKey, signal,});
 
+  // 第 4 层：AssistantMessageEvent -> AgentEvent
   let partialMessage: AssistantMessage | null = null;
   let addedPartial = false; // 状态标志，用来追踪是否已经将 partial message 添加到了 context.messages 中，避免重复添加
-  // 第 4 层：AssistantMessageEvent -> AgentEvent
   for await (const event of response) {
     switch (event.type) {
       case "start":
@@ -1224,16 +1294,7 @@ async function streamAssistantResponse(
       done 时：push 新消息 + 补发 message_start 事件
   ```
 
-* agent.ts 提供了默认的 convertToLlm 函数：简单粗暴，只保留 LLM 能理解的 3 种消息，其他全部过滤。
-
-  ```ts
-  // agent.ts
-  function defaultConvertToLlm(messages: AgentMessage[]): Message[] {
-    return messages.filter(
-      (m) => m.role === "user" || m.role === "assistant" || m.role === "toolResult"
-    );
-  }
-  ```
+* agent.ts 提供了默认的 defaultConvertToLlm 函数：简单粗暴，只保留 LLM 能理解的 3 种消息，其他全部过滤。
 
 * **为什么 `transformContext` 和 `convertToLlm` 要分开？**
 
@@ -1304,7 +1365,7 @@ pi-ai 层：把 ToolResultMessage 转成 API 格式 -> 发下一轮请求...
     const toolResults: ToolResultMessage[] = [];
     hasMoreToolCalls = false;
     if (toolCalls.length > 0) {
-        // executeToolCalls 会自行决定串行还是并行，并返回本批工具结果。
+        // executeToolCalls 会自行决定串行还是并行，并返回本批工具结果 executedToolBatch。
         const executedToolBatch = await executeToolCalls(currentContext, message, config, signal, emit);
         toolResults.push(...executedToolBatch.messages);
         // terminate=true 表示“这批工具已经明确要求对话在此终止”。
@@ -1317,23 +1378,9 @@ pi-ai 层：把 ToolResultMessage 转成 API 格式 -> 发下一轮请求...
             newMessages.push(result);
         }
     }
+```
 
-/**
- * 工具调用的执行结果汇总类型。
- *
- * 谁使用我：
- * - `executeToolCallsSequential()` / `executeToolCallsParallel()` 返回此类型
- * - `runLoop()` 消费 `messages` 和 `terminate` 字段
- *
- * 字段说明：
- * - `messages`: 本批工具产生的 `ToolResultMessage[]`，会追加到 context 和 newMessages
- * - `terminate`: 若为 true，表示本批所有工具都要求终止，不再继续执行后续工具轮次
- */
-type ExecutedToolCallBatch = {
-	messages: ToolResultMessage[];
-	terminate: boolean;
-};
-
+```ts
 /**
  * 执行助手消息中的工具调用。
  *
@@ -1356,6 +1403,22 @@ async function executeToolCalls(
 	}
 	return executeToolCallsParallel(currentContext, assistantMessage, toolCalls, config, signal, emit);
 }
+
+/**
+ * 工具调用的执行结果汇总类型。
+ *
+ * 谁使用我：
+ * - `executeToolCallsSequential()` / `executeToolCallsParallel()` 返回此类型
+ * - `runLoop()` 消费 `messages` 和 `terminate` 字段
+ *
+ * 字段说明：
+ * - `messages`: 本批工具产生的 `ToolResultMessage[]`，会追加到 context 和 newMessages
+ * - `terminate`: 若为 true，表示本批所有工具都要求终止，不再继续执行后续工具轮次
+ */
+type ExecutedToolCallBatch = {
+	messages: ToolResultMessage[];
+	terminate: boolean;
+};
 ```
 
 当部分工具需要串行执行时，系统通过 executionMode 属性实现细粒度的执行模式控制：
@@ -1402,91 +1465,186 @@ sequenceDiagram
 * 串行 `executeToolCallsSequential()`：
 
   ```ts
-  // 收集器：存储每个工具的最终结果（含原始 toolCall + 执行结果 + isError 标记）
-  // 用于最后调用 shouldTerminateToolBatch() 判断是否终止整个批次
-  const finalizedCalls: FinalizedToolCallOutcome[] = [];
-  // 收集器：存储转换后的 ToolResultMessage，返回给上层添加到上下文供下次 LLM 调用
-  const messages: ToolResultMessage[] = [];
+  async function executeToolCallsSequential(
+  	currentContext: AgentContext,
+  	assistantMessage: AssistantMessage,
+  	toolCalls: AgentToolCall[],
+  	config: AgentLoopConfig,
+  	signal: AbortSignal | undefined,
+  	emit: AgentEventSink,
+  ): Promise<ExecutedToolCallBatch> {
+      // 收集器：存储每个工具的最终结果（含原始 toolCall + 执行结果 + isError 标记）
+      // 用于最后调用 shouldTerminateToolBatch() 判断是否终止整个批次
+      const finalizedCalls: FinalizedToolCallOutcome[] = [];
+      // 收集器：存储转换后的 ToolResultMessage，返回给上层添加到上下文供下次 LLM 调用
+      const messages: ToolResultMessage[] = [];
   
-  for (const toolCall of toolCalls) {
-  	→ emit tool_execution_start 
-  	→ prepareToolCall()
-      if (preparation.kind === "immediate") → 直接组装 finalized（工具不存在/参数无效/hook 阻断）
-  	else
-        → execute → emit tool_execution_update，返回 AgentToolResult<T>
-        → finalize → 返回 finalized: FinalizedToolCallOutcome {toolCall, result: AgentToolResult, isError}
-      → emitToolExecutionEnd() 发送 tool_execution_end 运行时事件
-      → createToolResultMessage() 转换为 ToolResultMessage
-      → emitToolResultMessage() 将结果转为 ToolResultMessage 并通过 emit 发送
-      → 将 finalized、ToolResultMessage 两个结果推入两个收集器 finalizedCalls、messages
-      → 检查 signal?.aborted 信号，用户取消时立即跳出循环，不再执行后续工具
+      for (const toolCall of toolCalls) {
+          → 立即 emit 发送 tool_execution_start 运行时事件
+          // 1、准备
+          → prepareToolCall()，查找工具定义、参数预处理、schema 校验、执行 before hook、检查 abort
+          if (preparation.kind === "immediate") （工具不存在/参数无效/hook 阻断），直接组装 finalized
+          else
+            // 2、执行
+            → executePreparedToolCall()，函数内 emit tool_execution_update，返回 AgentToolResult<T>
+            // 3、后处理
+            → finalizeExecutedToolCall()，返回 finalized: FinalizedToolCallOutcome {toolCall, result: AgentToolResult, isError}
+          → emitToolExecutionEnd()，发送 tool_execution_end 运行时事件
+          → createToolResultMessage()，将 FinalizedToolCallOutcome 转换为 ToolResultMessage
+          → emitToolResultMessage()，将结果转为 ToolResultMessage 并通过 emit 发送
+          → 将 finalized、ToolResultMessage 两个结果推入两个收集器 finalizedCalls、messages
+          → 检查 signal?.aborted 信号，用户取消时立即跳出循环，不再执行后续工具
+      }
+  
+      // 最终返回
+      return {
+          messages, // 所有工具的 ToolResultMessage 数组（追加到 context 和 newMessages，供下次 LLM 调用）
+          terminate: shouldTerminateToolBatch(finalizedCalls), // 是否应终止整个工具批次
+      };
   }
-  
-  return {
-      messages, // 所有工具的 ToolResultMessage 数组（追加到 context 和 newMessages，供下次 LLM 调用）
-      terminate: shouldTerminateToolBatch(finalizedCalls), // 是否应终止整个工具批次
-  };
   ```
   
-  		// 与上面的 end 事件分开的原因：
-  		//   - tool_execution_end 是 UI 消费的运行时事件
-  		//   - ToolResultMessage 是 LLM 消费的 transcript 持久消息，会进入上下文
+  ```ts
+  // 把最终工具执行结果封装成标准 ToolResultMessage
+  function createToolResultMessage(finalized: FinalizedToolCallOutcome): ToolResultMessage {
+  	return {
+  		role: "toolResult",
+  		toolCallId: finalized.toolCall.id,
+  		toolName: finalized.toolCall.name,
+  		content: finalized.result.content,
+  		details: finalized.result.details,
+  		isError: finalized.isError,
+  		timestamp: Date.now(),
+  	};
+  }
+  ```
+  
+  ```ts
+  /**
+   * 判断本批工具调用是否全部要求终止对话。
+   * 逻辑：
+   * - 空批次（无 finalized 调用）返回 false，不影响后续流程
+   * - 非空批次中，只有当每一个工具的 result.terminate 都为 true 时才返回 true
+   * - 任一工具未设置 terminate，则本批不终止，内层循环继续下一轮 assistant 请求
+   */
+  function shouldTerminateToolBatch(finalizedCalls: FinalizedToolCallOutcome[]): boolean {
+  	return finalizedCalls.length > 0 && finalizedCalls.every((finalized) => finalized.result.terminate === true);
+  }
+  ```
+  
+  > `emitToolExecutionEnd()` 和 `emitToolResultMessage()` 发送的事件分开的原因：
+  >
+  >  - **tool_execution_end** 是 **UI 消费的运行时事件**；
+  >  - **message_start、message_end** 事件中的 ToolResultMessage 是 LLM 消费的 transcript 持久消息，会进入上下文。
   
 * 并行 `executeToolCallsParallel()`：
 
   ```ts
-  // 收集器：存储"已完成结果"或"待执行的 thunk 函数"（混合数组）
-  // immediate 的工具直接存 FinalizedToolCallOutcome，需要执行的存 async 函数
-  const finalizedCalls: FinalizedToolCallEntry[] = [];
+  async function executeToolCallsParallel(
+  	currentContext: AgentContext,
+  	assistantMessage: AssistantMessage,
+  	toolCalls: AgentToolCall[],
+  	config: AgentLoopConfig,
+  	signal: AbortSignal | undefined,
+  	emit: AgentEventSink,
+  ): Promise<ExecutedToolCallBatch> {
+      // 收集器：存储"已完成结果"或"待执行的 thunk 函数"（混合数组）
+      // immediate 的工具直接存 FinalizedToolCallOutcome，需要执行的存 async 函数
+      const finalizedCalls: FinalizedToolCallEntry[] = [];
   
-  // ====== 第一阶段：串行 preflight ======
-  for (const toolCall of toolCalls) {
-      → emit tool_execution_start（按 assistant 原始顺序，保序）
-      → prepareToolCall()
-      if (preparation.kind === "immediate") {
-          → 直接组装 FinalizedToolCallOutcome（工具不存在/参数无效/hook 阻断）
-          → emit tool_execution_end
-          → push 到 finalizedCalls（已完成的结果，非函数）
+      // ====== 第一阶段：串行 preflight ======
+      for (const toolCall of toolCalls) {
+          → 按 assistant 原始顺序 emit 发送 tool_execution_start 事件
+          → prepareToolCall()
+          if (preparation.kind === "immediate") {
+              → 直接组装 FinalizedToolCallOutcome（工具不存在/参数无效/hook 阻断）
+              → emit tool_execution_end
+              → push 到 finalizedCalls（已完成的结果，非函数）
+              → 检查 signal?.aborted，跳出
+              → continue（跳过后续，不参与并行执行）
+          }
+          // 需要真正执行的工具：暂存为 thunk（async 函数），不立即执行
+          → push async () => { execute → finalize → emit tool_execution_end → return finalized } 到 finalizedCalls
           → 检查 signal?.aborted，跳出
-          → continue（跳过后续，不参与并行执行）
       }
-      // 需要真正执行的工具：暂存为 thunk（async 函数），不立即执行
-      → push async () => { execute → finalize → emit tool_execution_end → return finalized } 到 finalizedCalls
-      → 检查 signal?.aborted，跳出
+  
+      // ====== 第二阶段：并发执行 ======
+      // Promise.all 并发执行所有 thunk，immediate 项直接 Promise.resolve 返回
+      // 结果顺序与原始 toolCalls 一致（Promise.all 保序）
+      const orderedFinalizedCalls = await Promise.all(
+          finalizedCalls.map(entry =>
+              typeof entry === "function" ? entry() : Promise.resolve(entry)
+          )
+      );
+  
+      // ====== 第三阶段：统一转换并返回 ======
+      for (const finalized of orderedFinalizedCalls) {
+          → createToolResultMessage()，转换为 ToolResultMessage
+          → emitToolResultMessage()，发送 message_start/message_end 事件
+          → push 到 messages 收集器
+      }
+  
+      return {
+          messages, // 所有工具的 ToolResultMessage 数组
+          terminate: shouldTerminateToolBatch(orderedFinalizedCalls), // 是否终止批次
+      };
   }
-  
-  // ====== 第二阶段：并发执行 ======
-  // Promise.all 并发执行所有 thunk，immediate 项直接 Promise.resolve 返回
-  // 结果顺序与原始 toolCalls 一致（Promise.all 保序）
-  const orderedFinalizedCalls = await Promise.all(
-      finalizedCalls.map(entry =>
-          typeof entry === "function" ? entry() : Promise.resolve(entry)
-      )
-  );
-  
-  // ====== 第三阶段：统一转换并返回 ======
-  for (const finalized of orderedFinalizedCalls) {
-      → createToolResultMessage() 转换为 ToolResultMessage
-      → emitToolResultMessage() message_start/message_end
-      → push 到 messages 收集器
-  }
-  
-  return {
-      messages,                                    // 所有工具的 ToolResultMessage 数组
-      terminate: shouldTerminateToolBatch(orderedFinalizedCalls),  // 是否终止批次
-  };
   ```
   
   为什么 prepare 要串行，execute 可以并行？
   
   - prepare 包含 beforeToolCall 钩子，可能有校验、阻断逻辑，需要按 assistant 输出顺序稳定执行
+  - execute 是真正的工具执行（如发 HTTP 请求、跑 bash 命令），互不影响，可以同时跑。只有等所有 prepare 都完成后，才用 Promise.all 一起执行。这样保证结果顺序和原始 toolCalls 顺序一致。
   
-  - execute 是真正的工具执行（如发 HTTP 请求、跑 bash 命令），互不影响，可以同时跑
-  并行的一个细节： finalizedCalls 数组里存的不是结果，而是 函数（thunk） 。只有等所有 prepare 都完成后，才用 Promise.all 一起执行。这样保证结果顺序和原始 toolCalls 顺序一致。
+  第二阶段并行的细节设计： finalizedCalls 是一个混合数组，包含两种元素：
+  
+  ```ts
+  // 类型 1：直接的值（立即结果，比如工具未找到）
+  finalizedCalls.push({
+      toolCall,
+      result: preparation.result,
+      isError: preparation.isError,
+  });
+  
+  // 类型 2：异步函数（延迟执行的 thunk）
+  finalizedCalls.push(async () => {
+      const executed = await executePreparedToolCall(...);
+      const finalized = await finalizeExecutedToolCall(...);
+      return finalized;
+  });
+  ```
+  
+  await Promise.all() 并发执行时，元素是函数就调用 entry()，是值就包装成 Promise 再 resolve
+  
+  完整流程：
+  
+  ```ts
+  finalizedCalls = [
+      { toolCall, result, isError },  // 立即结果（工具未找到）
+      async () => { ... },            // 异步函数（需要执行工具）
+      { toolCall, result, isError },  // 立即结果（参数校验失败）
+      async () => { ... },            // 异步函数（需要执行工具）
+  ]
+  
+  map 后：
+  [
+      Promise.resolve({ toolCall, result, isError }),  // 包装成 Promise
+      entry(),                                         // 调用函数，返回 Promise
+      Promise.resolve({ toolCall, result, isError }),
+      entry(),
+  ]
+  
+  Promise.all()：并发执行所有 Promise，等待全部完成
+  
+  结果：orderedFinalizedCalls = [结果1, 结果2, 结果3, 结果4]
+  // 顺序与原始 toolCalls 一致
+  ```
 
 #### 三阶段执行管道
 
 **阶段 1：Prepare — `prepareToolCall()`**
+
+单个工具调用的 preflight 阶段：查找工具定义、参数预处理、schema 校验、执行 before hook、检查 abort。
 
 ```typescript
 async function prepareToolCall(...): Promise<PreparedToolCall | ImmediateToolCallOutcome> {
@@ -1509,7 +1667,46 @@ async function prepareToolCall(...): Promise<PreparedToolCall | ImmediateToolCal
   // 5. 全部通过
   return { kind: "prepared", toolCall, tool, args: validatedArgs };
 }
+```
 
+```ts
+// 工具参数预处理：调用工具自定义的 prepareArguments 钩子。
+// 谁调用我：prepareToolCall() 在查找工具定义之后、校验参数之前调用
+// 我调用谁：tool.prepareArguments()（如果工具定义了此方法）
+function prepareToolCallArguments(tool: AgentTool<any>, toolCall: AgentToolCall): AgentToolCall {
+	if (!tool.prepareArguments) {
+		return toolCall;
+	}
+	const preparedArguments = tool.prepareArguments(toolCall.arguments);
+	if (preparedArguments === toolCall.arguments) {
+		return toolCall;
+	}
+	return {
+		...toolCall,
+		arguments: preparedArguments as Record<string, any>,
+	};
+}
+```
+
+```ts
+/** 
+ * 统一构造错误工具结果，避免每条错误路径重复拼装内容，返回 AgentToolResult
+ * 谁调用我：
+ * - `prepareToolCall()` 在工具未找到、参数校验失败、before hook 阻断、abort 等场景
+ * - `executePreparedToolCall()` 在 tool.execute() 抛错时
+ * - `finalizeExecutedToolCall()` 在 afterToolCall hook 抛错时
+ */
+function createErrorToolResult(message: string): AgentToolResult<any> {
+	return {
+		content: [{ type: "text", text: message }],
+		details: {},
+	};
+}
+```
+
+prepare 的返回类型是判别联合：`kind: "prepared"` 表示可以执行，`kind: "immediate"` 表示直接返回错误。
+
+```ts
 // prepareToolCall 的成功返回类型：工具已找到、参数已校验、before hook 已通过。
 type PreparedToolCall = {
 	kind: "prepared";
@@ -1534,9 +1731,9 @@ type ImmediateToolCallOutcome = {
 };
 ```
 
-返回类型是判别联合：`kind: "prepared"` 表示可以执行，`kind: "immediate"` 表示直接返回错误。
-
 **阶段 2：Execute — `executePreparedToolCall()`**
+
+真正调用工具，同时把工具侧的增量更新翻译成 `tool_execution_update` 事件。
 
 ```typescript
 async function executePreparedToolCall(prepared, signal, emit): Promise<ExecutedToolCallOutcome> {
@@ -1560,7 +1757,40 @@ async function executePreparedToolCall(prepared, signal, emit): Promise<Executed
 
 注意：工具的 `execute()` 是**允许抛异常的**。循环引擎会捕获异常并转换为 `isError: true` 的结果。这和 `AgentLoopConfig` 的回调不同（它们要求"不得抛异常"）。
 
+```ts
+/**
+ * 工具真正执行后的结果类型（execute 阶段产出）。
+ *
+ * 谁产生我：`executePreparedToolCall()` 在 tool.execute() 完成后返回
+ * 谁消费我：`finalizeExecutedToolCall()` 接收此类型，再经过 afterToolCall hook 得到最终结果
+ *
+ * 与 FinalizedToolCallOutcome 的区别：
+ * - 此类型不含 toolCall 字段（执行阶段不关心原始请求）
+ * - FinalizedToolCallOutcome 是最终版本，包含 toolCall 且经过 afterToolCall 改写
+ */
+type ExecutedToolCallOutcome = {
+	result: AgentToolResult<any>;
+	isError: boolean;
+};
+
+/**
+ * 并行执行路径的中间类型：可以是已完成的结果，也可以是尚未执行的 thunk。
+ *
+ * 为什么需要这个类型：
+ * - `executeToolCallsParallel()` 在 prepare 阶段按顺序处理每个 toolCall
+ * - immediate 结果直接存为 FinalizedToolCallOutcome
+ * - 需要真正执行的工具存为 async thunk，稍后通过 `Promise.all` 并发执行
+ * - 最终通过 `typeof === "function"` 区分两者
+ *
+ * 谁产生我：`executeToolCallsParallel()` 的 prepare 循环
+ * 谁消费我：`executeToolCallsParallel()` 内部的 `Promise.all` 展开
+ */
+type FinalizedToolCallEntry = FinalizedToolCallOutcome | (() => Promise<FinalizedToolCallOutcome>);
+```
+
 **阶段 3：Finalize — `finalizeExecutedToolCall()`**
+
+允许 `afterToolCall()` 改写结果、错误标记和 terminate 提示。
 
 ```typescript
 async function finalizeExecutedToolCall(...): Promise<FinalizedToolCallOutcome> {
@@ -1584,6 +1814,26 @@ async function finalizeExecutedToolCall(...): Promise<FinalizedToolCallOutcome> 
 
 `afterToolCall` 的返回值是**部分覆盖**语义：省略的字段保留原值。这让钩子可以做精确修改。
 
+```ts
+/**
+ * 工具执行的最终结果类型：包含原始 toolCall 引用，可用于构造 ToolResultMessage。
+ *
+ * 谁产生我：
+ * - `finalizeExecutedToolCall()` 从 ExecutedToolCallOutcome 转换而来
+ * - 串行/并行路径中 immediate 分支直接构造
+ *
+ * 谁消费我：
+ * - `emitToolExecutionEnd()` 发射 tool_execution_end 事件
+ * - `createToolResultMessage()` 构造标准 ToolResultMessage
+ * - `shouldTerminateToolBatch()` 判断是否终止本轮工具批次
+ */
+type FinalizedToolCallOutcome = {
+	toolCall: AgentToolCall;
+	result: AgentToolResult<any>;
+	isError: boolean;
+};
+```
+
 ### 结构化拆分工具结果
 
 **核心思想：将工具返回结果拆分为“给 LLM 看的”和“给 UI 显示的”**
@@ -1591,8 +1841,6 @@ async function finalizeExecutedToolCall(...): Promise<FinalizedToolCallOutcome> 
 大多数统一 LLM API 只让工具返回一段文本/JSON 给 LLM，但这段文本不一定包含 UI 需要展示的所有信息（例如 diff 预览、文件元数据、执行时间）。开发者不得不**解析文本输出再重组 UI 数据**，很麻烦。
 
 pi 的解决方案：工具同时返回两路数据，各取所需。
-
-#### 数据流全景
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
@@ -1631,34 +1879,6 @@ pi 的解决方案：工具同时返回两路数据，各取所需。
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-**pi-agent 层 - `AgentToolResult<T>`（工具执行后的"丰富结果"）**
-
-```ts
-// packages/agent/src/types.ts
-interface AgentToolResult<T> {
-  content: (TextContent | ImageContent)[];  // 给 LLM 看的文本/图片
-  details: T;                                // 给 UI 渲染的任意结构化数据
-  terminate?: boolean;                       // 提示循环引擎终止批次
-}
-```
-
-**pi-ai 层 - `ToolResultMessage`（发给模型的"精简消息"）**
-
-```ts
-// packages/ai/src/types.ts
-interface ToolResultMessage<TDetails = any> {
-  role: "toolResult";
-  toolCallId: string;
-  toolName: string;
-  content: (TextContent | ImageContent)[];  // 给 LLM 看的
-  details?: TDetails;                        // 给 UI 看的（LLM 忽略）
-  isError: boolean;
-  timestamp: number;
-}
-```
-
-**字段映射：**
-
 | AgentToolResult (agent) | ToolResultMessage (ai) | 说明                      |
 | ----------------------- | ---------------------- | ------------------------- |
 | content                 | content                | 直接复制，LLM 能看到      |
@@ -1670,37 +1890,18 @@ interface ToolResultMessage<TDetails = any> {
 | -                       | isError                | 来自执行结果              |
 | -                       | timestamp              | Date.now()                |
 
-**转换函数：**
-
-```ts
-// packages/agent/src/agent-loop.ts
-function createToolResultMessage(finalized: FinalizedToolCallOutcome): ToolResultMessage {
-  return {
-    role: "toolResult",
-    toolCallId: finalized.toolCall.id,
-    toolName: finalized.toolCall.name,
-    content: finalized.result.content,   // 复制给模型
-    details: finalized.result.details,   // 复制给 UI
-    isError: finalized.isError,
-    timestamp: Date.now(),
-  };
-}
-```
-
-#### 具体工具层示例
-
-每个工具填充不同的 details 供 TUI 渲染：
+**具体工具层实现：**每个工具填充不同的 details 供 TUI 渲染
 
 - edit 工具：details.diff（diff 字符串）、details.firstChangedLine（首行变更行号）-> TUI 渲染文件编辑预览
 - find 工具：details.resultLimitReached（结果数量限制）、details.truncation（截断信息）-> TUI 显示截断警告
 
 TUI 渲染时通过 renderResult(result, options, theme) 回调读取 result.details 构建富文本 UI，而 result.content 里的文本只给 LLM 看。
 
-#### 扩展系统层
+**扩展系统层实现：**
 
 扩展的 tool_result handler 可以同时修改 content（给 LLM 的）和 details（给 UI 的），实现对工具结果的拦截和增强。这也是 afterToolCall hook 存在的意义 - 让上层有机会改写工具结果。
 
-#### 设计优势
+**设计优势：**
 
 1. **关注点分离**：LLM 只看到它需要理解的内容，UI 拿到它需要渲染的数据
 2. **无需二次解析**：传统做法需要从 LLM 输出中解析 JSON 再提取 UI 数据，现在直接拿 details
@@ -1733,7 +1934,17 @@ TUI 渲染时通过 renderResult(result, options, theme) 回调读取 result.det
 - 它需要**能被中断**（abort）
 - 它需要**防止**同时运行两次（mutual exclusion）
 
-pi 的解决方案是在循环引擎之上加一层**有状态壳层**：`Agent` 类，它持有对话历史、模型、工具等运行时状态，维护 steering / follow-up 消息队列，把回调式的低层循环包装成 `prompt()` / `continue()` / `abort()` 等高层 API。
+pi 的解决方案是在循环引擎之上加一层**有状态壳层**：`Agent` 类，它**持有对话历史、模型、工具等运行时状态 `AgentState`，维护 steering / follow-up 消息队列，把回调式的低层循环包装成 `prompt()` / `continue()` / `abort()` 等高层 API**。
+
+> "回调式"指的是 agent-loop.ts 的 runAgentLoop() 不会把结果直接返回给你，而是通过你传入的 emit 回调函数逐个推送事件。调用方这样用：
+>
+> ```ts
+> await runAgentLoop(messages, context, config, async (event) => {
+>   // 每产出一个事件，循环引擎就调用这个函数
+>     console.log(event.type);  // "message_start", "tool_execution_start", ...
+>     });
+>   ```
+>   
 
 ```mermaid
 graph TB
@@ -1758,67 +1969,6 @@ graph TB
     style Agent fill:#e3f2fd
     style Loop fill:#fff3e0
 ```
-
-`Agent` 向循环引擎提供两样东西：一个 context 快照（`createContextSnapshot`）和一个配置对象（`createLoopConfig`）。循环引擎通过事件回调（`emit`）把产出送回 `Agent`，`Agent` 在 `processEvents()` 中做状态归约。
-
-"回调式"指的是 agent-loop.ts 的 runAgentLoop() 不会把结果直接返回给你，而是通过你传入的 emit 回调函数 逐个推送事件。调用方这样用：
-
-```ts
-await runAgentLoop(messages, context, 
-config, async (event) => {
-  // 每产出一个事件，循环引擎就调用这个函数
-  console.log(event.type);  // 
-  "message_start", 
-  "tool_execution_start", ...
-});
-```
-
-示例：如何构造一个 Agent 实例
-
-```typescript
-const agent = new Agent({
-  // ---- initialState：写入 _state，各有默认值 ----
-  // 初始状态（系统提示、模型、推理级别、工具、历史消息）
-  initialState: {
-    systemPrompt: 'You are a helpful assistant.',  // 默认 ""
-    model: getModel('anthropic', 'claude-sonnet-4-20250514'),  // 默认占位模型（不可用）
-    thinkingLevel: 'medium',  // 默认 "off"，可选 off | minimal | low | medium | high | xhigh
-    tools: [],                // 默认 []
-    messages: [],             // 默认 []
-  },
-
-  // ---- 14 个公开配置字段：全部可选，可运行时替换 ----
-  convertToLlm: (messages) => messages.filter(      // 消息转换钩子，默认 defaultConvertToLlm
-    m => m.role === 'user' || m.role === 'assistant' || m.role === 'toolResult'
-  ),
-  transformContext: async (messages, signal) => pruneOldMessages(messages),  // 上下文变换钩子，默认 undefined
-  streamFn: streamSimple,                           // 默认 streamSimple（pi-ai）
-  getApiKey: async (provider) => getKey(provider),   // 默认 undefined
-  onPayload: async (payload) => payload,             // 默认 undefined
-  onResponse: async (response) => {},                // 默认 undefined
-  // 工具执行拦截钩子
-  beforeToolCall: async ({ toolCall, args }) => {    // 默认 undefined
-    if (toolCall.name === 'bash' && args.command.includes('rm -rf')) {
-      return { block: true, reason: 'Dangerous command blocked' };
-    }
-  },
-  afterToolCall: async ({ toolCall, result, isError }) => {  // 默认 undefined
-    if (!isError) return { details: { ...result.details, audited: true } };
-  },
-  prepareNextTurn: async (signal) => undefined,      // 默认 undefined
-  sessionId: 'my-session',                           // 默认 undefined
-  thinkingBudgets: { medium: 5000, high: 10000 },    // 默认 undefined
-  transport: 'auto',                                 // 默认 "auto"
-  maxRetryDelayMs: 30000,                            // 默认 undefined
-  toolExecution: 'parallel',                         // 默认 "parallel"
-
-  // ---- 队列模式 ----
-  steeringMode: 'one-at-a-time',   // 默认 "one-at-a-time"
-  followUpMode: 'one-at-a-time',   // 默认 "one-at-a-time"
-});
-```
-
-所有参数都是可选的——`new Agent()` 不传任何参数也能编译通过。但实际要能跑起来，至少需要提供 `initialState.model` 和 API 密钥（通过 `getApiKey` 或环境变量）。
 
 ### Agent 类内部字段与构造器
 
@@ -1886,9 +2036,96 @@ constructor(options: AgentOptions = {}) {
 }
 ```
 
-> 下文中 1-3 的 `MutableAgentState` / `PendingMessageQueue` / `ActiveRun` 是 `agent.ts` 内部的私有实现，不对外导出。4、四个接口是 `types.ts` 和 `agent.ts` 对外导出的公共类型，上层（如 coding-agent）通过它们与 Agent 交互。
+示例：如何构造一个 Agent 实例
 
-#### 1、MutableAgentState — 可变状态（agent.ts，不对外导出）
+```typescript
+const agent = new Agent({
+  // ---- initialState：写入 _state，各有默认值 ----
+  // 初始状态（系统提示、模型、推理级别、工具、历史消息）
+  initialState: {
+    systemPrompt: 'You are a helpful assistant.',  // 默认 ""
+    model: getModel('anthropic', 'claude-sonnet-4-20250514'),  // 默认占位模型（不可用）
+    thinkingLevel: 'medium',  // 默认 "off"，可选 off | minimal | low | medium | high | xhigh
+    tools: [],                // 默认 []
+    messages: [],             // 默认 []
+  },
+
+  // ---- 14 个公开配置字段：全部可选，可运行时替换 ----
+  convertToLlm: (messages) => messages.filter(      // 消息转换钩子，默认 defaultConvertToLlm
+    m => m.role === 'user' || m.role === 'assistant' || m.role === 'toolResult'
+  ),
+  transformContext: async (messages, signal) => pruneOldMessages(messages),  // 上下文变换钩子，默认 undefined
+  streamFn: streamSimple,                           // 默认 streamSimple（pi-ai）
+  getApiKey: async (provider) => getKey(provider),   // 默认 undefined
+  onPayload: async (payload) => payload,             // 默认 undefined
+  onResponse: async (response) => {},                // 默认 undefined
+  // 工具执行拦截钩子
+  beforeToolCall: async ({ toolCall, args }) => {    // 默认 undefined
+    if (toolCall.name === 'bash' && args.command.includes('rm -rf')) {
+      return { block: true, reason: 'Dangerous command blocked' };
+    }
+  },
+  afterToolCall: async ({ toolCall, result, isError }) => {  // 默认 undefined
+    if (!isError) return { details: { ...result.details, audited: true } };
+  },
+  prepareNextTurn: async (signal) => undefined,      // 默认 undefined
+  sessionId: 'my-session',                           // 默认 undefined
+  thinkingBudgets: { medium: 5000, high: 10000 },    // 默认 undefined
+  transport: 'auto',                                 // 默认 "auto"
+  maxRetryDelayMs: 30000,                            // 默认 undefined
+  toolExecution: 'parallel',                         // 默认 "parallel"
+
+  // ---- 队列模式 ----
+  steeringMode: 'one-at-a-time',   // 默认 "one-at-a-time"
+  followUpMode: 'one-at-a-time',   // 默认 "one-at-a-time"
+});
+```
+
+所有参数都是可选的——`new Agent()` 不传任何参数也能编译通过。但实际要能跑起来，至少需要提供 `initialState.model` 和 API 密钥（通过 `getApiKey` 或环境变量）。
+
+> 下文中 1-4 的函数和字段是 `agent.ts` 内部的私有实现，不对外导出。5 是 `types.ts` 和 `agent.ts` 对外导出的公共类型，上层（如 coding-agent）通过它们与 Agent 交互。
+
+#### 1、内部工具函数和常量
+
+```ts
+/**
+ * 默认的 convertToLlm：只保留 LLM 能理解的三种消息角色。
+ *
+ * 调用链：Agent.constructor → 作为 this.convertToLlm 的默认值
+ * 被调用：agent-loop.ts 每次 LLM 请求前调用 convertToLlm(messages)
+ */
+function defaultConvertToLlm(messages: AgentMessage[]): Message[] {
+	return messages.filter(
+		(message) => message.role === "user" || message.role === "assistant" || message.role === "toolResult",
+	);
+}
+
+/** 空的 usage 对象，用于错误/中止场景下填充 AssistantMessage。 */
+const EMPTY_USAGE = {
+	input: 0,
+	output: 0,
+	cacheRead: 0,
+	cacheWrite: 0,
+	totalTokens: 0,
+	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+};
+
+/** 默认模型占位符，Agent 未设置模型时使用。 */
+const DEFAULT_MODEL = {
+	id: "unknown",
+	name: "unknown",
+	api: "unknown",
+	provider: "unknown",
+	baseUrl: "",
+	reasoning: false,
+	input: [],
+	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+	contextWindow: 0,
+	maxTokens: 0,
+} satisfies Model<any>;
+```
+
+#### 2、MutableAgentState — 可变状态（agent.ts，不对外导出）
 
 `AgentState` 是对外暴露的只读接口（`isStreaming`、`pendingToolCalls` 等都是 `readonly`）。Agent 内部使用 `MutableAgentState`——同样的字段，但可写。
 
@@ -1902,8 +2139,6 @@ type MutableAgentState = Omit<AgentState,
   errorMessage?: string;           // AgentState 中是 readonly
 };
 ```
-
-
 
 通过 `createMutableAgentState()` 创建，使用 getter/setter 实现**赋值时拷贝**语义：
 
@@ -1930,7 +2165,7 @@ function createMutableAgentState(initialState?): MutableAgentState {
 
 `agent.state` getter 返回的就是这个对象（向上转型为只读的 `AgentState`）。外部代码可以读取所有状态，也可以通过 `agent.state.tools = [...]` 赋值，但 setter 内部会 `.slice()` 复制，切断外部引用。
 
-#### 2、PendingMessageQueue — 消息队列（agent.ts，不对外导出）
+#### 3、PendingMessageQueue — 消息队列（agent.ts，不对外导出）
 
 Agent 持有两个独立的队列实例：
 
@@ -1963,7 +2198,7 @@ class PendingMessageQueue {
 
 两个队列的 `mode` 可通过 `agent.steeringMode` / `agent.followUpMode` 在运行中根据需要随时切换。
 
-#### 3、ActiveRun — 单次运行的生命周期元数据（agent.ts，不对外导出）
+#### 4、ActiveRun — 单次运行的生命周期元数据（agent.ts，不对外导出）
 
 ```typescript
 type ActiveRun = {
@@ -2030,9 +2265,9 @@ Agent 同一时间只能有一个 `activeRun`。`prompt()` / `continue()` 开始
 >
 > 三个功能依赖同一组状态：**是否在跑**（`activeRun` 是否存在）和**这一次跑的元数据**（`abortController`、`promise`/`resolve`）。如果分开存三个字段，需要手动保证它们同步创建、同步清除。放在一个对象里，创建和清除就是一行代码的事，不会出现"中止控制器还在但 run 已经结束了"之类的不一致状态。
 
-#### 4、四个接口的关系（types.ts + agent.ts，对外导出）
+#### 5、AgentOptions / AgentState / AgentContext / AgentLoopConfig 四个生命周期接口
 
-Agent 的生命周期涉及四个接口 AgentOptions / AgentState / AgentContext / AgentLoopConfig，它们在不同阶段出现：
+只有 AgentOptions 定义在 agent.ts，对外导出；其他接口都定义在 types.ts，对外导出
 
 ```
 构造时                    每次 run 时                    循环引擎内部
@@ -2055,13 +2290,129 @@ _state                  快照 + 配置（用完即弃）           纯函数式
 
 `AgentState` 是 Agent 持久持有的可变状态。`AgentOptions` 是构造时的配置输入。`AgentContext` 和 `AgentLoopConfig` 是每次 run 时从 `AgentState` + Agent 实例属性动态生成的**值对象**——低层循环引擎消费它们，但不持有 Agent 的引用。
 
+```ts
+/** Agent 构造函数的选项。 */
+export interface AgentOptions {
+	/** 初始状态（系统提示、模型、工具、历史消息等）。 */
+	initialState?: Partial<Omit<AgentState, "pendingToolCalls" | "isStreaming" | "streamingMessage" | "errorMessage">>;
+	/** 将 AgentMessage[] 转换为 LLM 兼容的 Message[]。 */
+	convertToLlm?: (messages: AgentMessage[]) => Message[] | Promise<Message[]>;
+	/** 在 convertToLlm 之前对上下文做变换（如裁剪旧消息）。 */
+	transformContext?: (messages: AgentMessage[], signal?: AbortSignal) => Promise<AgentMessage[]>;
+	/** 流式函数，默认使用 pi-ai 的 streamSimple。 */
+	streamFn?: StreamFn;
+	/** 动态获取 API 密钥。 */
+	getApiKey?: (provider: string) => Promise<string | undefined> | string | undefined;
+	/** 发送前检查/替换 payload 的回调。 */
+	onPayload?: SimpleStreamOptions["onPayload"];
+	/** 收到 HTTP 响应后的回调。 */
+	onResponse?: SimpleStreamOptions["onResponse"];
+	/** 工具执行前的拦截钩子（可阻止执行）。 */
+	beforeToolCall?: (context: BeforeToolCallContext, signal?: AbortSignal) => Promise<BeforeToolCallResult | undefined>;
+	/** 工具执行后的拦截钩子（可覆盖结果）。 */
+	afterToolCall?: (context: AfterToolCallContext, signal?: AbortSignal) => Promise<AfterToolCallResult | undefined>;
+	/** 轮次结束后准备下一轮的钩子（可替换上下文/模型）。 */
+	prepareNextTurn?: (
+		signal?: AbortSignal,
+	) => Promise<AgentLoopTurnUpdate | undefined> | AgentLoopTurnUpdate | undefined;
+	/** steering 消息的队列模式。 */
+	steeringMode?: QueueMode;
+	/** follow-up 消息的队列模式。 */
+	followUpMode?: QueueMode;
+	/** 会话标识符，传给 provider 用于缓存。 */
+	sessionId?: string;
+	/** 各推理级别的 token 预算。 */
+	thinkingBudgets?: ThinkingBudgets;
+	/** 传输方式偏好。 */
+	transport?: Transport;
+	/** 最大重试延迟（毫秒）。 */
+	maxRetryDelayMs?: number;
+	/** 工具执行模式（顺序 / 并行）。 */
+	toolExecution?: ToolExecutionMode;
+}
+```
+
+##### `AgentOptions`（构造时）vs `AgentLoopConfig`（每次 run 时）
+
+1、AgentOptions 独有：用户才能提供的东西
+
+```ts
+// 初始状态 — 只有用户知道初始值
+initialState?: Partial<AgentState>;
+
+// 流式函数 — 依赖注入，用户决定用哪个 HTTP 库
+streamFn?: StreamFn;
+
+// 队列模式 — 用户的使用偏好
+steeringMode?: QueueMode;
+followUpMode?: QueueMode;
+```
+
+为什么 LoopConfig 不需要？
+
+* initialState：循环引擎不关心初始状态，它只接收当前状态（通过 AgentContext ） 
+
+* streamFn：不是配置，是依赖注入，在 runAgentLoop() 参数中单独传递
+
+  ```ts
+  // AgentLoopConfig 继承了 SimpleStreamOptions
+  export interface AgentLoopConfig extends SimpleStreamOptions {
+      // ...
+  }
+  
+  // SimpleStreamOptions 包含 onPayload、onResponse 等 HTTP 层回调
+  // streamFn 是使用这些回调的"执行器"
+  
+  // 关系：
+  // streamFn: (model, context, options) => stream
+  //                                 ↑
+  //                         这里的 options 包含了 config 中的 onPayload、onResponse
+  ```
+
+* steeringMode：队列模式是 Agent 内部实现细节，循环引擎只调用 getSteeringMessages()
+
+2、AgentLoopConfig 独有：循环引擎才能生成的东西
+
+```ts
+// 模型 — 每次 run 可能不同（prepareNextTurn 可切换）
+model: Model<any>;
+
+// 队列消费函数 — Agent 内部状态，循环引擎不需要知道队列实现
+getSteeringMessages?: () => Promise<AgentMessage[]>;
+getFollowUpMessages?: () => Promise<AgentMessage[]>;
+
+// 停止判断 — 循环引擎的控制流钩子
+shouldStopAfterTurn?: (context) => boolean;
+```
+
+为什么 AgentOptions 不需要？
+
+* model：用户通过 initialState.model 传入，Agent 存在 _state 中
+* getSteeringMessages、getFollowUpMessages：用户不直接控制，Agent 用内部队列自动生成
+* shouldStopAfterTurn：Agent 不使用此钩子，留给更上层（如 AgentHarness）或测试
+
+3、签名不同的字段：prepareNextTurn
+
+```ts
+// AgentOptions — 用户定义，接收 signal
+prepareNextTurn?: (signal?: AbortSignal) => Promise<AgentLoopTurnUpdate | undefined>;
+
+// AgentLoopConfig — 循环引擎调用，接收 context
+prepareNextTurn?: (context: PrepareNextTurnContext) => Promise<AgentLoopTurnUpdate | undefined>;
+```
 
 ### 数据流全景：有状态壳层 ↔ 无状态循环引擎
 
-每次 `prompt()` / `continue()` 调用时，Agent 做三件事：**打包**（把状态快照化交给 loop）、**执行**（loop 产出事件流）、**归约**（把事件消化回状态）。这三个步骤通过 `createContextSnapshot()` → `createLoopConfig()` → `runAgentLoop()` → `processEvents()` 串联。
+每次 `prompt()` / `continue()` 调用时，有如下三个步骤：
+
+1. **打包**：`Agent` 向循环引擎提供两样东西：一个 context 快照（`createContextSnapshot`）和一个配置对象（`createLoopConfig`）
+2. **执行**：循环引擎通过事件回调（`emit`）把产出送回 `Agent`
+3. **归约**：`Agent` 在 `processEvents()` 中把事件消化回状态。
+
+这三个步骤通过 `createContextSnapshot()` → `createLoopConfig()` → `runAgentLoop()` → `processEvents()` 串联。
 
 ```ts
-Agent（有状态，持久持有 _state / queues / config）
+Agent（有状态，持久持有 _state / queues / AgentOptions 传入的配置字段）
   │
   │  prompt() / continue() 时：
   │
@@ -2077,10 +2428,11 @@ Agent（有状态，持久持有 _state / queues / config）
   ├─────────────────────────────→│  runAgentLoop(messages,      │
   │                              │    context, config, emit)    │
   │                              │                              │
-  │                              │  无状态循环引擎：             │
-  │                              │  LLM 调用 → 工具执行 → 循环  │
+  │                              │  无状态循环引擎：               │
+  │                              │  LLM 调用 → 工具执行 → 循环     │
   │                              │                              │
-  │                              │  每产出一个事件 → emit(event) │
+  │                              │  每产出一个事件 → emit(event)  │
+  │                              │  最终返回 newMessages		 │
   │                              └──────────┬───────────────────┘
   │                                         │
   │  ③ processEvents(event) ←──────────────┘
@@ -2146,19 +2498,31 @@ private createLoopConfig(options?: { skipInitialSteeringPoll?: boolean }): Agent
 
 `AgentLoopConfig` 的设计意图：低层循环引擎**不需要知道 Agent 类的存在**。它只消费一个纯配置对象。所有对 Agent 实例的引用都藏在闭包里。
 
-`AgentOptions`（构造时）vs `AgentLoopConfig`（每次 run 时）：
-
-| | `AgentOptions` | `AgentLoopConfig` |
-|---|---|---|
-| **时机** | 构造时传入一次 | 每次 run 时动态生成 |
-| **模型** | 不含（在 `initialState` 中） | 必须包含 `model` |
-| **队列** | `steeringMode` / `followUpMode`（配置行为） | `getSteeringMessages` / `getFollowUpMessages`（实际拉取函数） |
-| **prepareNextTurn** | `(signal?) => ...` | `(PrepareNextTurnContext) => ...` 带完整上下文 |
-| **生命周期** | 持久持有 | 用完即弃 |
-
 #### 回路：`processEvents()` — 状态归约器
 
-循环引擎通过 `emit` 回调把事件推给 Agent，Agent 在 `processEvents()` 中做两件事：**归约状态** → **广播 listener**。
+Agent 调用循环引擎时，传入回调函数：接收 event 参数，调用 this.processEvents(event)
+
+```ts
+// agent.ts
+await runAgentLoop(
+    ...
+    (event) => this.processEvents(event),  // ← 传入回调函数
+    ...
+);
+```
+
+循环引擎接收回调函数作为 emit 参数
+
+```ts
+// agent-loop.ts
+export async function runAgentLoop(
+    ...
+    emit: AgentEventSink,  // ← 接收回调函数
+    ...
+): Promise<AgentMessage[]> {
+```
+
+所以循环引擎 `emit({ type: "message_start", message })`，Agent调用 `this.processEvents({ type: "message_start", message })`，做两件事：**归约状态** → **广播 listener**。
 
 ```typescript
 private async processEvents(event: AgentEvent): Promise<void> {
@@ -2175,20 +2539,37 @@ private async processEvents(event: AgentEvent): Promise<void> {
       this._state.messages.push(event.message);  // 只有 message_end 才提交到 transcript
       break;
     case "tool_execution_start": {
-      const next = new Set(this._state.pendingToolCalls);
-      next.add(event.toolCallId);
-      this._state.pendingToolCalls = next;  // 新 Set，不可变语义
+      // 不可变替换 Set，方便外层状态观察
+      // 为什么创建新 Set 而不是直接修改？
+      // → 如果直接 this._state.pendingToolCalls.add(id)，外部引用同一个 Set 的代码
+      //   无法感知变化（引用没变）。创建新 Set 触发赋值，让 MutableAgentState 的
+      //   setter 可以拦截（如果有的话），也让 UI 层可以通过引用比较判断状态是否更新。
+      const pendingToolCalls = new Set(this._state.pendingToolCalls);
+      // 把正在执行的工具 ID 加入"待完成集合"
+      pendingToolCalls.add(event.toolCallId);
+      // 用新 Set 替换旧 Set（不可变更新模式）
+      this._state.pendingToolCalls = pendingToolCalls;
       break;
     }
-    case "tool_execution_end": {
-      const next = new Set(this._state.pendingToolCalls);
-      next.delete(event.toolCallId);
-      this._state.pendingToolCalls = next;
+	case "tool_execution_end": {
+      // 同样创建新 Set，保持不可变性
+      const pendingToolCalls = new Set(this._state.pendingToolCalls
+      // 工具执行完成，从"待完成集合"中移除
+      pendingToolCalls.delete(event.toolCallId)
+      // 用新 Set 替换旧 Set
+      this._state.pendingToolCalls = pendingToolCalls;
       break;
     }
-    case "turn_end":
+	case "turn_end":
+      // errorMessage 在 turn 末尾稳定写入，避免流式中途闪烁
+      // 为什么不 message_update 时就写入？
+      // → 流式过程中 errorMessage 可能是临时值（比如网络抖动的瞬时错误），
+      //   如果立即写入会导致 UI 闪烁（错误出现 → 消失）。
+      //   等到 turn_end 时才写入，保证 errorMessage 是最终确定的值。
       if (event.message.role === "assistant" && event.message.errorMessage) {
-        this._state.errorMessage = event.message.errorMessage;
+          // 只处理 assistant 角色的错误消息
+          // 只在有 errorMessage 时才写入（避免覆盖之前的值）
+          this._state.errorMessage = event.message.errorMessage;
       }
       break;
     case "agent_end":
@@ -2202,6 +2583,17 @@ private async processEvents(event: AgentEvent): Promise<void> {
     await listener(event, signal);
   }
 }
+```
+
+所以 **`AgentState.messages` 包含完整的对话记录**，持久维护，而**循环引擎返回的 newMessages** 只包含本轮的消息，结束后返回：
+
+```
+messages: [
+    { role: "user", content: "帮我搜索一下" },          // 用户消息
+    { role: "assistant", content: "...", toolCalls: [...] },  // 助手消息（含工具调用）
+    { role: "toolResult", content: "搜索结果..." },      // 工具结果 ← 也在 messages 中
+    { role: "assistant", content: "根据搜索结果..." },   // 下一轮助手回复
+]
 ```
 
 三个设计细节：

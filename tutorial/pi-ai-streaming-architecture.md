@@ -651,6 +651,14 @@ export class EventStream<T, R = T> implements AsyncIterable<T> {
   // 这是 finalResultPromise 的"开关"——调用它就能让 Promise 完成
   private resolveFinalResult!: (result: R) => void;
 
+  // === 终结条件与结果提取策略 ===
+  // 由子类或调用方在构造时注入，实现"同一流类，不同终结逻辑"的复用。
+  // 例如 AssistantMessageEventStream 传入：
+  //   isComplete:   (event) => event.type === "done" || event.type === "error"
+  //   extractResult: (event) => event.type === "done" ? event.message : event.error
+  private isComplete: (event: T) => boolean;
+  private extractResult: (event: T) => R;
+
   constructor(isComplete: (event: T) => boolean, extractResult: (event: T) => R) {
     // isComplete: 判断一个事件是否是"终结事件"（done 或 error）
     // extractResult: 从终结事件中提取最终结果
