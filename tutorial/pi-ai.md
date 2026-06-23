@@ -994,7 +994,7 @@ index.ts（barrel file）
                               │
                               ▼
 ┌─────────────────────────────────────────────────────────┐
-│  Provider 懒加载 → 轻量公共 API（从 provider 往上）        │
+│  Provider 懒加载 → 注册表调度 → 轻量公共 API（从 provider 往上）│
 │                                                         │
 │  stream.ts          ← 统一入口                          │
 │       │                                                 │
@@ -1024,7 +1024,7 @@ index.ts（barrel file）
 └─────────────────────────────────────────────────────────┘
 ```
 
-## 三、Provider 懒加载 → 注册表调度 → 公共 API
+## 三、Provider 懒加载 → 注册表调度 → stream 公共 API
 
 ### `env-api-keys.ts` 提供 apikey
 
@@ -1034,16 +1034,7 @@ env-api-keys.ts
 ├─ export getEnvApiKey(provider) → 获取 API 密钥值
 ├─ export findEnvKeys(provider)  → 获取已设置的环境变量名（诊断用）
 │
-├─ 被 3 个文本 provider 调用（获取 API 密钥）：
-│   ├─ anthropic.ts:434        → options?.apiKey ?? getEnvApiKey(model.provider) ?? ""
-│   ├─ anthropic.ts:668        → options?.apiKey || getEnvApiKey(model.provider)
-│   ├─ openai-completions.ts:137 → options?.apiKey || getEnvApiKey(model.provider) || ""
-│   ├─ openai-completions.ts:425 → options?.apiKey || getEnvApiKey(model.provider)
-│   ├─ openai-responses.ts:136  → options?.apiKey || getEnvApiKey(model.provider) || ""
-│   └─ openai-responses.ts:208  → options?.apiKey || getEnvApiKey(model.provider)
-│
-├─ 被 1 个图片 provider 调用：
-│   └─ images/openrouter.ts:53  → options?.apiKey || getEnvApiKey(model.provider)
+├─ 被 3 个文本 provider、1 个图片 provider 调用（获取 API 密钥）
 │
 └─ 被 stream.ts 重导出：
     └─ export { getEnvApiKey } from "./env-api-keys.ts"
@@ -1155,7 +1146,6 @@ env-api-keys.ts
   ├─ 调用真正的 streamAnthropic
   └─ 后续调用直接复用缓存的模块
   ```
-  
   
 
 - stream.ts 导入 register-builtins.ts，自动触发 `registerBuiltInApiProviders()` 注册所有内置 provider 到全局注册表

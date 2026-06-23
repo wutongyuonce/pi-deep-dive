@@ -523,6 +523,37 @@ TypeScript 的工具类型（Utility Types）是内置的"类型函数"，能基
 
 这些字符串工具类型在需要**规范化**或**转换**字符串字面量类型时非常有用，常用于定义事件的命名约定等场景。
 
+### 运算符
+
+```ts
+return this.activeRun?.promise ?? Promise.resolve();
+```
+
+这行代码用了两个 JavaScript 运算符： 可选链 （ ?. ）和 空值合并 （ ?? ）。
+
+```ts
+// 如果 this.activeRun 存在，取 .promise
+// 如果 this.activeRun 是 null 或 undefined，返回 undefined
+this.activeRun?.promise
+
+// 如果左侧是 null 或 undefined，用右侧的值
+A ?? B
+```
+
+完整等价于：
+
+```ts
+if (this.activeRun === null || this.activeRun === undefined) {
+    // 没有活动 run，立即 resolve
+    return Promise.resolve();
+} else {
+    // 有活动 run，返回该 run 的 promise（由 finishRun 在完成后 resolve）
+    return this.activeRun.promise;
+}
+```
+
+Promise.resolve() 是一个静态方法，返回一个已经兑现（resolved）的 Promise ，await 立即继续。
+
 ### JSON 相关方法
 
 ![image-20260615150927201](img/image-20260615150927201.png)
