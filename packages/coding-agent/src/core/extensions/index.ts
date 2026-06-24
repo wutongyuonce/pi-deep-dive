@@ -1,5 +1,20 @@
 /**
- * Extension system for lifecycle events and custom tools.
+ * 扩展系统入口（barrel 文件）
+ *
+ * 作用/定位：extensions 子模块的统一对外导出入口。
+ * 提供：类型定义、工具函数、运行时类的 re-export，供外部模块和其他子系统引用。
+ *
+ * 模块结构：
+ * - types.ts    — 所有扩展相关类型（事件、上下文、工具定义、注册接口等）
+ * - loader.ts   — 扩展发现、加载、运行时创建（由 jiti 动态加载 TS 模块）
+ * - runner.ts   — 扩展运行器，管理扩展生命周期、事件分发、上下文绑定
+ * - wrapper.ts  — 将扩展注册的 ToolDefinition 适配为 AgentTool
+ *
+ * 典型调用链路：
+ *   discoverAndLoadExtensions() → loadExtensions() → loadExtension()
+ *     → createExtensionRuntime() + createExtensionAPI() + factory(api)
+ *   runner.bindCore() / runner.emit() → 扩展事件处理器
+ *   wrapRegisteredTools() → AgentSession 使用扩展工具
  */
 
 export type { SlashCommandInfo, SlashCommandSource } from "../slash-commands.ts";
@@ -157,7 +172,7 @@ export type {
 	WriteToolCallEvent,
 	WriteToolResultEvent,
 } from "./types.ts";
-// Type guards
+// 类型守卫
 export {
 	defineTool,
 	isBashToolResult,

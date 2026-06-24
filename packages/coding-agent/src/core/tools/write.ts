@@ -1,3 +1,22 @@
+/**
+ * 文件写入工具 (write.ts)
+ *
+ * 本文件实现了文件写入工具，允许 Agent 创建新文件或完整覆写已有文件。
+ *
+ * 提供的能力：
+ *   - 写入内容到文件，自动创建父目录
+ *   - 通过 file-mutation-queue 序列化对同一文件的并发写入
+ *   - TUI 渲染：支持代码语法高亮和增量高亮更新（流式写入时逐步渲染）
+ *   - 中止支持：在每个异步操作后检查 AbortSignal
+ *
+ * 调用链路：index.ts createWriteTool → createWriteToolDefinition → wrapToolDefinition
+ * 依赖模块：
+ *   - file-mutation-queue.ts：文件变更序列化（withFileMutationQueue）
+ *   - path-utils.ts：路径解析（resolveToCwd）
+ *   - render-utils.ts：文本渲染辅助
+ *   - tool-definition-wrapper.ts：ToolDef → AgentTool 包装
+ */
+
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { Container, Text } from "@earendil-works/pi-tui";
 import { mkdir as fsMkdir, writeFile as fsWriteFile } from "fs/promises";
@@ -11,6 +30,7 @@ import { resolveToCwd } from "./path-utils.ts";
 import { invalidArgText, normalizeDisplayText, replaceTabs, shortenPath, str } from "./render-utils.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
 
+/** write 工具的输入参数 schema：文件路径 + 内容 */
 const writeSchema = Type.Object({
 	path: Type.String({ description: "Path to the file to write (relative or absolute)" }),
 	content: Type.String({ description: "Content to write to the file" }),
@@ -19,26 +39,29 @@ const writeSchema = Type.Object({
 export type WriteToolInput = Static<typeof writeSchema>;
 
 /**
- * Pluggable operations for the write tool.
- * Override these to delegate file writing to remote systems (for example SSH).
+ * write 工具的可插拔操作接口。
+ * 覆盖这些方法可将文件写入委托到远程系统（如 SSH）。
  */
 export interface WriteOperations {
-	/** Write content to a file */
+	/** 写入内容到文件 */
 	writeFile: (absolutePath: string, content: string) => Promise<void>;
-	/** Create directory recursively */
+	/** 递归创建目录 */
 	mkdir: (dir: string) => Promise<void>;
 }
 
+/** 默认的本地文件系统写入操作 */
 const defaultWriteOperations: WriteOperations = {
 	writeFile: (path, content) => fsWriteFile(path, content, "utf-8"),
 	mkdir: (dir) => fsMkdir(dir, { recursive: true }).then(() => {}),
 };
 
+/** write 工具的配置选项 */
 export interface WriteToolOptions {
-	/** Custom operations for file writing. Default: local filesystem */
+	/** 自定义文件写入操作，默认使用本地文件系统 */
 	operations?: WriteOperations;
 }
 
+/** 写入内容的语法高亮缓存，用于流式写入时的增量更新 */
 type WriteHighlightCache = {
 	rawPath: string | null;
 	lang: string;
@@ -47,6 +70,7 @@ type WriteHighlightCache = {
 	highlightedLines: string[];
 };
 
+/** write 工具的渲染组件，继承 Text 并携带高亮缓存 */
 class WriteCallRenderComponent extends Text {
 	cache?: WriteHighlightCache;
 
@@ -55,13 +79,16 @@ class WriteCallRenderComponent extends Text {
 	}
 }
 
+/** 流式写入时前 50 行使用完整高亮，后续行使用单行高亮以提高性能 */
 const WRITE_PARTIAL_FULL_HIGHLIGHT_LINES = 50;
 
+/** 对单行文本执行语法高亮 */
 function highlightSingleLine(line: string, lang: string): string {
 	const highlighted = highlightCode(line, lang);
 	return highlighted[0] ?? "";
 }
 
+/** 刷新前缀行的完整高亮（WRITE_PARTIAL_FULL_HIGHLIGHT_LINES 行） */
 function refreshWriteHighlightPrefix(cache: WriteHighlightCache): void {
 	const prefixCount = Math.min(WRITE_PARTIAL_FULL_HIGHLIGHT_LINES, cache.normalizedLines.length);
 	if (prefixCount === 0) return;
@@ -73,6 +100,7 @@ function refreshWriteHighlightPrefix(cache: WriteHighlightCache): void {
 	}
 }
 
+/** 从头构建完整的高亮缓存 */
 function rebuildWriteHighlightCacheFull(rawPath: string | null, fileContent: string): WriteHighlightCache | undefined {
 	const lang = rawPath ? getLanguageFromPath(rawPath) : undefined;
 	if (!lang) return undefined;
@@ -87,6 +115,7 @@ function rebuildWriteHighlightCacheFull(rawPath: string | null, fileContent: str
 	};
 }
 
+/** 增量更新高亮缓存（仅处理新增内容），大幅减少流式写入时的高亮计算开销 */
 function updateWriteHighlightCacheIncremental(
 	cache: WriteHighlightCache | undefined,
 	rawPath: string | null,
@@ -128,6 +157,7 @@ function trimTrailingEmptyLines(lines: string[]): string[] {
 	return lines.slice(0, end);
 }
 
+/** 格式化 write 工具调用的显示文本，包含文件路径和内容预览 */
 function formatWriteCall(
 	args: { path?: string; file_path?: string; content?: string } | undefined,
 	options: ToolRenderResultOptions,
@@ -161,6 +191,7 @@ function formatWriteCall(
 	return text;
 }
 
+/** 格式化 write 工具结果（仅在出错时显示错误信息） */
 function formatWriteResult(
 	result: { content: Array<{ type: string; text?: string; data?: string; mimeType?: string }>; isError?: boolean },
 	theme: typeof import("../../modes/interactive/theme/theme.ts").theme,
@@ -178,6 +209,10 @@ function formatWriteResult(
 	return `\n${theme.fg("error", output)}`;
 }
 
+/**
+ * 创建 write 工具定义。
+ * 执行逻辑通过 withFileMutationQueue 确保对同一文件的并发写入串行化。
+ */
 export function createWriteToolDefinition(
 	cwd: string,
 	options?: WriteToolOptions,
@@ -201,20 +236,19 @@ export function createWriteToolDefinition(
 			const absolutePath = resolveToCwd(path, cwd);
 			const dir = dirname(absolutePath);
 			return withFileMutationQueue(absolutePath, async () => {
-				// Do not reject from an abort event listener here: that would release the
-				// mutation queue while an in-flight filesystem operation may still finish.
-				// Checking signal.aborted after each await observes the same aborts while
-				// keeping the queue locked until the current operation has settled.
+				// 不在 abort 事件监听器中 reject：这会释放 mutation queue，而正在进行的
+				// 文件系统操作可能尚未完成。在每次 await 后检查 signal.aborted，
+				// 同样可以观察到中止，同时保持队列锁定直到当前操作完成。
 				const throwIfAborted = (): void => {
 					if (signal?.aborted) throw new Error("Operation aborted");
 				};
 
 				throwIfAborted();
-				// Create parent directories if needed.
+				// 创建父目录（如需要）
 				await ops.mkdir(dir);
 				throwIfAborted();
 
-				// Write the file contents.
+				// 写入文件内容
 				await ops.writeFile(absolutePath, content);
 				throwIfAborted();
 
@@ -261,6 +295,7 @@ export function createWriteToolDefinition(
 	};
 }
 
+/** 创建 write 工具实例，通过 wrapToolDefinition 将 ToolDef 包装为 AgentTool */
 export function createWriteTool(cwd: string, options?: WriteToolOptions): AgentTool<typeof writeSchema> {
 	return wrapToolDefinition(createWriteToolDefinition(cwd, options));
 }

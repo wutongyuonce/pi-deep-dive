@@ -1,72 +1,105 @@
 /**
- * Custom message types and transformers for the coding agent.
+ * 编码代理的自定义消息类型与转换器。
  *
- * Extends the base AgentMessage type with coding-agent specific message types,
- * and provides a transformer to convert them to LLM-compatible messages.
+ * 文件定位：coding-agent 的消息层，扩展了 pi-agent-core 的基础 AgentMessage 类型，
+ * 定义了 bash 执行、自定义扩展消息、分支摘要、压缩摘要等编码代理专属消息类型。
+ *
+ * 提供：
+ * - 4 种自定义消息类型接口（BashExecutionMessage / CustomMessage / BranchSummaryMessage / CompactionSummaryMessage）
+ * - 通过声明合并（declaration merging）将自定义类型注入 AgentMessage 联合类型
+ * - convertToLlm() 转换器，将所有消息类型映射为 LLM 兼容的 Message 格式
+ *
+ * 调用链路：
+ * - 被 agent 核心调用（transformToLlm 选项），用于将对话历史发送给 LLM
+ * - 被 compaction（压缩）模块调用，用于生成摘要时的消息转换
+ * - 被自定义扩展和工具调用，注入自定义消息到对话中
  */
 
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { ImageContent, Message, TextContent } from "@earendil-works/pi-ai";
 
+/** 压缩摘要的前缀，用于将之前的对话历史替换为摘要 */
 export const COMPACTION_SUMMARY_PREFIX = `The conversation history before this point was compacted into the following summary:
 
 <summary>
 `;
 
+/** 压缩摘要的后缀 */
 export const COMPACTION_SUMMARY_SUFFIX = `
 </summary>`;
 
+/** 分支摘要的前缀，用于标识从某个分支返回时携带的摘要信息 */
 export const BRANCH_SUMMARY_PREFIX = `The following is a summary of a branch that this conversation came back from:
 
 <summary>
 `;
 
+/** 分支摘要的后缀 */
 export const BRANCH_SUMMARY_SUFFIX = `</summary>`;
 
 /**
- * Message type for bash executions via the ! command.
+ * Bash 命令执行消息类型，对应用户通过 ! 命令触发的 shell 执行。
+ *
+ * 被 bash 工具在执行命令后创建，经 convertToLlm() 转换后以 user 角色文本形式发送给 LLM。
  */
 export interface BashExecutionMessage {
 	role: "bashExecution";
+	/** 执行的命令字符串 */
 	command: string;
+	/** 命令的标准输出 */
 	output: string;
+	/** 退出码，未定义表示命令仍在运行 */
 	exitCode: number | undefined;
+	/** 命令是否被用户取消 */
 	cancelled: boolean;
+	/** 输出是否被截断（过长时） */
 	truncated: boolean;
+	/** 输出被截断时，完整输出文件的路径 */
 	fullOutputPath?: string;
 	timestamp: number;
-	/** If true, this message is excluded from LLM context (!! prefix) */
+	/** 为 true 时表示排除在 LLM 上下文之外（!! 前缀） */
 	excludeFromContext?: boolean;
 }
 
 /**
- * Message type for extension-injected messages via sendMessage().
- * These are custom messages that extensions can inject into the conversation.
+ * 扩展注入的自定义消息类型，通过 sendMessage() 接口注入到对话中。
+ * 扩展可以借此向 LLM 对话中插入带类型的自定义内容。
  */
 export interface CustomMessage<T = unknown> {
 	role: "custom";
+	/** 自定义消息的类型标识符 */
 	customType: string;
+	/** 消息内容，支持纯文本或多模态内容数组 */
 	content: string | (TextContent | ImageContent)[];
+	/** 是否在 UI 中显示该消息 */
 	display: boolean;
+	/** 附加的结构化详情数据 */
 	details?: T;
 	timestamp: number;
 }
 
+/** 分支摘要消息，对话从某个分支返回时携带的摘要 */
 export interface BranchSummaryMessage {
 	role: "branchSummary";
+	/** 分支摘要文本 */
 	summary: string;
+	/** 来源分支的标识符 */
 	fromId: string;
 	timestamp: number;
 }
 
+/** 压缩摘要消息，对话历史过长被压缩后生成的摘要 */
 export interface CompactionSummaryMessage {
 	role: "compactionSummary";
+	/** 压缩后的摘要文本 */
 	summary: string;
+	/** 压缩前的 token 数量 */
 	tokensBefore: number;
 	timestamp: number;
 }
 
-// Extend CustomAgentMessages via declaration merging
+// 通过声明合并扩展 AgentMessage 的自定义消息类型联合
+// 使 TypeScript 能识别 role 为 "bashExecution" | "custom" | "branchSummary" | "compactionSummary" 的消息
 declare module "@earendil-works/pi-agent-core" {
 	interface CustomAgentMessages {
 		bashExecution: BashExecutionMessage;
@@ -77,7 +110,15 @@ declare module "@earendil-works/pi-agent-core" {
 }
 
 /**
- * Convert a BashExecutionMessage to user message text for LLM context.
+ * 将 BashExecutionMessage 转换为 LLM 可读的文本格式。
+ *
+ * 内部步骤：
+ * 1. 输出 "Ran `command`" 标题行
+ * 2. 附上命令输出（放在代码块中），无输出时显示 "(no output)"
+ * 3. 追加取消/错误退出码信息
+ * 4. 如有截断，附加完整输出文件路径
+ *
+ * 被 convertToLlm() 在处理 bashExecution 类型消息时调用。
  */
 export function bashExecutionToText(msg: BashExecutionMessage): string {
 	let text = `Ran \`${msg.command}\`\n`;
@@ -97,6 +138,7 @@ export function bashExecutionToText(msg: BashExecutionMessage): string {
 	return text;
 }
 
+/** 创建分支摘要消息的工厂函数 */
 export function createBranchSummaryMessage(summary: string, fromId: string, timestamp: string): BranchSummaryMessage {
 	return {
 		role: "branchSummary",
@@ -106,6 +148,7 @@ export function createBranchSummaryMessage(summary: string, fromId: string, time
 	};
 }
 
+/** 创建压缩摘要消息的工厂函数 */
 export function createCompactionSummaryMessage(
 	summary: string,
 	tokensBefore: number,
@@ -119,7 +162,7 @@ export function createCompactionSummaryMessage(
 	};
 }
 
-/** Convert CustomMessageEntry to AgentMessage format */
+/** 创建自定义消息，将扩展的自定义内容转换为 AgentMessage 格式 */
 export function createCustomMessage(
 	customType: string,
 	content: string | (TextContent | ImageContent)[],
@@ -138,20 +181,28 @@ export function createCustomMessage(
 }
 
 /**
- * Transform AgentMessages (including custom types) to LLM-compatible Messages.
+ * 将 AgentMessage（含自定义类型）转换为 LLM 兼容的 Message 数组。
  *
- * This is used by:
- * - Agent's transormToLlm option (for prompt calls and queued messages)
- * - Compaction's generateSummary (for summarization)
- * - Custom extensions and tools
+ * 调用者：
+ * - Agent 的 transformToLlm 选项（用于 prompt 调用和排队消息）
+ * - Compaction 的 generateSummary（用于摘要生成）
+ * - 自定义扩展和工具
+ *
+ * 转换规则：
+ * - bashExecution → user 消息（通过 bashExecutionToText 转为文本）
+ * - custom → user 消息（字符串直接用，数组按原样）
+ * - branchSummary → user 消息（包裹在 branch summary 标签中）
+ * - compactionSummary → user 消息（包裹在 compaction summary 标签中）
+ * - user / assistant / toolResult → 原样透传
+ * - excludeFromContext 的 bashExecution → 跳过
  */
 export function convertToLlm(messages: AgentMessage[]): Message[] {
 	return messages
 		.map((m): Message | undefined => {
 			switch (m.role) {
 				case "bashExecution":
-					// Skip messages excluded from context (!! prefix)
-					if (m.excludeFromContext) {
+				// 跳过排除在上下文之外的消息（!! 前缀）
+				if (m.excludeFromContext) {
 						return undefined;
 					}
 					return {

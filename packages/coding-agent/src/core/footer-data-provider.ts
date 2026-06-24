@@ -1,17 +1,31 @@
+/**
+ * 底部数据提供者模块
+ *
+ * 为 TUI 底部状态栏提供数据源，包括当前 git 分支名称和扩展状态文本。
+ * 通过监视 .git/HEAD 文件变更实时感知分支切换，并支持 reftable 格式的
+ * git 仓库。提供只读接口供扩展获取数据，内部管理文件监视器的生命周期。
+ */
+
 import { type ExecFileException, execFile, spawnSync } from "child_process";
 import { existsSync, type FSWatcher, readFileSync, statSync, unwatchFile, watchFile } from "fs";
 import { dirname, join, resolve } from "path";
 import { closeWatcher, FS_WATCH_RETRY_DELAY_MS, watchWithErrorHandler } from "../utils/fs-watch.ts";
 
+/** git 元数据路径信息 */
 type GitPaths = {
+	/** 仓库根目录 */
 	repoDir: string;
+	/** 通用 git 目录（worktree 模式下可能与 repoDir 不同） */
 	commonGitDir: string;
+	/** HEAD 文件路径 */
 	headPath: string;
 };
 
 /**
- * Find git metadata paths by walking up from cwd.
- * Handles both regular git repos (.git is a directory) and worktrees (.git is a file).
+ * 从 cwd 向上查找 git 元数据路径
+ * 同时处理普通 git 仓库（.git 是目录）和 worktree（.git 是文件指向 gitdir）
+ * @param cwd 起始搜索目录
+ * @returns git 路径信息，不在 git 仓库中则返回 null
  */
 function findGitPaths(cwd: string): GitPaths | null {
 	let dir = cwd;
@@ -47,7 +61,11 @@ function findGitPaths(cwd: string): GitPaths | null {
 	}
 }
 
-/** Ask git for the current branch. Returns null on detached HEAD or if git is unavailable. */
+/**
+ * 同步调用 git 获取当前分支名
+ * @param repoDir git 仓库目录
+ * @returns 分支名，detached HEAD 或 git 不可用时返回 null
+ */
 function resolveBranchWithGitSync(repoDir: string): string | null {
 	const result = spawnSync("git", ["--no-optional-locks", "symbolic-ref", "--quiet", "--short", "HEAD"], {
 		cwd: repoDir,
@@ -58,7 +76,11 @@ function resolveBranchWithGitSync(repoDir: string): string | null {
 	return branch || null;
 }
 
-/** Ask git for the current branch asynchronously. Returns null on detached HEAD or if git is unavailable. */
+/**
+ * 异步调用 git 获取当前分支名
+ * @param repoDir git 仓库目录
+ * @returns 分支名，detached HEAD 或 git 不可用时返回 null
+ */
 function resolveBranchWithGitAsync(repoDir: string): Promise<string | null> {
 	return new Promise((resolvePromise) => {
 		execFile(
@@ -81,35 +103,57 @@ function resolveBranchWithGitAsync(repoDir: string): Promise<string | null> {
 }
 
 /**
- * Provides git branch and extension statuses - data not otherwise accessible to extensions.
- * Token stats, model info available via ctx.sessionManager and ctx.model.
+ * 底部数据提供者
+ * 提供 git 分支和扩展状态数据——这些数据无法通过扩展 API 直接获取。
+ * 令牌统计、模型信息等可通过 ctx.sessionManager 和 ctx.model 获取。
  */
 export class FooterDataProvider {
 	private cwd: string;
+	/** 分支变更监视防抖延迟（毫秒） */
 	private static readonly WATCH_DEBOUNCE_MS = 500;
 
+	/** 扩展状态文本映射（key -> 状态文本） */
 	private extensionStatuses = new Map<string, string>();
+	/** 缓存的分支名（undefined 表示未初始化） */
 	private cachedBranch: string | null | undefined = undefined;
+	/** git 元数据路径 */
 	private gitPaths: GitPaths | null | undefined = undefined;
+	/** HEAD 文件变更监视器 */
 	private headWatcher: FSWatcher | null = null;
+	/** reftable 目录监视器 */
 	private reftableWatcher: FSWatcher | null = null;
+	/** reftable/tables.list 文件监视器 */
 	private reftableTablesListWatcher: FSWatcher | null = null;
+	/** reftable/tables.list 路径（用于 watchFile 回退） */
 	private reftableTablesListPath: string | null = null;
+	/** 分支变更回调集合 */
 	private branchChangeCallbacks = new Set<() => void>();
+	/** 可用模型提供商数量 */
 	private availableProviderCount = 0;
+	/** 防抖刷新定时器 */
 	private refreshTimer: ReturnType<typeof setTimeout> | null = null;
+	/** git 监视器重试定时器 */
 	private gitWatcherRetryTimer: ReturnType<typeof setTimeout> | null = null;
+	/** 是否有正在进行的异步刷新 */
 	private refreshInFlight = false;
+	/** 是否有待处理的刷新请求 */
 	private refreshPending = false;
+	/** 是否已销毁 */
 	private disposed = false;
 
+	/**
+	 * @param cwd 当前工作目录
+	 */
 	constructor(cwd: string) {
 		this.cwd = cwd;
 		this.gitPaths = findGitPaths(cwd);
 		this.setupGitWatcher();
 	}
 
-	/** Current git branch, null if not in repo, "detached" if detached HEAD */
+	/**
+	 * 获取当前 git 分支名
+	 * @returns 分支名；不在 git 仓库中返回 null；detached HEAD 返回 "detached"
+	 */
 	getGitBranch(): string | null {
 		if (this.cachedBranch === undefined) {
 			this.cachedBranch = this.resolveGitBranchSync();
@@ -117,18 +161,22 @@ export class FooterDataProvider {
 		return this.cachedBranch;
 	}
 
-	/** Extension status texts set via ctx.ui.setStatus() */
+	/** 获取扩展状态文本（通过 ctx.ui.setStatus() 设置） */
 	getExtensionStatuses(): ReadonlyMap<string, string> {
 		return this.extensionStatuses;
 	}
 
-	/** Subscribe to git branch changes. Returns unsubscribe function. */
+	/**
+	 * 订阅 git 分支变更事件
+	 * @param callback 分支变更时的回调函数
+	 * @returns 取消订阅函数
+	 */
 	onBranchChange(callback: () => void): () => void {
 		this.branchChangeCallbacks.add(callback);
 		return () => this.branchChangeCallbacks.delete(callback);
 	}
 
-	/** Internal: set extension status */
+	/** 设置扩展状态（内部使用） */
 	setExtensionStatus(key: string, text: string | undefined): void {
 		if (text === undefined) {
 			this.extensionStatuses.delete(key);
@@ -137,21 +185,22 @@ export class FooterDataProvider {
 		}
 	}
 
-	/** Internal: clear extension statuses */
+	/** 清除所有扩展状态（内部使用） */
 	clearExtensionStatuses(): void {
 		this.extensionStatuses.clear();
 	}
 
-	/** Number of unique providers with available models (for footer display) */
+	/** 获取可用模型提供商数量（用于底部栏显示） */
 	getAvailableProviderCount(): number {
 		return this.availableProviderCount;
 	}
 
-	/** Internal: update available provider count */
+	/** 更新可用提供商数量（内部使用） */
 	setAvailableProviderCount(count: number): void {
 		this.availableProviderCount = count;
 	}
 
+	/** 更新工作目录，重新查找 git 仓库并设置文件监视器 */
 	setCwd(cwd: string): void {
 		if (this.cwd === cwd) {
 			return;
@@ -169,7 +218,7 @@ export class FooterDataProvider {
 		this.notifyBranchChange();
 	}
 
-	/** Internal: cleanup */
+	/** 销毁实例，清除所有监视器和回调 */
 	dispose(): void {
 		this.disposed = true;
 		if (this.refreshTimer) {
@@ -180,10 +229,12 @@ export class FooterDataProvider {
 		this.branchChangeCallbacks.clear();
 	}
 
+	/** 通知所有订阅者分支已变更 */
 	private notifyBranchChange(): void {
 		for (const cb of this.branchChangeCallbacks) cb();
 	}
 
+	/** 调度防抖刷新（在 HEAD 文件变更后触发） */
 	private scheduleRefresh(): void {
 		if (this.disposed || this.refreshTimer) return;
 		if (this.refreshInFlight) {
@@ -289,9 +340,9 @@ export class FooterDataProvider {
 		this.clearGitWatchers();
 		if (!this.gitPaths) return;
 
-		// Watch the directory containing HEAD, not HEAD itself.
-		// Git uses atomic writes (write temp, rename over HEAD), which changes the inode.
-		// fs.watch on a file stops working after the inode changes.
+		// 监视包含 HEAD 的目录而非 HEAD 文件本身。
+		// Git 使用原子写入（先写临时文件再重命名覆盖 HEAD），这会改变 inode。
+		// fs.watch 监视文件时在 inode 变更后会停止工作。
 		this.headWatcher = watchWithErrorHandler(
 			dirname(this.gitPaths.headPath),
 			(_eventType, filename) => {
@@ -305,8 +356,8 @@ export class FooterDataProvider {
 			return;
 		}
 
-		// In reftable repos, branch switches update files in the reftable directory
-		// instead of HEAD. Watch it separately so the footer picks up those changes.
+		// 在 reftable 格式的仓库中，分支切换更新的是 reftable 目录中的文件而非 HEAD。
+		// 需要单独监视该目录以捕获这些变更。
 		const reftableDir = join(this.gitPaths.commonGitDir, "reftable");
 		if (existsSync(reftableDir)) {
 			this.reftableWatcher = watchWithErrorHandler(
@@ -347,7 +398,7 @@ export class FooterDataProvider {
 	}
 }
 
-/** Read-only view for extensions - excludes setExtensionStatus, setAvailableProviderCount and dispose */
+/** 只读视图——供扩展使用，排除了 setExtensionStatus、setAvailableProviderCount 和 dispose */
 export type ReadonlyFooterDataProvider = Pick<
 	FooterDataProvider,
 	"getGitBranch" | "getExtensionStatuses" | "getAvailableProviderCount" | "onBranchChange"

@@ -1,3 +1,19 @@
+/**
+ * 工具注册入口 (index.ts)
+ *
+ * 本文件是 tools 模块的统一导出入口，负责：
+ * 1. 汇总导出所有内置工具（read/bash/edit/write/grep/find/ls）的类型和工厂函数
+ * 2. 定义工具名称枚举 (ToolName)、工具选项接口 (ToolsOptions)
+ * 3. 提供按名称/按模式批量创建工具定义 (ToolDef) 和工具实例 (Tool) 的工厂函数
+ *
+ * 工具创建链路：调用方 → createXxxTool/createTool/createAllTools → 各工具模块的 createXxxToolDefinition
+ *   → wrapToolDefinition → 返回 AgentTool 实例
+ *
+ * 提供两种工具集组合：
+ * - Coding 工具集：read + bash + edit + write（可执行代码修改）
+ * - ReadOnly 工具集：read + grep + find + ls（只读搜索/浏览）
+ */
+
 export {
 	type BashOperations,
 	type BashSpawnContext,
@@ -78,11 +94,16 @@ import { createLsTool, createLsToolDefinition, type LsToolOptions } from "./ls.t
 import { createReadTool, createReadToolDefinition, type ReadToolOptions } from "./read.ts";
 import { createWriteTool, createWriteToolDefinition, type WriteToolOptions } from "./write.ts";
 
+/** 工具实例类型，对应 AgentTool 的泛型擦除版本 */
 export type Tool = AgentTool<any>;
+/** 工具定义类型，包含元信息、schema、执行逻辑和渲染器 */
 export type ToolDef = ToolDefinition<any, any>;
+/** 所有内置工具的名称联合类型 */
 export type ToolName = "read" | "bash" | "edit" | "write" | "grep" | "find" | "ls";
+/** 所有内置工具名称的集合 */
 export const allToolNames: Set<ToolName> = new Set(["read", "bash", "edit", "write", "grep", "find", "ls"]);
 
+/** 各工具的配置选项集合，调用方可按需传入各工具的独立选项 */
 export interface ToolsOptions {
 	read?: ReadToolOptions;
 	bash?: BashToolOptions;
@@ -93,6 +114,7 @@ export interface ToolsOptions {
 	ls?: LsToolOptions;
 }
 
+/** 按工具名称创建单个工具定义（ToolDef），不含渲染层 */
 export function createToolDefinition(toolName: ToolName, cwd: string, options?: ToolsOptions): ToolDef {
 	switch (toolName) {
 		case "read":
@@ -114,6 +136,7 @@ export function createToolDefinition(toolName: ToolName, cwd: string, options?: 
 	}
 }
 
+/** 按工具名称创建单个工具实例（AgentTool），通过 wrapToolDefinition 包装 */
 export function createTool(toolName: ToolName, cwd: string, options?: ToolsOptions): Tool {
 	switch (toolName) {
 		case "read":
@@ -135,6 +158,7 @@ export function createTool(toolName: ToolName, cwd: string, options?: ToolsOptio
 	}
 }
 
+/** 创建编程工具集定义：read + bash + edit + write（可执行代码修改） */
 export function createCodingToolDefinitions(cwd: string, options?: ToolsOptions): ToolDef[] {
 	return [
 		createReadToolDefinition(cwd, options?.read),
@@ -144,6 +168,7 @@ export function createCodingToolDefinitions(cwd: string, options?: ToolsOptions)
 	];
 }
 
+/** 创建只读工具集定义：read + grep + find + ls（只读搜索/浏览） */
 export function createReadOnlyToolDefinitions(cwd: string, options?: ToolsOptions): ToolDef[] {
 	return [
 		createReadToolDefinition(cwd, options?.read),
@@ -153,6 +178,7 @@ export function createReadOnlyToolDefinitions(cwd: string, options?: ToolsOption
 	];
 }
 
+/** 创建全部工具定义的 Record 映射，便于按名称查找 */
 export function createAllToolDefinitions(cwd: string, options?: ToolsOptions): Record<ToolName, ToolDef> {
 	return {
 		read: createReadToolDefinition(cwd, options?.read),
@@ -165,6 +191,7 @@ export function createAllToolDefinitions(cwd: string, options?: ToolsOptions): R
 	};
 }
 
+/** 创建编程工具集实例：read + bash + edit + write */
 export function createCodingTools(cwd: string, options?: ToolsOptions): Tool[] {
 	return [
 		createReadTool(cwd, options?.read),
@@ -174,6 +201,7 @@ export function createCodingTools(cwd: string, options?: ToolsOptions): Tool[] {
 	];
 }
 
+/** 创建只读工具集实例：read + grep + find + ls */
 export function createReadOnlyTools(cwd: string, options?: ToolsOptions): Tool[] {
 	return [
 		createReadTool(cwd, options?.read),
@@ -183,6 +211,7 @@ export function createReadOnlyTools(cwd: string, options?: ToolsOptions): Tool[]
 	];
 }
 
+/** 创建全部工具实例的 Record 映射 */
 export function createAllTools(cwd: string, options?: ToolsOptions): Record<ToolName, Tool> {
 	return {
 		read: createReadTool(cwd, options?.read),

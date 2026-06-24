@@ -1,9 +1,22 @@
 /**
- * Bash command execution with streaming support and cancellation.
+ * bash-executor.ts - Bash 命令执行器（支持流式输出和取消）
  *
- * This module provides a unified bash execution implementation used by:
- * - AgentSession.executeBash() for interactive and RPC modes
- * - Direct calls from modes that need bash execution
+ * 作用：提供统一的 bash 命令执行实现，支持流式输出回调、中止信号、输出截断和全量日志持久化。
+ * 定位：core 层的执行引擎，被 AgentSession.executeBash() 调用，也被需要 bash 执行的各种 mode 使用。
+ *
+ * 与 exec.ts 的区别：
+ * - exec.ts 是通用的单次命令执行工具，不处理流式输出
+ * - bash-executor.ts 专门面向 bash 执行场景，支持流式回调、ANSI 清理、输出截断、临时文件日志
+ *
+ * 调用关系：
+ * - AgentSession.executeBash() → executeBashWithOperations() → BashOperations.exec()
+ * - BashOperations 的具体实现可以是本地 bash（tools/bash.ts）或远程 SSH/bash
+ *
+ * 核心特性：
+ * - 流式输出：通过 onData 回调实时向调用方推送清理后的输出片段
+ * - 输出截断：当输出超过阈值时自动截断尾部，保留开头部分
+ * - 全量日志：截断时将完整输出写入临时文件，供用户查看
+ * - 滚动缓冲区：内存中维护有限大小的输出缓冲区
  */
 
 import { randomBytes } from "node:crypto";
@@ -16,36 +29,62 @@ import type { BashOperations } from "./tools/bash.ts";
 import { DEFAULT_MAX_BYTES, truncateTail } from "./tools/truncate.ts";
 
 // ============================================================================
-// Types
+// 类型定义
 // ============================================================================
 
+/**
+ * Bash 执行器选项。
+ * 调用方：AgentSession.executeBash()、直接调用 executeBashWithOperations() 的模块。
+ */
 export interface BashExecutorOptions {
-	/** Callback for streaming output chunks (already sanitized) */
+	/** 流式输出回调，每收到一块数据（已清理）就调用 */
 	onChunk?: (chunk: string) => void;
-	/** AbortSignal for cancellation */
+	/** 用于取消执行的中止信号 */
 	signal?: AbortSignal;
 }
 
+/**
+ * Bash 执行结果。
+ * 返回给 AgentSession 用于记录到会话历史和上下文中。
+ */
 export interface BashResult {
-	/** Combined stdout + stderr output (sanitized, possibly truncated) */
+	/** 合并后的 stdout + stderr 输出（已清理，可能已截断） */
 	output: string;
-	/** Process exit code (undefined if killed/cancelled) */
+	/** 进程退出码，被中止/取消时为 undefined */
 	exitCode: number | undefined;
-	/** Whether the command was cancelled via signal */
+	/** 是否通过信号被取消 */
 	cancelled: boolean;
-	/** Whether the output was truncated */
+	/** 输出是否被截断 */
 	truncated: boolean;
-	/** Path to temp file containing full output (if output exceeded truncation threshold) */
+	/** 当输出超过截断阈值时，完整输出写入的临时文件路径 */
 	fullOutputPath?: string;
 }
 
 // ============================================================================
-// Implementation
+// 实现
 // ============================================================================
 
 /**
- * Execute a bash command using custom BashOperations.
- * Used for remote execution (SSH, containers, etc.).
+ * 使用自定义 BashOperations 执行 bash 命令。
+ *
+ * 此函数支持远程执行（SSH、容器等），通过 BashOperations 接口抽象实际的命令执行。
+ *
+ * 内部步骤：
+ * 1. 创建输出收集器：滚动缓冲区（内存）+ 可选的临时文件（全量日志）
+ * 2. onData 回调处理每个数据块：
+ *    a. 累计原始字节数，超过阈值时创建临时文件
+ *    b. 清理数据：去除 ANSI 转义码、替换二进制垃圾字符、规范化换行符
+ *    c. 维护滚动缓冲区，确保内存占用有限
+ *    d. 调用 onChunk 回调向调用方推送清理后的文本
+ * 3. 执行完成后，对完整输出执行截断处理
+ * 4. 如果输出被截断，确保临时文件已创建并包含完整内容
+ * 5. 返回结果对象，包含（截断后的）输出、退出码、是否取消、完整输出路径
+ *
+ * @param command 要执行的 bash 命令
+ * @param cwd 工作目录
+ * @param operations 抽象的 bash 操作接口（本地或远程实现）
+ * @param options 可选的执行选项（流式回调、中止信号）
+ * @returns 执行结果，包含输出、退出码、取消状态和截断信息
  */
 export async function executeBashWithOperations(
 	command: string,
@@ -61,6 +100,10 @@ export async function executeBashWithOperations(
 	let tempFileStream: WriteStream | undefined;
 	let totalBytes = 0;
 
+	/**
+	 * 懒创建临时文件：当输出总量超过截断阈值时触发。
+	 * 将已缓冲的输出块先写入文件，后续数据边收边写。
+	 */
 	const ensureTempFile = () => {
 		if (tempFilePath) {
 			return;
@@ -68,6 +111,7 @@ export async function executeBashWithOperations(
 		const id = randomBytes(8).toString("hex");
 		tempFilePath = join(tmpdir(), `pi-bash-${id}.log`);
 		tempFileStream = createWriteStream(tempFilePath);
+		// 将已缓冲的块先写入临时文件
 		for (const chunk of outputChunks) {
 			tempFileStream.write(chunk);
 		}
@@ -75,13 +119,16 @@ export async function executeBashWithOperations(
 
 	const decoder = new TextDecoder();
 
+	/**
+	 * 数据块处理回调：清理、缓冲、持久化、流式推送。
+	 */
 	const onData = (data: Buffer) => {
 		totalBytes += data.length;
 
-		// Sanitize: strip ANSI, replace binary garbage, normalize newlines
+		// 清理：去除 ANSI 转义码、替换二进制垃圾字符、规范化换行符
 		const text = sanitizeBinaryOutput(stripAnsi(decoder.decode(data, { stream: true }))).replace(/\r/g, "");
 
-		// Start writing to temp file if exceeds threshold
+		// 超过截断阈值时，开始写入临时文件
 		if (totalBytes > DEFAULT_MAX_BYTES) {
 			ensureTempFile();
 		}
@@ -90,7 +137,7 @@ export async function executeBashWithOperations(
 			tempFileStream.write(text);
 		}
 
-		// Keep rolling buffer
+		// 维护滚动缓冲区，限制内存占用
 		outputChunks.push(text);
 		outputBytes += text.length;
 		while (outputBytes > maxOutputBytes && outputChunks.length > 1) {
@@ -98,7 +145,7 @@ export async function executeBashWithOperations(
 			outputBytes -= removed.length;
 		}
 
-		// Stream to callback
+		// 流式推送到调用方
 		if (options?.onChunk) {
 			options.onChunk(text);
 		}
@@ -110,6 +157,7 @@ export async function executeBashWithOperations(
 			signal: options?.signal,
 		});
 
+		// 执行完成，处理截断
 		const fullOutput = outputChunks.join("");
 		const truncationResult = truncateTail(fullOutput);
 		if (truncationResult.truncated) {
@@ -128,7 +176,7 @@ export async function executeBashWithOperations(
 			fullOutputPath: tempFilePath,
 		};
 	} catch (err) {
-		// Check if it was an abort
+		// 检查是否为中止导致的错误
 		if (options?.signal?.aborted) {
 			const fullOutput = outputChunks.join("");
 			const truncationResult = truncateTail(fullOutput);

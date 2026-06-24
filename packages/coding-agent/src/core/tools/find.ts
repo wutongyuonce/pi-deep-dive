@@ -1,3 +1,25 @@
+/**
+ * 文件查找工具 (find.ts)
+ *
+ * 本文件实现了基于 glob 模式的文件查找工具，允许 Agent 按文件名模式搜索文件。
+ *
+ * 提供的能力：
+ *   - 使用 fd 命令（或自定义 glob 操作）搜索匹配 glob 模式的文件
+ *   - 尊重 .gitignore 规则，使用 --no-require-git 语义
+ *   - 支持路径包含的模式（如 "src/**/*.spec.ts"），自动启用 --full-path
+ *   - 输出截断：结果数限制（默认 1000）+ 字节限制（默认 50KB）
+ *   - 结果路径相对于搜索目录显示
+ *   - TUI 渲染：折叠/展开模式显示搜索结果
+ *
+ * 调用链路：index.ts createFindTool → createFindToolDefinition → wrapToolDefinition
+ * 依赖模块：
+ *   - path-utils.ts：路径解析（resolveToCwd、pathExists）
+ *   - truncate.ts：头部截断（truncateHead）
+ *   - render-utils.ts：文本渲染辅助
+ *   - tool-definition-wrapper.ts：ToolDef → AgentTool 包装
+ *   - utils/tools-manager.ts：外部工具管理（ensureTool("fd")）
+ */
+
 import { createInterface } from "node:readline";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { Text } from "@earendil-works/pi-tui";
@@ -12,10 +34,12 @@ import { getTextOutput, invalidArgText, shortenPath, str } from "./render-utils.
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
 import { DEFAULT_MAX_BYTES, formatSize, type TruncationResult, truncateHead } from "./truncate.ts";
 
+/** 将路径分隔符统一为 POSIX 格式（/） */
 function toPosixPath(value: string): string {
 	return value.split(path.sep).join("/");
 }
 
+/** find 工具的输入参数 schema：glob 模式 + 可选的搜索目录和结果限制 */
 const findSchema = Type.Object({
 	pattern: Type.String({
 		description: "Glob pattern to match files, e.g. '*.ts', '**/*.json', or 'src/**/*.spec.ts'",
@@ -28,33 +52,38 @@ export type FindToolInput = Static<typeof findSchema>;
 
 const DEFAULT_LIMIT = 1000;
 
+/** find 工具执行结果的附加详情 */
 export interface FindToolDetails {
+	/** 截断信息（字节限制触发时） */
 	truncation?: TruncationResult;
+	/** 结果数限制被触发时的限制值 */
 	resultLimitReached?: number;
 }
 
 /**
- * Pluggable operations for the find tool.
- * Override these to delegate file search to remote systems (for example SSH).
+ * find 工具的可插拔操作接口。
+ * 覆盖这些方法可将文件搜索委托到远程系统（如 SSH）。
  */
 export interface FindOperations {
-	/** Check if path exists */
+	/** 检查路径是否存在 */
 	exists: (absolutePath: string) => Promise<boolean> | boolean;
-	/** Find files matching glob pattern. Returns relative or absolute paths. */
+	/** 按 glob 模式查找文件，返回相对或绝对路径 */
 	glob: (pattern: string, cwd: string, options: { ignore: string[]; limit: number }) => Promise<string[]> | string[];
 }
 
 const defaultFindOperations: FindOperations = {
 	exists: pathExists,
-	// This is a placeholder. Actual fd execution happens in execute() when no custom glob is provided.
+	// 占位实现。实际的 fd 执行发生在 execute() 中（当没有自定义 glob 时）。
 	glob: () => [],
 };
 
+/** find 工具的配置选项 */
 export interface FindToolOptions {
-	/** Custom operations for find. Default: local filesystem plus fd */
+	/** 自定义文件搜索操作，默认使用本地文件系统 + fd 命令 */
 	operations?: FindOperations;
 }
 
+/** 格式化 find 工具调用的显示文本 */
 function formatFindCall(
 	args: { pattern: string; path?: string; limit?: number } | undefined,
 	theme: typeof import("../../modes/interactive/theme/theme.ts").theme,
@@ -75,6 +104,7 @@ function formatFindCall(
 	return text;
 }
 
+/** 格式化 find 工具结果的显示文本 */
 function formatFindResult(
 	result: {
 		content: Array<{ type: string; text?: string; data?: string; mimeType?: string }>;
@@ -108,6 +138,10 @@ function formatFindResult(
 	return text;
 }
 
+/**
+ * 创建 find 工具定义。
+ * 默认使用 fd 命令搜索，也支持自定义 glob 操作。
+ */
 export function createFindToolDefinition(
 	cwd: string,
 	options?: FindToolOptions,
@@ -153,7 +187,7 @@ export function createFindToolDefinition(
 						const effectiveLimit = limit ?? DEFAULT_LIMIT;
 						const ops = customOps ?? defaultFindOperations;
 
-						// If custom operations provide glob(), use that instead of fd.
+						// 如果自定义操作提供了 glob()，则使用它代替 fd
 						if (customOps?.glob) {
 							if (!(await ops.exists(searchPath))) {
 								settle(() => reject(new Error(`Path not found: ${searchPath}`)));
@@ -181,7 +215,7 @@ export function createFindToolDefinition(
 								return;
 							}
 
-							// Relativize paths against the search root for stable output.
+							// 将路径相对于搜索根目录进行规范化，确保输出稳定
 							const relativized = results.map((p) => {
 								if (p.startsWith(searchPath)) return toPosixPath(p.slice(searchPath.length + 1));
 								return toPosixPath(path.relative(searchPath, p));
@@ -212,7 +246,7 @@ export function createFindToolDefinition(
 							return;
 						}
 
-						// Default implementation uses fd.
+						// 默认实现使用 fd 命令
 						const fdPath = await ensureTool("fd", true);
 						if (signal?.aborted) {
 							settle(() => reject(new Error("Operation aborted")));
@@ -223,9 +257,9 @@ export function createFindToolDefinition(
 							return;
 						}
 
-						// Build fd arguments. --no-require-git makes fd apply hierarchical .gitignore
-						// semantics whether or not the search path is inside a git repository, without
-						// leaking sibling-directory rules the way --ignore-file (a global source) would.
+						// 构建 fd 参数。--no-require-git 让 fd 在搜索路径不在 git 仓库内时
+						// 也使用层次化 .gitignore 语义，且不会像 --ignore-file 那样
+						// 泄露同级目录的忽略规则。
 						const args: string[] = [
 							"--glob",
 							"--color=never",
@@ -235,9 +269,8 @@ export function createFindToolDefinition(
 							String(effectiveLimit),
 						];
 
-						// fd --glob matches against the basename unless --full-path is set; in --full-path
-						// mode it matches against the absolute candidate path, so a path-containing
-						// pattern like 'src/**/*.spec.ts' needs a leading '**/' to match anything.
+						// fd --glob 默认匹配 basename；启用 --full-path 后匹配绝对路径，
+						// 因此包含路径的模式（如 "src/**/*.spec.ts"）需要添加 "**/" 前缀才能匹配。
 						let effectivePattern = pattern;
 						if (pattern.includes("/")) {
 							args.push("--full-path");
@@ -364,6 +397,7 @@ export function createFindToolDefinition(
 	};
 }
 
+/** 创建 find 工具实例，通过 wrapToolDefinition 将 ToolDef 包装为 AgentTool */
 export function createFindTool(cwd: string, options?: FindToolOptions): AgentTool<typeof findSchema> {
 	return wrapToolDefinition(createFindToolDefinition(cwd, options));
 }

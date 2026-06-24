@@ -1,5 +1,21 @@
 /**
- * Model registry - manages built-in and custom models, provides API key resolution.
+ * 模型注册表（Model Registry）—— 管理内置模型与自定义模型，提供 API key 解析。
+ *
+ * 文件定位：coding-agent 的模型管理层，负责从 pi-ai 内置模型和 models.json 自定义配置中
+ * 加载所有可用模型，处理模型覆盖（override）合并，以及通过 AuthStorage 解析 API key 和请求头。
+ *
+ * 提供：
+ * - ModelRegistry 类：模型的注册、查询、刷新，以及请求认证信息的解析
+ * - ProviderConfigInput 接口：扩展注册 provider 的输入格式
+ * - 自定义模型/覆盖的 JSON Schema 定义（通过 typebox 编译校验）
+ * - models.json 配置文件的加载、校验、解析流程
+ *
+ * 调用链路：
+ * - 被 agent 启动时创建，加载内置 + 自定义模型
+ * - 被 model-resolver.ts 调用，查询可用模型列表、查找特定模型
+ * - 被扩展（extensions）通过 registerProvider() 动态注册 provider 和模型
+ * - 调用 resolve-config-value.ts 解析 apiKey / headers 中的环境变量和 shell 命令
+ * - 调用 auth-storage.ts 查询已存储的认证状态
  */
 
 import {
@@ -33,7 +49,7 @@ import {
 	resolveHeadersOrThrow,
 } from "./resolve-config-value.ts";
 
-// Schema for OpenRouter routing preferences
+// OpenRouter 路由偏好配置的 Schema
 const PercentileCutoffsSchema = Type.Object({
 	p50: Type.Optional(Type.Number()),
 	p75: Type.Optional(Type.Number()),
@@ -73,13 +89,13 @@ const OpenRouterRoutingSchema = Type.Object({
 	preferred_max_latency: Type.Optional(Type.Union([Type.Number(), PercentileCutoffsSchema])),
 });
 
-// Schema for Vercel AI Gateway routing preferences
+// Vercel AI Gateway 路由偏好配置的 Schema
 const VercelGatewayRoutingSchema = Type.Object({
 	only: Type.Optional(Type.Array(Type.String())),
 	order: Type.Optional(Type.Array(Type.String())),
 });
 
-// Schema for thinking level support and provider-specific values
+// 思考级别支持及 provider 特定值的 Schema
 const ThinkingLevelMapValueSchema = Type.Union([Type.String(), Type.Null()]);
 const ThinkingLevelMapSchema = Type.Object({
 	off: Type.Optional(ThinkingLevelMapValueSchema),
@@ -134,8 +150,8 @@ const ProviderCompatSchema = Type.Union([
 	AnthropicMessagesCompatSchema,
 ]);
 
-// Schema for custom model definition
-// Most fields are optional with sensible defaults for local models (Ollama, LM Studio, etc.)
+// 自定义模型定义的 Schema
+// 大部分字段为可选，本地模型（Ollama、LM Studio 等）有合理的默认值
 const ModelDefinitionSchema = Type.Object({
 	id: Type.String({ minLength: 1 }),
 	name: Type.Optional(Type.String({ minLength: 1 })),
@@ -158,7 +174,7 @@ const ModelDefinitionSchema = Type.Object({
 	compat: Type.Optional(ProviderCompatSchema),
 });
 
-// Schema for per-model overrides (all fields optional, merged with built-in model)
+// 每模型覆盖配置的 Schema（所有字段可选，与内置模型合并）
 const ModelOverrideSchema = Type.Object({
 	name: Type.Optional(Type.String({ minLength: 1 })),
 	reasoning: Type.Optional(Type.Boolean()),
@@ -200,6 +216,7 @@ const validateModelsConfig = Compile(ModelsConfigSchema);
 
 type ModelsConfig = Static<typeof ModelsConfigSchema>;
 
+/** 格式化校验错误的路径信息，用于生成友好的错误提示 */
 function formatValidationPath(error: TLocalizedValidationError): string {
 	if (error.keyword === "required") {
 		const requiredProperties = (error.params as { requiredProperties?: string[] }).requiredProperties;
@@ -213,25 +230,27 @@ function formatValidationPath(error: TLocalizedValidationError): string {
 	return path || "root";
 }
 
-/** Strip `//` line comments and trailing commas from JSON, leaving string literals untouched. */
+/** 去除 JSON 中的 `//` 行注释和尾部逗号，不影响字符串字面量中的内容 */
 function stripJsonComments(input: string): string {
 	return input
 		.replace(/"(?:\\.|[^"\\])*"|\/\/[^\n]*/g, (m) => (m[0] === '"' ? m : ""))
 		.replace(/"(?:\\.|[^"\\])*"|,(\s*[}\]])/g, (m, tail) => tail ?? (m[0] === '"' ? m : ""));
 }
 
-/** Provider override config (baseUrl, compat) without request auth/headers */
+/** Provider 覆盖配置（baseUrl、compat），不包含请求认证/头信息 */
 interface ProviderOverride {
 	baseUrl?: string;
 	compat?: Model<Api>["compat"];
 }
 
+/** Provider 请求认证配置（apiKey、headers、是否使用 auth header） */
 interface ProviderRequestConfig {
 	apiKey?: string;
 	headers?: Record<string, string>;
 	authHeader?: boolean;
 }
 
+/** 请求认证解析结果：成功时包含 apiKey 和 headers，失败时包含错误信息 */
 export type ResolvedRequestAuth =
 	| {
 			ok: true;
@@ -243,20 +262,22 @@ export type ResolvedRequestAuth =
 			error: string;
 	  };
 
-/** Result of loading custom models from models.json */
+/** 从 models.json 加载自定义模型的结果 */
 interface CustomModelsResult {
 	models: Model<Api>[];
-	/** Providers with baseUrl/headers/apiKey overrides for built-in models */
+	/** 对内置模型有 baseUrl/headers/apiKey 覆盖的 provider 配置 */
 	overrides: Map<string, ProviderOverride>;
-	/** Per-model overrides: provider -> modelId -> override */
+	/** 每模型覆盖配置：provider -> modelId -> override */
 	modelOverrides: Map<string, Map<string, ModelOverride>>;
 	error: string | undefined;
 }
 
+/** 创建空的自定义模型结果（用于加载失败或文件不存在时） */
 function emptyCustomModelsResult(error?: string): CustomModelsResult {
 	return { models: [], overrides: new Map(), modelOverrides: new Map(), error };
 }
 
+/** 合并 compat 配置：将覆盖值合并到基础值之上，覆盖值中的字段优先 */
 function mergeCompat(
 	baseCompat: Model<Api>["compat"],
 	overrideCompat: ModelOverride["compat"],
@@ -271,13 +292,17 @@ function mergeCompat(
 }
 
 /**
- * Deep merge a model override into a model.
- * Handles nested objects (cost, compat) by merging rather than replacing.
+ * 深度合并模型覆盖配置到模型对象。
+ * 对嵌套对象（cost、compat）执行合并而非整体替换。
+ *
+ * @param model - 基础模型对象
+ * @param override - 覆盖配置
+ * @returns 合并后的新模型对象
  */
 function applyModelOverride(model: Model<Api>, override: ModelOverride): Model<Api> {
 	const result = { ...model };
 
-	// Simple field overrides
+	// 简单字段覆盖
 	if (override.name !== undefined) result.name = override.name;
 	if (override.reasoning !== undefined) result.reasoning = override.reasoning;
 	if (override.thinkingLevelMap !== undefined) {
@@ -287,7 +312,7 @@ function applyModelOverride(model: Model<Api>, override: ModelOverride): Model<A
 	if (override.contextWindow !== undefined) result.contextWindow = override.contextWindow;
 	if (override.maxTokens !== undefined) result.maxTokens = override.maxTokens;
 
-	// Merge cost (partial override)
+	// 合并 cost（部分覆盖）
 	if (override.cost) {
 		result.cost = {
 			input: override.cost.input ?? model.cost.input,
@@ -297,25 +322,33 @@ function applyModelOverride(model: Model<Api>, override: ModelOverride): Model<A
 		};
 	}
 
-	// Deep merge compat
+	// 深度合并 compat
 	result.compat = mergeCompat(model.compat, override.compat);
 
 	return result;
 }
 
-/** Clear the config value command cache. Exported for testing. */
+/** 清除配置值的命令缓存。导出用于测试。 */
 export const clearApiKeyCache = clearConfigValueCache;
 
 /**
- * Model registry - loads and manages models, resolves API keys via AuthStorage.
+ * 模型注册表——加载和管理模型，通过 AuthStorage 解析 API key。
+ *
+ * 主要职责：
+ * 1. 加载 pi-ai 内置模型，应用 models.json 中的 provider/model 级覆盖
+ * 2. 加载 models.json 中定义的自定义模型
+ * 3. 支持扩展（extensions）动态注册/注销 provider
+ * 4. 解析每个模型的 API key 和请求头（支持环境变量和 shell 命令）
  */
 export class ModelRegistry {
 	private models: Model<Api>[] = [];
 	private providerRequestConfigs: Map<string, ProviderRequestConfig> = new Map();
 	private modelRequestHeaders: Map<string, Record<string, string>> = new Map();
+	/** 已通过扩展注册的 provider 配置（用于 refresh 时重建） */
 	private registeredProviders: Map<string, ProviderConfigInput> = new Map();
 	private loadError: string | undefined = undefined;
 	readonly authStorage: AuthStorage;
+	/** models.json 文件路径，undefined 表示纯内存模式（不加载文件） */
 	private modelsJsonPath: string | undefined;
 
 	private constructor(authStorage: AuthStorage, modelsJsonPath: string | undefined) {
@@ -324,23 +357,26 @@ export class ModelRegistry {
 		this.loadModels();
 	}
 
+	/** 创建 ModelRegistry 实例，加载 models.json 文件 */
 	static create(authStorage: AuthStorage, modelsJsonPath: string = join(getAgentDir(), "models.json")): ModelRegistry {
 		return new ModelRegistry(authStorage, modelsJsonPath);
 	}
 
+	/** 创建纯内存模式的 ModelRegistry（不加载 models.json，用于测试等场景） */
 	static inMemory(authStorage: AuthStorage): ModelRegistry {
 		return new ModelRegistry(authStorage, undefined);
 	}
 
 	/**
-	 * Reload models from disk (built-in + custom from models.json).
+	 * 从磁盘重新加载模型（内置 + models.json 自定义）。
+	 * 清除现有状态，重置 API provider 注册，然后重新加载并应用已注册的扩展配置。
 	 */
 	refresh(): void {
 		this.providerRequestConfigs.clear();
 		this.modelRequestHeaders.clear();
 		this.loadError = undefined;
 
-		// Ensure dynamic API registrations are rebuilt from current provider state.
+		// 确保动态 API 注册从当前 provider 状态重建
 		resetApiProviders();
 
 		this.loadModels();
@@ -351,14 +387,14 @@ export class ModelRegistry {
 	}
 
 	/**
-	 * Get any error from loading models.json (undefined if no error).
+	 * 获取加载 models.json 时的错误信息（无错误时返回 undefined）。
 	 */
 	getError(): string | undefined {
 		return this.loadError;
 	}
 
 	private loadModels(): void {
-		// Load custom models and overrides from models.json
+		// 从 models.json 加载自定义模型和覆盖配置
 		const {
 			models: customModels,
 			overrides,
@@ -368,7 +404,7 @@ export class ModelRegistry {
 
 		if (error) {
 			this.loadError = error;
-			// Keep built-in models even if custom models failed to load
+			// 即使自定义模型加载失败，仍保留内置模型
 		}
 
 		const builtInModels = this.loadBuiltInModels(overrides, modelOverrides);
@@ -377,7 +413,7 @@ export class ModelRegistry {
 		this.models = combined;
 	}
 
-	/** Load built-in models and apply provider/model overrides */
+	/** 加载内置模型，并应用 provider/model 级别的覆盖配置 */
 	private loadBuiltInModels(
 		overrides: Map<string, ProviderOverride>,
 		modelOverrides: Map<string, Map<string, ModelOverride>>,
@@ -390,7 +426,7 @@ export class ModelRegistry {
 			return models.map((m) => {
 				let model = m;
 
-				// Apply provider-level baseUrl/headers/compat override
+				// 应用 provider 级别的 baseUrl/headers/compat 覆盖
 				if (providerOverride) {
 					model = {
 						...model,
@@ -399,7 +435,7 @@ export class ModelRegistry {
 					};
 				}
 
-				// Apply per-model override
+				// 应用每模型覆盖
 				const modelOverride = perModelOverrides?.get(m.id);
 				if (modelOverride) {
 					model = applyModelOverride(model, modelOverride);
@@ -410,7 +446,7 @@ export class ModelRegistry {
 		});
 	}
 
-	/** Merge custom models into built-in list by provider+id (custom wins on conflicts). */
+	/** 将自定义模型合并到内置列表中，按 provider+id 匹配（自定义模型优先） */
 	private mergeCustomModels(builtInModels: Model<Api>[], customModels: Model<Api>[]): Model<Api>[] {
 		const merged = [...builtInModels];
 		for (const customModel of customModels) {
@@ -425,6 +461,7 @@ export class ModelRegistry {
 	}
 
 	private loadCustomModels(modelsJsonPath: string): CustomModelsResult {
+		// 文件不存在时返回空结果
 		if (!existsSync(modelsJsonPath)) {
 			return emptyCustomModelsResult();
 		}
@@ -444,7 +481,7 @@ export class ModelRegistry {
 
 			const config = parsed as ModelsConfig;
 
-			// Additional validation
+			// 执行额外的业务校验（beyond schema validation）
 			this.validateConfig(config);
 
 			const overrides = new Map<string, ProviderOverride>();
@@ -490,14 +527,14 @@ export class ModelRegistry {
 				providerConfig.modelOverrides && Object.keys(providerConfig.modelOverrides).length > 0;
 
 			if (models.length === 0) {
-				// Override-only config: needs baseUrl, headers, compat, modelOverrides, or some combination.
+				// 仅覆盖配置：需要 baseUrl、headers、compat、modelOverrides 或其组合
 				if (!providerConfig.baseUrl && !providerConfig.headers && !providerConfig.compat && !hasModelOverrides) {
 					throw new Error(
 						`Provider ${providerName}: must specify "baseUrl", "headers", "compat", "modelOverrides", or "models".`,
 					);
 				}
 			} else if (!isBuiltIn) {
-				// Non-built-in providers with custom models require endpoint + auth.
+				// 非内置 provider 的自定义模型需要提供 endpoint 和认证信息
 				if (!providerConfig.baseUrl) {
 					throw new Error(`Provider ${providerName}: "baseUrl" is required when defining custom models.`);
 				}
@@ -505,8 +542,8 @@ export class ModelRegistry {
 					throw new Error(`Provider ${providerName}: "apiKey" is required when defining custom models.`);
 				}
 			}
-			// Built-in providers with custom models: baseUrl/apiKey/api are optional,
-			// inherited from built-in models. Auth comes from env vars / auth storage.
+			// 内置 provider 的自定义模型：baseUrl/apiKey/api 可选，继承自内置模型
+			// 认证信息来自环境变量或 auth storage
 
 			for (const modelDef of models) {
 				const hasModelApi = !!modelDef.api;
@@ -516,10 +553,10 @@ export class ModelRegistry {
 						`Provider ${providerName}, model ${modelDef.id}: no "api" specified. Set at provider or model level.`,
 					);
 				}
-				// For built-in providers, api is optional — inherited from built-in models.
+				// 内置 provider 的 api 可选——继承自内置模型
 
 				if (!modelDef.id) throw new Error(`Provider ${providerName}: model missing "id"`);
-				// Validate contextWindow/maxTokens only if provided (they have defaults)
+				// 仅在提供时校验 contextWindow/maxTokens（它们有默认值）
 				if (modelDef.contextWindow !== undefined && modelDef.contextWindow <= 0)
 					throw new Error(`Provider ${providerName}, model ${modelDef.id}: invalid contextWindow`);
 				if (modelDef.maxTokens !== undefined && modelDef.maxTokens <= 0)
@@ -532,7 +569,7 @@ export class ModelRegistry {
 		const models: Model<Api>[] = [];
 		const builtInProviders = new Set<string>(getProviders());
 
-		// Cache built-in defaults (api, baseUrl) per provider, extracted from first model.
+		// 缓存每个 provider 的内置默认值（api、baseUrl），从第一个模型中提取
 		const builtInDefaultsCache = new Map<string, { api: string; baseUrl: string }>();
 		const getBuiltInDefaults = (providerName: string): { api: string; baseUrl: string } | undefined => {
 			if (!builtInProviders.has(providerName)) return undefined;
@@ -546,7 +583,7 @@ export class ModelRegistry {
 
 		for (const [providerName, providerConfig] of Object.entries(config.providers)) {
 			const modelDefs = providerConfig.models ?? [];
-			if (modelDefs.length === 0) continue; // Override-only, no custom models
+			if (modelDefs.length === 0) continue; // 仅覆盖配置，无自定义模型
 
 			const builtInDefaults = getBuiltInDefaults(providerName);
 
@@ -583,30 +620,30 @@ export class ModelRegistry {
 	}
 
 	/**
-	 * Get all models (built-in + custom).
-	 * If models.json had errors, returns only built-in models.
+	 * 获取所有模型（内置 + 自定义）。
+	 * 如果 models.json 有错误，仅返回内置模型。
 	 */
 	getAll(): Model<Api>[] {
 		return this.models;
 	}
 
 	/**
-	 * Get only models that have auth configured.
-	 * This is a fast check that doesn't refresh stored credentials.
+	 * 获取已配置认证信息的模型列表。
+	 * 这是快速检查，不会刷新已存储的凭据。
 	 */
 	getAvailable(): Model<Api>[] {
 		return this.models.filter((m) => this.hasConfiguredAuth(m));
 	}
 
 	/**
-	 * Find a model by provider and ID.
+	 * 按 provider 和 ID 查找模型。
 	 */
 	find(provider: string, modelId: string): Model<Api> | undefined {
 		return this.models.find((m) => m.provider === provider && m.id === modelId);
 	}
 
 	/**
-	 * Get API key for a model.
+	 * 检查模型是否已配置认证信息。
 	 */
 	hasConfiguredAuth(model: Model<Api>): boolean {
 		return (
@@ -648,7 +685,9 @@ export class ModelRegistry {
 	}
 
 	/**
-	 * Get API key and request headers for a model.
+	 * 获取模型的 API key 和请求头。
+	 * 解析优先级：authStorage > models.json 中的 apiKey 配置
+	 * 请求头合并优先级：model.headers < providerHeaders < modelHeaders
 	 */
 	async getApiKeyAndHeaders(model: Model<Api>): Promise<ResolvedRequestAuth> {
 		try {
@@ -692,8 +731,8 @@ export class ModelRegistry {
 	}
 
 	/**
-	 * Return auth status for a provider, including request auth configured in models.json.
-	 * This intentionally does not execute command-backed config values.
+	 * 获取 provider 的认证状态，包含 models.json 中配置的请求认证信息。
+	 * 注意：不会执行命令类型的配置值（仅检查是否配置）。
 	 */
 	getProviderAuthStatus(provider: string): AuthStatus {
 		const authStatus = this.authStorage.getAuthStatus(provider);
@@ -718,7 +757,7 @@ export class ModelRegistry {
 	}
 
 	/**
-	 * Get display name for a provider.
+	 * 获取 provider 的显示名称。
 	 */
 	getProviderDisplayName(provider: string): string {
 		const registeredProvider = this.registeredProviders.get(provider);
@@ -727,7 +766,8 @@ export class ModelRegistry {
 	}
 
 	/**
-	 * Get API key for a provider.
+	 * 获取 provider 的 API key。
+	 * 优先从 authStorage 获取，不存在时尝试从 models.json 配置解析。
 	 */
 	async getApiKeyForProvider(provider: string): Promise<string | undefined> {
 		const apiKey = await this.authStorage.getApiKey(provider, { includeFallback: false });
@@ -740,7 +780,7 @@ export class ModelRegistry {
 	}
 
 	/**
-	 * Check if a model is using subscription-style stored auth.
+	 * 检查模型是否使用订阅式的存储认证。
 	 */
 	isUsingSubscriptionAuth(model: Model<Api>): boolean {
 		void model;
@@ -748,11 +788,11 @@ export class ModelRegistry {
 	}
 
 	/**
-	 * Register a provider dynamically (from extensions).
+	 * 通过扩展动态注册一个 provider。
 	 *
-	 * If provider has models: replaces all existing models for this provider.
-	 * If provider has only baseUrl/headers: overrides existing models' URLs.
-	 * Stored auth configuration remains managed by AuthStorage and /login.
+	 * 如果 provider 包含 models：替换该 provider 的所有现有模型。
+	 * 如果 provider 仅有 baseUrl/headers：覆盖现有模型的 URL。
+	 * 已存储的认证配置仍由 AuthStorage 和 /login 管理。
 	 */
 	registerProvider(providerName: string, config: ProviderConfigInput): void {
 		this.validateProviderConfig(providerName, config);
@@ -761,13 +801,12 @@ export class ModelRegistry {
 	}
 
 	/**
-	 * Unregister a previously registered provider.
+	 * 注销之前注册的 provider。
 	 *
-	 * Removes the provider from the registry and reloads models from disk so that
-	 * built-in models overridden by this provider are restored to their original state.
-	 * Also resets dynamic API stream registrations before reapplying remaining
-	 * dynamic providers.
-	 * Has no effect if the provider was never registered.
+	 * 从注册表中移除该 provider，并从磁盘重新加载模型，
+	 * 使被此 provider 覆盖的内置模型恢复原始状态。
+	 * 同时重置动态 API 流注册，然后重新应用剩余的动态 provider。
+	 * 如果该 provider 从未注册过，则无操作。
 	 */
 	unregisterProvider(providerName: string): void {
 		if (!this.registeredProviders.has(providerName)) return;
@@ -776,10 +815,9 @@ export class ModelRegistry {
 	}
 
 	/**
-	 * Upsert a provider config into registeredProviders.
-	 * If the provider is already registered, defined values in the incoming config
-	 * override existing ones; undefined values are preserved from the stored config.
-	 * If the provider is not registered, the incoming config is stored as-is.
+	 * 将 provider 配置插入或更新到已注册列表中。
+	 * 如果 provider 已注册，传入配置中已定义的字段覆盖现有值，undefined 字段保留原有值。
+	 * 如果 provider 未注册，直接存储传入的配置。
 	 */
 	private upsertRegisteredProvider(providerName: string, config: ProviderConfigInput): void {
 		const existing = this.registeredProviders.get(providerName);
@@ -834,10 +872,10 @@ export class ModelRegistry {
 		this.storeProviderRequestConfig(providerName, config);
 
 		if (config.models && config.models.length > 0) {
-			// Full replacement: remove existing models for this provider
+			// 完全替换：移除该 provider 的所有现有模型
 			this.models = this.models.filter((m) => m.provider !== providerName);
 
-			// Parse and add new models
+			// 解析并添加新模型
 			for (const modelDef of config.models) {
 				const api = modelDef.api || config.api;
 				this.storeModelHeaders(providerName, modelDef.id, modelDef.headers);
@@ -859,7 +897,7 @@ export class ModelRegistry {
 				} as Model<Api>);
 			}
 		} else if (config.baseUrl || config.headers) {
-			// Override-only: update baseUrl for existing models. Request headers are resolved per request.
+			// 仅覆盖模式：更新现有模型的 baseUrl，请求头按请求时解析
 			this.models = this.models.map((m) => {
 				if (m.provider !== providerName) return m;
 				return {
@@ -872,7 +910,7 @@ export class ModelRegistry {
 }
 
 /**
- * Input type for registerProvider API.
+ * registerProvider API 的输入类型。
  */
 export interface ProviderConfigInput {
 	name?: string;

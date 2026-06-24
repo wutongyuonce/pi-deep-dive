@@ -1,8 +1,18 @@
 /**
- * Tool HTML renderer for custom tools in HTML export.
+ * HTML 导出中自定义工具的 HTML 渲染器。
  *
- * Renders custom tool calls and results to HTML by invoking their TUI renderers
- * and converting the ANSI output to HTML.
+ * 作用/定位：调用扩展工具注册的 TUI 渲染器（renderCall/renderResult），
+ * 将输出的 ANSI 文本转换为 HTML。
+ *
+ * 核心类 createToolHtmlRenderer 返回 ToolHtmlRenderer 接口：
+ * - renderCall()    — 渲染工具调用为 HTML
+ * - renderResult()  — 渲染工具结果为折叠/展开两种 HTML 版本
+ *
+ * 调用链路：
+ *   createToolHtmlRenderer() → getToolDefinition() → toolDef.renderCall/renderResult()
+ *     → Component.render() → ansiLinesToHtml()
+ *
+ * 被谁调用：export-html/index.ts 的 exportSessionToHtml()
  */
 
 import type { ImageContent, TextContent } from "@earendil-works/pi-ai";
@@ -36,10 +46,18 @@ export interface ToolHtmlRenderer {
 }
 
 /**
- * Create a tool HTML renderer.
+ * 创建工具 HTML 渲染器。
  *
- * The renderer looks up tool definitions and invokes their renderCall/renderResult
- * methods, converting the resulting TUI Component output (ANSI) to HTML.
+ * 实现逻辑：查找工具定义，调用其 renderCall/renderResult 方法，
+ * 将 TUI 组件输出的 ANSI 文本转换为 HTML。
+ * 维护渲染状态（组件缓存、状态缓存、参数缓存），支持增量更新。
+ *
+ * @param deps.getToolDefinition - 按名称查找工具定义的函数
+ * @param deps.theme - 主题样式
+ * @param deps.cwd - 工作目录
+ * @param deps.width - 渲染宽度（默认 100）
+ *
+ * 被谁调用：export-html/index.ts 的 exportSessionToHtml()
  */
 const ANSI_ESCAPE_REGEX = /\x1b\[[\d;]*m/g;
 

@@ -1,3 +1,25 @@
+/**
+ * 文件编辑工具 (edit.ts)
+ *
+ * 本文件实现了精确文本替换的文件编辑工具，允许 Agent 对文件进行局部修改。
+ *
+ * 提供的能力：
+ *   - 支持单次调用中的多个独立替换操作（edits[] 数组）
+ *   - 每个 oldText 必须在文件中唯一匹配，反序应用保持偏移稳定
+ *   - BOM 剥离和行尾格式保留（自动检测 CRLF/LF 并还原）
+ *   - 通过 file-mutation-queue 序列化对同一文件的并发编辑
+ *   - TUI 渲染：执行前异步计算 diff 预览，显示带行号的变更差异
+ *   - 向后兼容：支持旧版 oldText/newText 顶层参数和 edits JSON 字符串
+ *
+ * 调用链路：index.ts createEditTool → createEditToolDefinition → wrapToolDefinition
+ * 依赖模块：
+ *   - edit-diff.ts：diff 计算核心（模糊匹配、替换、diff 生成）
+ *   - file-mutation-queue.ts：文件变更序列化（withFileMutationQueue）
+ *   - path-utils.ts：路径解析（resolveToCwd）
+ *   - render-utils.ts：文本渲染辅助
+ *   - tool-definition-wrapper.ts：ToolDef → AgentTool 包装
+ */
+
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { Box, Container, Spacer, Text } from "@earendil-works/pi-tui";
 import { constants } from "fs";
@@ -23,12 +45,16 @@ import { resolveToCwd } from "./path-utils.ts";
 import { invalidArgText, shortenPath, str } from "./render-utils.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
 
+/** 编辑预览结果类型（成功或错误） */
 type EditPreview = EditDiffResult | EditDiffError;
 
+/** edit 工具渲染状态 */
 type EditRenderState = {
+	/** 缓存的编辑调用渲染组件 */
 	callComponent?: EditCallRenderComponent;
 };
 
+/** 单个替换编辑的 schema */
 const replaceEditSchema = Type.Object(
 	{
 		oldText: Type.String({
@@ -40,6 +66,7 @@ const replaceEditSchema = Type.Object(
 	{ additionalProperties: false },
 );
 
+/** edit 工具的输入参数 schema */
 const editSchema = Type.Object(
 	{
 		path: Type.String({ description: "Path to the file to edit (relative or absolute)" }),
@@ -52,44 +79,54 @@ const editSchema = Type.Object(
 );
 
 export type EditToolInput = Static<typeof editSchema>;
+
+/** 旧版编辑输入格式，支持顶层 oldText/newText 参数 */
 type LegacyEditToolInput = EditToolInput & {
 	oldText?: unknown;
 	newText?: unknown;
 };
 
+/** edit 工具执行结果的附加详情 */
 export interface EditToolDetails {
-	/** Display-oriented diff of the changes made */
+	/** 面向显示的 diff 字符串 */
 	diff: string;
-	/** Standard unified patch of the changes made */
+	/** 标准 unified patch 格式 */
 	patch: string;
-	/** Line number of the first change in the new file (for editor navigation) */
+	/** 新文件中第一个变更行的行号（用于编辑器跳转） */
 	firstChangedLine?: number;
 }
 
 /**
- * Pluggable operations for the edit tool.
- * Override these to delegate file editing to remote systems (for example SSH).
+ * edit 工具的可插拔操作接口。
+ * 覆盖这些方法可将文件编辑委托到远程系统（如 SSH）。
  */
 export interface EditOperations {
-	/** Read file contents as a Buffer */
+	/** 读取文件内容为 Buffer */
 	readFile: (absolutePath: string) => Promise<Buffer>;
-	/** Write content to a file */
+	/** 写入内容到文件 */
 	writeFile: (absolutePath: string, content: string) => Promise<void>;
-	/** Check if file is readable and writable (throw if not) */
+	/** 检查文件是否可读写（不可读写时抛出异常） */
 	access: (absolutePath: string) => Promise<void>;
 }
 
+/** 默认的本地文件系统编辑操作 */
 const defaultEditOperations: EditOperations = {
 	readFile: (path) => fsReadFile(path),
 	writeFile: (path, content) => fsWriteFile(path, content, "utf-8"),
 	access: (path) => fsAccess(path, constants.R_OK | constants.W_OK),
 };
 
+/** edit 工具的配置选项 */
 export interface EditToolOptions {
-	/** Custom operations for file editing. Default: local filesystem */
+	/** 自定义文件编辑操作，默认使用本地文件系统 */
 	operations?: EditOperations;
 }
 
+/**
+ * 预处理 edit 工具的参数，处理向后兼容和模型异常格式：
+ *   1. edits 字段为 JSON 字符串时解析为数组（某些模型的异常行为）
+ *   2. 旧版顶层 oldText/newText 参数合并到 edits 数组中
+ */
 function prepareEditArguments(input: unknown): EditToolInput {
 	if (!input || typeof input !== "object") {
 		return input as EditToolInput;
@@ -97,7 +134,7 @@ function prepareEditArguments(input: unknown): EditToolInput {
 
 	const args = input as Record<string, unknown>;
 
-	// Some models (Opus 4.6, GLM-5.1) send edits as a JSON string instead of an array
+	// 某些模型（如 Opus 4.6、GLM-5.1）会将 edits 作为 JSON 字符串发送而非数组
 	if (typeof args.edits === "string") {
 		try {
 			const parsed = JSON.parse(args.edits);
@@ -116,6 +153,7 @@ function prepareEditArguments(input: unknown): EditToolInput {
 	return { ...rest, edits } as EditToolInput;
 }
 
+/** 验证 edit 工具输入，确保 edits 数组非空 */
 function validateEditInput(input: EditToolInput): { path: string; edits: Edit[] } {
 	if (!Array.isArray(input.edits) || input.edits.length === 0) {
 		throw new Error("Edit tool input is invalid. edits must contain at least one replacement.");
@@ -123,6 +161,7 @@ function validateEditInput(input: EditToolInput): { path: string; edits: Edit[] 
 	return { path: input.path, edits: input.edits };
 }
 
+/** 可渲染的编辑参数类型 */
 type RenderableEditArgs = {
 	path?: string;
 	file_path?: string;
@@ -143,6 +182,7 @@ type EditCallRenderComponent = Box & {
 	settledError?: boolean;
 };
 
+/** 创建编辑调用渲染组件，附带预览状态 */
 function createEditCallRenderComponent(): EditCallRenderComponent {
 	return Object.assign(new Box(1, 1, (text: string) => text), {
 		preview: undefined as EditPreview | undefined,
@@ -152,6 +192,7 @@ function createEditCallRenderComponent(): EditCallRenderComponent {
 	});
 }
 
+/** 获取或创建编辑调用渲染组件（从上次组件或状态中恢复） */
 function getEditCallRenderComponent(state: EditRenderState, lastComponent: unknown): EditCallRenderComponent {
 	if (lastComponent instanceof Box) {
 		const component = lastComponent as EditCallRenderComponent;
@@ -166,6 +207,7 @@ function getEditCallRenderComponent(state: EditRenderState, lastComponent: unkno
 	return component;
 }
 
+/** 从渲染参数中提取可用于预览的路径和编辑数组 */
 function getRenderablePreviewInput(args: RenderableEditArgs | undefined): { path: string; edits: Edit[] } | null {
 	if (!args) {
 		return null;
@@ -191,6 +233,7 @@ function getRenderablePreviewInput(args: RenderableEditArgs | undefined): { path
 	return null;
 }
 
+/** 格式化 edit 工具调用的显示文本 */
 function formatEditCall(
 	args: RenderableEditArgs | undefined,
 	theme: typeof import("../../modes/interactive/theme/theme.ts").theme,
@@ -202,6 +245,7 @@ function formatEditCall(
 	return `${theme.fg("toolTitle", theme.bold("edit"))} ${pathDisplay}`;
 }
 
+/** 格式化 edit 工具结果（错误信息或最终 diff 渲染） */
 function formatEditResult(
 	args: RenderableEditArgs | undefined,
 	preview: EditPreview | undefined,
@@ -231,6 +275,7 @@ function formatEditResult(
 	return undefined;
 }
 
+/** 根据预览状态获取编辑调用头部的背景色（错误=红色、成功=绿色、等待=灰色） */
 function getEditHeaderBg(
 	preview: EditPreview | undefined,
 	settledError: boolean | undefined,
@@ -248,6 +293,7 @@ function getEditHeaderBg(
 	return (text: string) => theme.bg("toolPendingBg", text);
 }
 
+/** 构建编辑调用组件的完整渲染内容（标题 + diff 预览） */
 function buildEditCallComponent(
 	component: EditCallRenderComponent,
 	args: RenderableEditArgs | undefined,
@@ -268,6 +314,7 @@ function buildEditCallComponent(
 	return component;
 }
 
+/** 更新编辑预览，返回是否有变化 */
 function setEditPreview(
 	component: EditCallRenderComponent,
 	preview: EditPreview,
@@ -288,6 +335,11 @@ function setEditPreview(
 	return changed;
 }
 
+/**
+ * 创建 edit 工具定义。
+ * 执行逻辑通过 withFileMutationQueue 确保对同一文件的并发编辑串行化。
+ * 渲染逻辑在 argsComplete 时异步计算 diff 预览。
+ */
 export function createEditToolDefinition(
 	cwd: string,
 	options?: EditToolOptions,
@@ -314,17 +366,16 @@ export function createEditToolDefinition(
 			const absolutePath = resolveToCwd(path, cwd);
 
 			return withFileMutationQueue(absolutePath, async () => {
-				// Do not reject from an abort event listener here: that would release the
-				// mutation queue while an in-flight filesystem operation may still finish.
-				// Checking signal.aborted after each await observes the same aborts while
-				// keeping the queue locked until the current operation has settled.
+				// 不在 abort 事件监听器中 reject：这会释放 mutation queue，而正在进行的
+				// 文件系统操作可能尚未完成。在每次 await 后检查 signal.aborted，
+				// 同样可以观察到中止，同时保持队列锁定直到当前操作完成。
 				const throwIfAborted = (): void => {
 					if (signal?.aborted) throw new Error("Operation aborted");
 				};
 
 				throwIfAborted();
 
-				// Check if file exists.
+				// 检查文件是否存在
 				try {
 					await ops.access(absolutePath);
 				} catch (error: unknown) {
@@ -335,12 +386,12 @@ export function createEditToolDefinition(
 				}
 				throwIfAborted();
 
-				// Read the file.
+				// 读取文件内容
 				const buffer = await ops.readFile(absolutePath);
 				const rawContent = buffer.toString("utf-8");
 				throwIfAborted();
 
-				// Strip BOM before matching. The model will not include an invisible BOM in oldText.
+				// 匹配前剥离 BOM（模型不会在 oldText 中包含不可见的 BOM）
 				const { bom, text: content } = stripBom(rawContent);
 				const originalEnding = detectLineEnding(content);
 				const normalizedContent = normalizeToLF(content);
@@ -431,6 +482,7 @@ export function createEditToolDefinition(
 	};
 }
 
+/** 创建 edit 工具实例，通过 wrapToolDefinition 将 ToolDef 包装为 AgentTool */
 export function createEditTool(cwd: string, options?: EditToolOptions): AgentTool<typeof editSchema> {
 	return wrapToolDefinition(createEditToolDefinition(cwd, options));
 }

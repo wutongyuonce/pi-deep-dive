@@ -1,3 +1,23 @@
+/**
+ * Bash 工具 (bash.ts)
+ *
+ * 本文件实现了 bash 命令执行工具，允许 Agent 在当前工作目录中执行 shell 命令。
+ *
+ * 提供的能力：
+ * - 通过 spawn 子进程执行 bash 命令，流式收集 stdout/stderr
+ * - 支持超时控制、中止信号（AbortSignal）
+ * - 输出截断：通过 OutputAccumulator 保持尾部输出，超限时写入临时文件
+ * - TUI 渲染：执行中实时更新、折叠/展开、耗时显示
+ *
+ * 调用链路：index.ts createBashTool → createBashToolDefinition → wrapToolDefinition
+ * 依赖模块：
+ *   - output-accumulator.ts：流式输出收集与截断
+ *   - truncate.ts：截断常量和格式化
+ *   - render-utils.ts：文本渲染辅助
+ *   - tool-definition-wrapper.ts：ToolDef → AgentTool 包装
+ *   - utils/shell.ts：shell 配置、进程管理
+ */
+
 import { constants } from "node:fs";
 import { access as fsAccess } from "node:fs/promises";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
@@ -21,6 +41,7 @@ import { getTextOutput, invalidArgText, str } from "./render-utils.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
 import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize, type TruncationResult } from "./truncate.ts";
 
+/** bash 工具的输入参数 schema：命令字符串 + 可选超时 */
 const bashSchema = Type.Object({
 	command: Type.String({ description: "Bash command to execute" }),
 	timeout: Type.Optional(Type.Number({ description: "Timeout in seconds (optional, no default timeout)" })),
@@ -28,22 +49,25 @@ const bashSchema = Type.Object({
 
 export type BashToolInput = Static<typeof bashSchema>;
 
+/** bash 工具执行结果的附加详情，用于 TUI 渲染 */
 export interface BashToolDetails {
+	/** 截断信息（如有） */
 	truncation?: TruncationResult;
+	/** 完整输出的临时文件路径（输出超限时保存） */
 	fullOutputPath?: string;
 }
 
 /**
- * Pluggable operations for the bash tool.
- * Override these to delegate command execution to remote systems (for example SSH).
+ * Bash 工具的可插拔操作接口。
+ * 覆盖这些方法可将命令执行委托到远程系统（如 SSH）。
  */
 export interface BashOperations {
 	/**
-	 * Execute a command and stream output.
-	 * @param command The command to execute
-	 * @param cwd Working directory
-	 * @param options Execution options
-	 * @returns Promise resolving to exit code (null if killed)
+	 * 执行命令并流式输出。
+	 * @param command 要执行的命令
+	 * @param cwd 工作目录
+	 * @param options 执行选项（数据回调、信号、超时、环境变量）
+	 * @returns Promise 解析为退出码（被杀死时为 null）
 	 */
 	exec: (
 		command: string,
@@ -58,10 +82,10 @@ export interface BashOperations {
 }
 
 /**
- * Create bash operations using pi's built-in local shell execution backend.
+ * 使用 pi 内置的本地 shell 执行后端创建 bash 操作。
  *
- * This is useful for extensions that intercept user_bash and still want pi's
- * standard local shell behavior while wrapping or rewriting commands.
+ * 适用于需要拦截 user_bash 但仍希望保持 pi 标准本地 shell 行为的扩展，
+ * 同时可以包装或重写命令。
  */
 export function createLocalBashOperations(options?: { shellPath?: string }): BashOperations {
 	return {
@@ -91,23 +115,23 @@ export function createLocalBashOperations(options?: { shellPath?: string }): Bas
 			};
 
 			try {
-				// Set timeout if provided.
+				// 设置超时（如果提供了）
 				if (timeout !== undefined && timeout > 0) {
 					timeoutHandle = setTimeout(() => {
 						timedOut = true;
 						if (child.pid) killProcessTree(child.pid);
 					}, timeout * 1000);
 				}
-				// Stream stdout and stderr.
+				// 流式读取 stdout 和 stderr
 				child.stdout?.on("data", onData);
 				child.stderr?.on("data", onData);
-				// Handle abort signal by killing the entire process tree.
+				// 处理中止信号：杀死整个进程树
 				if (signal) {
 					if (signal.aborted) onAbort();
 					else signal.addEventListener("abort", onAbort, { once: true });
 				}
-				// Handle shell spawn errors and wait for the process to terminate without hanging
-				// on inherited stdio handles held by detached descendants.
+				// 处理 shell 启动错误并等待进程终止，
+				// 不会因分离后代进程持有的继承 stdio 句柄而挂起。
 				const exitCode = await waitForChildProcess(child);
 				if (signal?.aborted) {
 					throw new Error("aborted");

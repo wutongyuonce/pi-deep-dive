@@ -1,12 +1,22 @@
 /**
- * Shared utilities for compaction and branch summarization.
+ * 上下文压缩与分支摘要的共享工具函数。
+ *
+ * 作用/定位：提供压缩和分支摘要模块共用的底层工具。
+ * 提供：文件操作跟踪、消息序列化、摘要系统提示词。
+ *
+ * 主要功能：
+ * - 文件操作跟踪：从工具调用中提取读/写/编辑的文件路径
+ * - 消息序列化：将 LLM 消息转为纯文本摘要格式
+ * - 摘要系统提示词：摘要生成时使用的系统角色设定
+ *
+ * 被谁调用：compaction.ts、branch-summarization.ts
  */
 
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { Message } from "@earendil-works/pi-ai";
 
 // ============================================================================
-// File Operation Tracking
+// 文件操作跟踪
 // ============================================================================
 
 export interface FileOperations {
@@ -24,7 +34,10 @@ export function createFileOps(): FileOperations {
 }
 
 /**
- * Extract file operations from tool calls in an assistant message.
+ * 从助手消息中的工具调用提取文件操作。
+ * 仅处理 assistant 角色消息中的 toolCall 块，提取 read/write/edit 工具的文件路径。
+ *
+ * 被谁调用：compaction.ts 的 extractFileOperations()、branch-summarization.ts 的 prepareBranchEntries()
  */
 export function extractFileOpsFromMessage(message: AgentMessage, fileOps: FileOperations): void {
 	if (message.role !== "assistant") return;
@@ -56,8 +69,12 @@ export function extractFileOpsFromMessage(message: AgentMessage, fileOps: FileOp
 }
 
 /**
- * Compute final file lists from file operations.
- * Returns readFiles (files only read, not modified) and modifiedFiles.
+ * 从文件操作计算最终文件列表。
+ * 返回 readFiles（仅读取未修改的文件）和 modifiedFiles（修改过的文件，含编辑和写入）。
+ *
+ * 去重规则：被修改的文件即使也被读取，也只出现在 modifiedFiles 中。
+ *
+ * 被谁调用：compaction.ts 的 compact()、branch-summarization.ts 的 generateBranchSummary()
  */
 export function computeFileLists(fileOps: FileOperations): { readFiles: string[]; modifiedFiles: string[] } {
 	const modified = new Set([...fileOps.edited, ...fileOps.written]);
@@ -67,7 +84,10 @@ export function computeFileLists(fileOps: FileOperations): { readFiles: string[]
 }
 
 /**
- * Format file operations as XML tags for summary.
+ * 将文件操作格式化为 XML 标签（<read-files> / <modified-files>），用于追加到摘要输出。
+ * 若两个列表都为空，返回空字符串。
+ *
+ * 被谁调用：compaction.ts 的 compact()、branch-summarization.ts 的 generateBranchSummary()
  */
 export function formatFileOperations(readFiles: string[], modifiedFiles: string[]): string {
 	const sections: string[] = [];
@@ -82,15 +102,15 @@ export function formatFileOperations(readFiles: string[], modifiedFiles: string[
 }
 
 // ============================================================================
-// Message Serialization
+// 消息序列化
 // ============================================================================
 
-/** Maximum characters for a tool result in serialized summaries. */
+/** 序列化摘要中工具结果的最大字符数。 */
 const TOOL_RESULT_MAX_CHARS = 2000;
 
 /**
- * Truncate text to a maximum character length for summarization.
- * Keeps the beginning and appends a truncation marker.
+ * 将文本截断到最大字符长度，用于摘要生成。
+ * 保留开头部分并追加截断标记。
  */
 function truncateForSummary(text: string, maxChars: number): string {
 	if (text.length <= maxChars) return text;
@@ -99,12 +119,20 @@ function truncateForSummary(text: string, maxChars: number): string {
 }
 
 /**
- * Serialize LLM messages to text for summarization.
- * This prevents the model from treating it as a conversation to continue.
- * Call convertToLlm() first to handle custom message types.
+ * 将 LLM 消息序列化为纯文本，用于摘要生成。
+ * 防止模型将其视为需要继续的对话（而非继续对话的指令）。
+ * 需先调用 convertToLlm() 处理自定义消息类型（bashExecution、compactionSummary 等）。
  *
- * Tool results are truncated to keep the summarization request within
- * reasonable token budgets. Full content is not needed for summarization.
+ * 序列化格式：
+ * - [User]: 用户消息文本
+ * - [Assistant thinking]: 助手思考内容
+ * - [Assistant]: 助手回复文本
+ * - [Assistant tool calls]: 工具调用列表
+ * - [Tool result]: 工具结果（截断到 TOOL_RESULT_MAX_CHARS）
+ *
+ * 工具结果会被截断（最多 2000 字符）以控制摘要请求的 token 预算。
+ *
+ * 被谁调用：compaction.ts 的 generateSummary()、branch-summarization.ts 的 generateBranchSummary()
  */
 export function serializeConversation(messages: Message[]): string {
 	const parts: string[] = [];
@@ -162,7 +190,7 @@ export function serializeConversation(messages: Message[]): string {
 }
 
 // ============================================================================
-// Summarization System Prompt
+// 摘要系统提示词
 // ============================================================================
 
 export const SUMMARIZATION_SYSTEM_PROMPT = `You are a context summarization assistant. Your task is to read a conversation between a user and an AI coding assistant, then produce a structured summary following the exact format specified.

@@ -1,3 +1,26 @@
+/**
+ * 内容搜索工具 (grep.ts)
+ *
+ * 本文件实现了基于 ripgrep (rg) 的文件内容搜索工具，允许 Agent 在文件中搜索文本模式。
+ *
+ * 提供的能力：
+ *   - 使用 ripgrep 命令（JSON 输出模式）搜索文件内容
+ *   - 支持正则表达式和字面量搜索、大小写不敏感、glob 文件过滤
+ *   - 支持上下文行显示（context 参数）
+ *   - 长行自动截断到 GREP_MAX_LINE_LENGTH 字符
+ *   - 输出截断：匹配数限制（默认 100）+ 字节限制（默认 50KB）
+ *   - 结果格式为 "文件路径:行号: 内容"
+ *   - TUI 渲染：折叠/展开模式显示搜索结果
+ *
+ * 调用链路：index.ts createGrepTool → createGrepToolDefinition → wrapToolDefinition
+ * 依赖模块：
+ *   - path-utils.ts：路径解析（resolveToCwd）
+ *   - truncate.ts：头部截断（truncateHead）和行截断（truncateLine）
+ *   - render-utils.ts：文本渲染辅助
+ *   - tool-definition-wrapper.ts：ToolDef → AgentTool 包装
+ *   - utils/tools-manager.ts：外部工具管理（ensureTool("rg")）
+ */
+
 import { readFile as fsReadFile, stat as fsStat } from "node:fs/promises";
 import { createInterface } from "node:readline";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
@@ -20,6 +43,7 @@ import {
 	truncateLine,
 } from "./truncate.ts";
 
+/** grep 工具的输入参数 schema */
 const grepSchema = Type.Object({
 	pattern: Type.String({ description: "Search pattern (regex or literal string)" }),
 	path: Type.Optional(Type.String({ description: "Directory or file to search (default: current directory)" })),
@@ -37,33 +61,40 @@ const grepSchema = Type.Object({
 export type GrepToolInput = Static<typeof grepSchema>;
 const DEFAULT_LIMIT = 100;
 
+/** grep 工具执行结果的附加详情 */
 export interface GrepToolDetails {
+	/** 截断信息（字节限制触发时） */
 	truncation?: TruncationResult;
+	/** 匹配数限制被触发时的限制值 */
 	matchLimitReached?: number;
+	/** 是否有行被截断到 GREP_MAX_LINE_LENGTH 字符 */
 	linesTruncated?: boolean;
 }
 
 /**
- * Pluggable operations for the grep tool.
- * Override these to delegate search to remote systems (for example SSH).
+ * grep 工具的可插拔操作接口。
+ * 覆盖这些方法可将搜索委托到远程系统（如 SSH）。
  */
 export interface GrepOperations {
-	/** Check if path is a directory. Throws if path does not exist. */
+	/** 检查路径是否为目录（路径不存在时抛出异常） */
 	isDirectory: (absolutePath: string) => Promise<boolean> | boolean;
-	/** Read file contents for context lines */
+	/** 读取文件内容（用于上下文行显示） */
 	readFile: (absolutePath: string) => Promise<string> | string;
 }
 
+/** 默认的本地文件系统 grep 操作 */
 const defaultGrepOperations: GrepOperations = {
 	isDirectory: async (p) => (await fsStat(p)).isDirectory(),
 	readFile: (p) => fsReadFile(p, "utf-8"),
 };
 
+/** grep 工具的配置选项 */
 export interface GrepToolOptions {
-	/** Custom operations for grep. Default: local filesystem plus ripgrep */
+	/** 自定义搜索操作，默认使用本地文件系统 + ripgrep */
 	operations?: GrepOperations;
 }
 
+/** 格式化 grep 工具调用的显示文本 */
 function formatGrepCall(
 	args: { pattern: string; path?: string; glob?: string; limit?: number } | undefined,
 	theme: typeof import("../../modes/interactive/theme/theme.ts").theme,
@@ -84,6 +115,7 @@ function formatGrepCall(
 	return text;
 }
 
+/** 格式化 grep 工具结果的显示文本 */
 function formatGrepResult(
 	result: {
 		content: Array<{ type: string; text?: string; data?: string; mimeType?: string }>;
@@ -119,6 +151,11 @@ function formatGrepResult(
 	return text;
 }
 
+/**
+ * 创建 grep 工具定义。
+ * 使用 ripgrep 的 JSON 输出模式解析匹配结果，
+ * 流式收集匹配后在 rg 退出时格式化输出。
+ */
 export function createGrepToolDefinition(
 	cwd: string,
 	options?: GrepToolOptions,
@@ -257,7 +294,7 @@ export function createGrepToolDefinition(
 								const lineText = lines[current - 1] ?? "";
 								const sanitized = lineText.replace(/\r/g, "");
 								const isMatchLine = current === lineNumber;
-								// Truncate long lines so grep output stays compact.
+								// 截断长行以保持 grep 输出紧凑
 								const { text: truncatedText, wasTruncated } = truncateLine(sanitized);
 								if (wasTruncated) linesTruncated = true;
 								if (isMatchLine) block.push(`${relativePath}:${current}: ${truncatedText}`);
@@ -266,7 +303,7 @@ export function createGrepToolDefinition(
 							return block;
 						};
 
-						// Collect matches during streaming, then format them after rg exits.
+						// 流式收集匹配项，rg 退出后再格式化
 						const matches: Array<{ filePath: string; lineNumber: number; lineText?: string }> = [];
 						rl.on("line", (line) => {
 							if (!line.trim() || matchCount >= effectiveLimit) return;
@@ -312,7 +349,7 @@ export function createGrepToolDefinition(
 								return;
 							}
 
-							// Format matches after streaming finishes so custom readFile() backends can be async.
+							// 流式结束后格式化匹配结果，允许自定义 readFile() 后端使用异步
 							for (const match of matches) {
 								if (contextValue === 0 && match.lineText !== undefined) {
 									const relativePath = formatPath(match.filePath);
@@ -330,11 +367,11 @@ export function createGrepToolDefinition(
 							}
 
 							const rawOutput = outputLines.join("\n");
-							// Apply byte truncation. There is no line limit here because the match limit already capped rows.
+							// 应用字节截断。此处不设行数限制，因为匹配数限制已经控制了行数
 							const truncation = truncateHead(rawOutput, { maxLines: Number.MAX_SAFE_INTEGER });
 							let output = truncation.content;
 							const details: GrepToolDetails = {};
-							// Build actionable notices for truncation and match limits.
+							// 构建截断和匹配限制的可操作提示
 							const notices: string[] = [];
 							if (matchLimitReached) {
 								notices.push(
@@ -379,6 +416,7 @@ export function createGrepToolDefinition(
 	};
 }
 
+/** 创建 grep 工具实例，通过 wrapToolDefinition 将 ToolDef 包装为 AgentTool */
 export function createGrepTool(cwd: string, options?: GrepToolOptions): AgentTool<typeof grepSchema> {
 	return wrapToolDefinition(createGrepToolDefinition(cwd, options));
 }

@@ -14,6 +14,21 @@
 
 pi 的解决方案是 **compaction** — 用 LLM 自己来摘要旧对话，然后用摘要替换原始消息。
 
+## Compaction 在产品层而非 Runtime 层
+
+一个关键的架构决策是：compaction 不在 agent-core 层（第 8-10 章的循环引擎），而在 coding-agent 层（产品层）。
+
+循环引擎通过 `transformContext` 回调接入 compaction：当 context 接近上限时，`transformContext` 可以把旧消息替换为压缩摘要。但 compaction 的触发条件、压缩策略、摘要生成都是产品层的逻辑。
+
+为什么？因为 compaction 需要知道太多产品级信息：
+
+- 配置（是否启用压缩、保留多少 token）
+- 会话结构（哪些 entry 是 compaction、哪些是分支摘要）
+- 文件操作追踪（需要扫描工具调用消息）
+- extension 的参与（`fromHook`）
+
+这些都不是一个通用循环引擎应该知道的。
+
 ## 何时触发 Compaction
 
 Compaction 不是每轮都触发的。pi 在每次 assistant 响应返回后检查 context 使用量，只在接近上限时触发。
@@ -24,7 +39,6 @@ pi 用两种方式估算 context 占用量。首先，如果最近的 assistant 
 
 ```typescript
 // packages/coding-agent/src/core/compaction/compaction.ts:135-137
-
 function calculateContextTokens(usage: Usage): number {
   return usage.totalTokens ||
     usage.input + usage.output + usage.cacheRead + usage.cacheWrite;
@@ -35,7 +49,6 @@ function calculateContextTokens(usage: Usage): number {
 
 ```typescript
 // packages/coding-agent/src/core/compaction/compaction.ts:232-249（简化）
-
 function estimateTokens(message: AgentMessage): number {
   let chars = 0;
   switch (message.role) {
@@ -267,7 +280,6 @@ pi 使用一个专门的 system prompt 来指导摘要生成：
 
 ```typescript
 // packages/coding-agent/src/core/compaction/utils.ts:168-170
-
 const SUMMARIZATION_SYSTEM_PROMPT =
   `You are a context summarization assistant. Your task is to read a conversation ` +
   `between a user and an AI coding assistant, then produce a structured summary ` +
@@ -384,27 +396,12 @@ interface CompactionEntry<T = unknown> {
 
 Extension 为什么要接管 compaction？因为不同的 agent 场景对"什么信息重要"的判断不同。一个代码审查 agent 可能想保留所有 diff 细节，而一个项目管理 agent 可能只想保留决策点。默认的 compaction 策略无法满足所有场景。
 
-## Compaction 在产品层而非 Runtime 层
-
-一个关键的架构决策是：compaction 不在 agent-core 层（第 8-10 章的循环引擎），而在 coding-agent 层（产品层）。
-
-循环引擎通过 `transformContext` 回调接入 compaction：当 context 接近上限时，`transformContext` 可以把旧消息替换为压缩摘要。但 compaction 的触发条件、压缩策略、摘要生成都是产品层的逻辑。
-
-为什么？因为 compaction 需要知道太多产品级信息：
-- 配置（是否启用压缩、保留多少 token）
-- 会话结构（哪些 entry 是 compaction、哪些是分支摘要）
-- 文件操作追踪（需要扫描工具调用消息）
-- extension 的参与（`fromHook`）
-
-这些都不是一个通用循环引擎应该知道的。
-
 ## 准备阶段与执行阶段的分离
 
 `prepareCompaction` 和 `compact` 是两个独立的函数，前者做所有的 CPU 计算（找切点、提取文件操作、整理消息），后者做 I/O（调用 LLM 生成摘要）：
 
 ```typescript
 // packages/coding-agent/src/core/compaction/compaction.ts:612-687（简化）
-
 function prepareCompaction(pathEntries, settings): CompactionPreparation | undefined {
   // 1. 找到上次压缩的位置
   // 2. 估算当前 token 数

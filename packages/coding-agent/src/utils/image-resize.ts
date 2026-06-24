@@ -1,27 +1,47 @@
+/**
+ * 图片缩放入口模块
+ *
+ * 在 Worker 线程中运行 Photon (WASM) 避免阻塞 TUI 事件循环。
+ * Worker 加载失败时回退到进程内缩放，确保图片读取始终可用。
+ * 被图片输入功能调用。
+ */
 import { Worker } from "node:worker_threads";
 import { type ImageResizeOptions, type ResizedImage, resizeImageInProcess } from "./image-resize-core.ts";
 
 export type { ImageResizeOptions, ResizedImage } from "./image-resize-core.ts";
 
+/** Worker 线程响应消息结构 */
 interface ResizeImageWorkerResponse {
 	result?: ResizedImage | null;
 	error?: string;
 }
 
+/**
+ * 将输入字节复制为 Worker 可转移的副本
+ * 因为 transfer 会 detach 原始 buffer，所以需要先复制一份给 Worker
+ */
 function toTransferableBytes(input: Uint8Array): Uint8Array<ArrayBuffer> {
-	// Transfer detaches the buffer, so transfer a worker-owned copy and leave the
-	// caller's bytes intact.
 	return new Uint8Array(input);
 }
 
+/** 类型守卫：检查消息是否为合法的 Worker 响应 */
 function isResizeImageWorkerResponse(value: unknown): value is ResizeImageWorkerResponse {
 	return value !== null && typeof value === "object";
 }
 
+/** 创建图片缩放 Worker 实例 */
 function createResizeWorker(workerSpecifier: string | URL): Worker {
 	return new Worker(workerSpecifier);
 }
 
+/**
+ * 在 Worker 线程中执行图片缩放
+ * @param workerSpecifier - Worker 脚本路径（字符串或 URL）
+ * @param inputBytes - 图片原始字节
+ * @param mimeType - 图片 MIME 类型
+ * @param options - 缩放选项
+ * @returns 缩放后的图片数据，失败返回 null
+ */
 async function resizeImageInWorker(
 	workerSpecifier: string | URL,
 	inputBytes: Uint8Array,
@@ -30,8 +50,10 @@ async function resizeImageInWorker(
 ): Promise<ResizedImage | null> {
 	const worker = createResizeWorker(workerSpecifier);
 	try {
+		// 复制字节以便通过 transferable 传递给 Worker
 		const inputBytesForWorker = toTransferableBytes(inputBytes);
 		return await new Promise<ResizedImage | null>((resolve, reject) => {
+			// 防止多次 settle（message/error/exit 可能竞态触发）
 			let settled = false;
 			const settle = (result: ResizedImage | null): void => {
 				if (settled) return;
@@ -44,6 +66,7 @@ async function resizeImageInWorker(
 				reject(error);
 			};
 
+			// 监听 Worker 返回的缩放结果
 			worker.once("message", (message: unknown) => {
 				if (!isResizeImageWorkerResponse(message)) {
 					fail(new Error("Invalid image resize worker response"));
@@ -61,6 +84,7 @@ async function resizeImageInWorker(
 					fail(new Error(`Image resize worker exited with code ${code}`));
 				}
 			});
+			// 通过 transferable 方式发送数据，避免内存复制
 			worker.postMessage(
 				{
 					inputBytes: inputBytesForWorker,
@@ -71,37 +95,43 @@ async function resizeImageInWorker(
 			);
 		});
 	} finally {
+		// 无论成功失败都终止 Worker 线程
 		void worker.terminate().catch(() => undefined);
 	}
 }
 
 /**
- * Resize an image to fit within the specified max dimensions and encoded file size.
- * Runs Photon in a worker thread so WASM decoding, resizing, and encoding do not
- * block the TUI event loop. If the worker cannot be loaded (for example in some
- * Bun compiled executable layouts), fall back to in-process resizing so image
- * reads still work.
+ * 图片缩放主入口
+ *
+ * 在 Worker 线程中运行 Photon，避免 WASM 解码/缩放/编码阻塞 TUI 事件循环。
+ * 如果 Worker 无法加载（如某些 Bun 编译布局），回退到进程内缩放。
+ *
+ * @param inputBytes - 图片原始字节
+ * @param mimeType - 图片 MIME 类型
+ * @param options - 缩放选项（最大宽高、最大字节数等）
+ * @returns 缩放后的图片数据，失败返回 null
  */
 export async function resizeImage(
 	inputBytes: Uint8Array,
 	mimeType: string,
 	options?: ImageResizeOptions,
 ): Promise<ResizedImage | null> {
+	// 根据当前运行环境选择 Worker 文件扩展名
 	const isTypeScriptRuntime = import.meta.url.endsWith(".ts");
 	const workerUrl = new URL(
 		isTypeScriptRuntime ? "./image-resize-worker.ts" : "./image-resize-worker.js",
 		import.meta.url,
 	);
 
-	// Bun compiled executables resolve worker entrypoints by string path, not via
-	// new URL(..., import.meta.url). Try the string path first under Bun so the
-	// release binary uses the embedded worker instead of falling back in-process.
+	// Bun 编译的可执行文件通过字符串路径解析 Worker 入口（而非 new URL），
+	// 所以先尝试字符串路径，确保发布二进制使用内嵌的 Worker 而非回退到进程内
 	if (typeof process.versions.bun === "string") {
 		try {
 			return await resizeImageInWorker("./src/utils/image-resize-worker.ts", inputBytes, mimeType, options);
 		} catch {}
 	}
 
+	// 尝试 Worker 线程缩放，失败则回退到进程内缩放
 	try {
 		return await resizeImageInWorker(workerUrl, inputBytes, mimeType, options);
 	} catch {
@@ -110,8 +140,10 @@ export async function resizeImage(
 }
 
 /**
- * Format a dimension note for resized images.
- * This helps the model understand the coordinate mapping.
+ * 生成缩放后图片的尺寸说明文本
+ * 帮助 AI 模型理解坐标映射关系（原始尺寸 vs 显示尺寸）
+ * @param result - 缩放结果
+ * @returns 尺寸说明字符串，未缩放则返回 undefined
  */
 export function formatDimensionNote(result: ResizedImage): string | undefined {
 	if (!result.wasResized) {

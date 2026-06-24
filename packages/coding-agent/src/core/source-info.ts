@@ -1,16 +1,44 @@
+/**
+ * 资源来源信息的类型定义与创建工具。
+ *
+ * 文件定位：coding-agent 的资源来源追踪层，为各种资源（技能、提示模板、扩展等）
+ * 提供统一的来源元数据描述，用于 UI 展示和来源追溯。
+ *
+ * 提供：
+ * - SourceScope / SourceOrigin 类型：来源的作用域和来源方式
+ * - SourceInfo 接口：完整的来源信息结构
+ * - createSourceInfo()：从包管理器元数据创建来源信息
+ * - createSyntheticSourceInfo()：手动合成来源信息（不依赖包管理器）
+ */
+
 import type { PathMetadata } from "./package-manager.ts";
 
+/** 来源作用域：用户级（全局）/ 项目级 / 临时 */
 export type SourceScope = "user" | "project" | "temporary";
+/** 来源方式：来自包（npm/git） / 顶层直接配置 */
 export type SourceOrigin = "package" | "top-level";
 
+/** 资源来源信息，描述一个资源文件从哪里来、属于哪个作用域 */
 export interface SourceInfo {
+	/** 资源文件的绝对路径 */
 	path: string;
+	/** 来源标识（如包名、"local" 等） */
 	source: string;
+	/** 作用域：用户级 / 项目级 / 临时 */
 	scope: SourceScope;
+	/** 来源方式：包 / 顶层配置 */
 	origin: SourceOrigin;
+	/** 资源所在的基础目录 */
 	baseDir?: string;
 }
 
+/**
+ * 从包管理器的路径元数据创建来源信息。
+ *
+ * @param path - 资源文件的绝对路径
+ * @param metadata - 包管理器提供的路径元数据
+ * @returns SourceInfo 来源信息对象
+ */
 export function createSourceInfo(path: string, metadata: PathMetadata): SourceInfo {
 	return {
 		path,
@@ -21,6 +49,18 @@ export function createSourceInfo(path: string, metadata: PathMetadata): SourceIn
 	};
 }
 
+/**
+ * 手动合成来源信息（不依赖包管理器的元数据）。
+ * 用于本地加载的资源文件（如从文件系统直接读取的技能、提示模板等）。
+ *
+ * @param path - 资源文件的绝对路径
+ * @param options - 来源配置选项
+ * @param options.source - 来源标识
+ * @param options.scope - 作用域，默认 "temporary"
+ * @param options.origin - 来源方式，默认 "top-level"
+ * @param options.baseDir - 基础目录
+ * @returns SourceInfo 来源信息对象
+ */
 export function createSyntheticSourceInfo(
 	path: string,
 	options: {

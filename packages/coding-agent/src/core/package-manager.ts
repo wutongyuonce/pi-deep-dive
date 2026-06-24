@@ -1,8 +1,37 @@
+/**
+ * 包管理器模块
+ *
+ * 文件定位：coding-agent 的资源包安装、解析和管理模块。
+ *
+ * 功能概述：
+ * - 管理扩展（extensions）、技能（skills）、提示模板（prompts）和主题（themes）的包源
+ * - 支持三种包源类型：npm 包、git 仓库、本地路径
+ * - 提供包的安装、卸载、更新和版本检查功能
+ * - 从用户级（~/.pi/agent/）和项目级（.pi/）两个作用域解析资源
+ * - 支持 pi manifest（package.json 中的 pi 字段）声明式资源管理
+ * - 支持 glob 模式和覆盖模式（!排除、+强制包含、-强制排除）的资源过滤
+ * - 自动发现本地目录中的资源文件（遵循目录约定）
+ *
+ * 提供：
+ * - PackageManager 接口：包管理的统一接口
+ * - DefaultPackageManager：默认实现，协调包源解析、安装和资源收集
+ * - PathMetadata / ResolvedResource / ResolvedPaths：资源路径元数据和解析结果类型
+ *
+ * 调用链路：
+ *   resource-loader.ts → DefaultResourceLoader.reload() → packageManager.resolve() → 资源路径列表
+ *   TUI /login 命令 → packageManager.install() → npm/git 安装
+ *   TUI /reload 命令 → packageManager.update() → 检查并更新已安装的包
+ */
+
 import type { ChildProcess, ChildProcessByStdio } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 
+/**
+ * 获取进程环境变量
+ * 在 Linux 上当 process.env 为空时（如 Flatpak 沙箱），回退到读取 /proc/self/environ
+ */
 function getEnv(): NodeJS.ProcessEnv {
 	if (process.platform !== "linux" || Object.keys(process.env).length > 0) {
 		return process.env;
@@ -34,123 +63,200 @@ import { canonicalizePath, isLocalPath, markPathIgnoredByCloudSync, resolvePath 
 import { isStdoutTakenOver } from "./output-guard.ts";
 import type { PackageSource, SettingsManager } from "./settings-manager.ts";
 
+/** 网络操作超时时间（毫秒） */
 const NETWORK_TIMEOUT_MS = 10000;
+/** 更新检查的并发数 */
 const UPDATE_CHECK_CONCURRENCY = 4;
+/** Git 更新操作的并发数 */
 const GIT_UPDATE_CONCURRENCY = 4;
 
+/**
+ * 检查是否启用离线模式
+ * 通过 PI_OFFLINE 环境变量控制（值为 "1"、"true" 或 "yes" 时启用）
+ */
 function isOfflineModeEnabled(): boolean {
 	const value = process.env.PI_OFFLINE;
 	if (!value) return false;
 	return value === "1" || value.toLowerCase() === "true" || value.toLowerCase() === "yes";
 }
 
+/** 资源路径元数据，描述一个资源文件的来源、作用域和来源方式 */
 export interface PathMetadata {
+	/** 来源标识（如 "local"、"auto"、npm 包名、git URL 等） */
 	source: string;
+	/** 作用域：用户级 / 项目级 / 临时 */
 	scope: SourceScope;
+	/** 来源方式：包 / 顶层配置 */
 	origin: "package" | "top-level";
+	/** 资源所在的基础目录 */
 	baseDir?: string;
 }
 
+/** 已解析的资源路径，包含启用状态和元数据 */
 export interface ResolvedResource {
+	/** 资源文件的绝对路径 */
 	path: string;
+	/** 该资源是否启用 */
 	enabled: boolean;
+	/** 资源的来源元数据 */
 	metadata: PathMetadata;
 }
 
+/** 已解析的全部资源路径，按资源类型分组 */
 export interface ResolvedPaths {
+	/** 扩展路径列表 */
 	extensions: ResolvedResource[];
+	/** 技能路径列表 */
 	skills: ResolvedResource[];
+	/** 提示模板路径列表 */
 	prompts: ResolvedResource[];
+	/** 主题路径列表 */
 	themes: ResolvedResource[];
 }
 
+/** 缺失包源时的处理方式 */
 export type MissingSourceAction = "install" | "skip" | "error";
 
+/** 包管理操作的进度事件 */
 export interface ProgressEvent {
+	/** 事件类型：开始 / 进行中 / 完成 / 错误 */
 	type: "start" | "progress" | "complete" | "error";
+	/** 操作类型：安装 / 移除 / 更新 / 克隆 / 拉取 */
 	action: "install" | "remove" | "update" | "clone" | "pull";
+	/** 包源标识 */
 	source: string;
+	/** 进度消息（可选） */
 	message?: string;
 }
 
+/** 进度回调函数类型 */
 export type ProgressCallback = (event: ProgressEvent) => void;
 
+/** 可更新的包信息 */
 export interface PackageUpdate {
+	/** 包源标识 */
 	source: string;
+	/** 显示名称 */
 	displayName: string;
+	/** 包类型：npm 或 git */
 	type: "npm" | "git";
+	/** 作用域（不包含 temporary） */
 	scope: Exclude<SourceScope, "temporary">;
 }
 
+/** 已配置的包信息 */
 export interface ConfiguredPackage {
+	/** 包源标识 */
 	source: string;
+	/** 作用域：用户级或项目级 */
 	scope: "user" | "project";
+	/** 是否使用了过滤模式 */
 	filtered: boolean;
+	/** 已安装的路径（如果存在） */
 	installedPath?: string;
 }
 
+/** 包管理器接口——定义包的解析、安装、卸载、更新等操作 */
 export interface PackageManager {
+	/** 解析所有已配置的包源，返回资源路径列表 */
 	resolve(onMissing?: (source: string) => Promise<MissingSourceAction>): Promise<ResolvedPaths>;
+	/** 安装指定包源 */
 	install(source: string, options?: { local?: boolean }): Promise<void>;
+	/** 安装并持久化到设置文件 */
 	installAndPersist(source: string, options?: { local?: boolean }): Promise<void>;
+	/** 移除指定包源 */
 	remove(source: string, options?: { local?: boolean }): Promise<void>;
+	/** 移除并从设置文件中删除，返回是否实际移除了设置条目 */
 	removeAndPersist(source: string, options?: { local?: boolean }): Promise<boolean>;
+	/** 更新指定包源（省略 source 则更新全部） */
 	update(source?: string): Promise<void>;
+	/** 列出所有已配置的包 */
 	listConfiguredPackages(): ConfiguredPackage[];
+	/** 解析扩展源路径列表（支持临时作用域） */
 	resolveExtensionSources(
 		sources: string[],
 		options?: { local?: boolean; temporary?: boolean },
 	): Promise<ResolvedPaths>;
+	/** 将包源添加到设置文件，返回是否发生了变更 */
 	addSourceToSettings(source: string, options?: { local?: boolean }): boolean;
+	/** 从设置文件中移除包源，返回是否实际移除了条目 */
 	removeSourceFromSettings(source: string, options?: { local?: boolean }): boolean;
+	/** 设置进度回调函数 */
 	setProgressCallback(callback: ProgressCallback | undefined): void;
+	/** 获取指定包源的已安装路径 */
 	getInstalledPath(source: string, scope: "user" | "project"): string | undefined;
 }
 
+/** 包管理器构造选项 */
 interface PackageManagerOptions {
+	/** 当前工作目录 */
 	cwd: string;
+	/** Agent 配置目录（如 ~/.pi/agent/） */
 	agentDir: string;
+	/** 设置管理器实例 */
 	settingsManager: SettingsManager;
 }
 
+/** 资源来源作用域：用户级 / 项目级 / 临时 */
 type SourceScope = "user" | "project" | "temporary";
 
+/** npm 包源解析结果 */
 type NpmSource = {
 	type: "npm";
+	/** npm 包规格（如 "@scope/pkg" 或 "pkg@1.0.0"） */
 	spec: string;
+	/** 包名（不含版本） */
 	name: string;
+	/** 是否指定了固定版本（如 "pkg@1.0.0" 为 true，"pkg" 为 false） */
 	pinned: boolean;
 };
 
+/** 本地路径包源 */
 type LocalSource = {
 	type: "local";
+	/** 本地路径 */
 	path: string;
 };
 
+/** 解析后的包源联合类型 */
 type ParsedSource = NpmSource | GitSource | LocalSource;
 
+/** 已安装包的作用域（不含 temporary） */
 type InstalledSourceScope = Exclude<SourceScope, "temporary">;
 
+/** 待更新的已配置包源 */
 interface ConfiguredUpdateSource {
+	/** 包源标识 */
 	source: string;
+	/** 作用域（用户级或项目级） */
 	scope: InstalledSourceScope;
 }
 
+/** 待更新的 npm 包源 */
 interface NpmUpdateTarget extends ConfiguredUpdateSource {
+	/** 解析后的 npm 包源信息 */
 	parsed: NpmSource;
 }
 
+/** 待更新的 git 包源 */
 interface GitUpdateTarget extends ConfiguredUpdateSource {
+	/** 解析后的 git 包源信息 */
 	parsed: GitSource;
 }
 
+/** pi manifest 声明（package.json 中的 "pi" 字段） */
 interface PiManifest {
+	/** 扩展入口路径列表 */
 	extensions?: string[];
+	/** 技能路径列表 */
 	skills?: string[];
+	/** 提示模板路径列表 */
 	prompts?: string[];
+	/** 主题路径列表 */
 	themes?: string[];
 }
 
+/** 资源累积器——用于在包解析过程中收集所有资源路径 */
 interface ResourceAccumulator {
 	extensions: Map<string, { metadata: PathMetadata; enabled: boolean }>;
 	skills: Map<string, { metadata: PathMetadata; enabled: boolean }>;
@@ -159,16 +265,15 @@ interface ResourceAccumulator {
 }
 
 /**
- * Compute a numeric precedence rank for a resource based on its metadata.
- * Lower rank = higher precedence. Used to sort resolved resources so that
- * name-collision resolution ("first wins") produces the correct outcome.
+ * 计算资源的优先级排名（数值越小优先级越高）。
+ * 用于对已解析的资源排序，确保名称冲突时"先到先得"产生正确结果。
  *
- * Precedence (highest to lowest):
- *   0  project + settings entry (source: "local", scope: "project")
- *   1  project + auto-discovered (source: "auto", scope: "project")
- *   2  user + settings entry (source: "local", scope: "user")
- *   3  user + auto-discovered (source: "auto", scope: "user")
- *   4  package resource (origin: "package")
+ * 优先级（从高到低）：
+ *   0  项目级 + 设置条目（source: "local", scope: "project"）
+ *   1  项目级 + 自动发现（source: "auto", scope: "project"）
+ *   2  用户级 + 设置条目（source: "local", scope: "user"）
+ *   3  用户级 + 自动发现（source: "auto", scope: "user"）
+ *   4  包资源（origin: "package"）
  */
 function resourcePrecedenceRank(m: PathMetadata): number {
 	if (m.origin === "package") return 4;
@@ -176,6 +281,7 @@ function resourcePrecedenceRank(m: PathMetadata): number {
 	return scopeBase + (m.source === "local" ? 0 : 1);
 }
 
+/** 包资源过滤器——用于按资源类型过滤包内的资源 */
 interface PackageFilter {
 	extensions?: string[];
 	skills?: string[];
@@ -183,10 +289,13 @@ interface PackageFilter {
 	themes?: string[];
 }
 
+/** 资源类型枚举 */
 type ResourceType = "extensions" | "skills" | "prompts" | "themes";
 
+/** 所有资源类型列表 */
 const RESOURCE_TYPES: ResourceType[] = ["extensions", "skills", "prompts", "themes"];
 
+/** 各资源类型对应的文件扩展名匹配模式 */
 const FILE_PATTERNS: Record<ResourceType, RegExp> = {
 	extensions: /\.(ts|js)$/,
 	skills: /\.md$/,
@@ -194,18 +303,29 @@ const FILE_PATTERNS: Record<ResourceType, RegExp> = {
 	themes: /\.json$/,
 };
 
+/** 支持的忽略规则文件名列表 */
 const IGNORE_FILE_NAMES = [".gitignore", ".ignore", ".fdignore"];
 
+/** ignore 库的匹配器类型 */
 type IgnoreMatcher = ReturnType<typeof ignore>;
 
+/** 将系统路径分隔符转换为 POSIX 风格（正斜杠） */
 function toPosixPath(p: string): string {
 	return p.split(sep).join("/");
 }
 
+/** 获取用户主目录 */
 function getHomeDir(): string {
 	return process.env.HOME || homedir();
 }
 
+/**
+ * 为忽略规则模式添加目录前缀
+ * 将相对路径的忽略规则转换为基于根目录的完整路径规则
+ * @param line 原始忽略规则行
+ * @param prefix 目录前缀（相对于根目录）
+ * @returns 带前缀的规则，空行或注释返回 null
+ */
 function prefixIgnorePattern(line: string, prefix: string): string | null {
 	const trimmed = line.trim();
 	if (!trimmed) return null;
@@ -229,6 +349,12 @@ function prefixIgnorePattern(line: string, prefix: string): string | null {
 	return negated ? `!${prefixed}` : prefixed;
 }
 
+/**
+ * 将目录下的忽略规则文件（.gitignore / .ignore / .fdignore）添加到匹配器中
+ * @param ig 忽略匹配器实例
+ * @param dir 要扫描忽略规则文件的目录
+ * @param rootDir 根目录（用于计算相对路径前缀）
+ */
 function addIgnoreRules(ig: IgnoreMatcher, dir: string, rootDir: string): void {
 	const relativeDir = relative(rootDir, dir);
 	const prefix = relativeDir ? `${toPosixPath(relativeDir)}/` : "";
@@ -249,18 +375,26 @@ function addIgnoreRules(ig: IgnoreMatcher, dir: string, rootDir: string): void {
 	}
 }
 
+/** 判断字符串是否为模式表达式（包含特殊字符或前缀） */
 function isPattern(s: string): boolean {
 	return s.startsWith("!") || s.startsWith("+") || s.startsWith("-") || s.includes("*") || s.includes("?");
 }
 
+/** 判断字符串是否为覆盖模式（!排除、+强制包含、-强制排除） */
 function isOverridePattern(s: string): boolean {
 	return s.startsWith("!") || s.startsWith("+") || s.startsWith("-");
 }
 
+/** 判断字符串是否包含 glob 通配符（* 或 ?） */
 function hasGlobPattern(s: string): boolean {
 	return s.includes("*") || s.includes("?");
 }
 
+/**
+ * 将条目列表拆分为普通路径和模式表达式两组
+ * @param entries 原始条目列表
+ * @returns 包含 plain（普通路径）和 patterns（模式表达式）的对象
+ */
 function splitPatterns(entries: string[]): { plain: string[]; patterns: string[] } {
 	const plain: string[] = [];
 	const patterns: string[] = [];
@@ -274,6 +408,16 @@ function splitPatterns(entries: string[]): { plain: string[]; patterns: string[]
 	return { plain, patterns };
 }
 
+/**
+ * 递归收集目录中匹配指定文件模式的文件
+ * 支持 .gitignore/.ignore/.fdignore 忽略规则
+ * @param dir 要扫描的目录
+ * @param filePattern 文件名正则匹配模式
+ * @param skipNodeModules 是否跳过 node_modules 目录
+ * @param ignoreMatcher 继承的忽略匹配器
+ * @param rootDir 根目录（用于计算忽略规则的相对路径）
+ * @returns 匹配的文件绝对路径列表
+ */
 function collectFiles(
 	dir: string,
 	filePattern: RegExp,
@@ -325,8 +469,18 @@ function collectFiles(
 	return files;
 }
 
+/** 技能发现模式：pi 模式（.pi/skills）或 agents 模式（.agents/skills） */
 type SkillDiscoveryMode = "pi" | "agents";
 
+/**
+ * 递归收集目录中的技能条目（SKILL.md 文件）
+ * pi 模式下还会加载根目录中的 .md 文件
+ * @param dir 要扫描的目录
+ * @param mode 发现模式（pi 或 agents）
+ * @param ignoreMatcher 继承的忽略匹配器
+ * @param rootDir 根目录（用于计算忽略规则的相对路径）
+ * @returns 技能文件路径列表
+ */
 function collectSkillEntries(
 	dir: string,
 	mode: SkillDiscoveryMode,
@@ -401,10 +555,16 @@ function collectSkillEntries(
 	return entries;
 }
 
+/** 自动发现目录中的技能条目（委托给 collectSkillEntries） */
 function collectAutoSkillEntries(dir: string, mode: SkillDiscoveryMode): string[] {
 	return collectSkillEntries(dir, mode);
 }
 
+/**
+ * 从指定目录向上查找 git 仓库根目录
+ * @param startDir 起始搜索目录
+ * @returns git 仓库根目录路径，不在 git 仓库中则返回 null
+ */
 function findGitRepoRoot(startDir: string): string | null {
 	let dir = resolve(startDir);
 	while (true) {
@@ -419,6 +579,11 @@ function findGitRepoRoot(startDir: string): string | null {
 	}
 }
 
+/**
+ * 收集从起始目录到 git 仓库根目录（或文件系统根目录）之间所有祖先目录的 .agents/skills 路径
+ * @param startDir 起始目录
+ * @returns 祖先目录的 .agents/skills 路径列表（从近到远）
+ */
 function collectAncestorAgentsSkillDirs(startDir: string): string[] {
 	const skillDirs: string[] = [];
 	const resolvedStartDir = resolve(startDir);
@@ -440,6 +605,7 @@ function collectAncestorAgentsSkillDirs(startDir: string): string[] {
 	return skillDirs;
 }
 
+/** 自动发现目录中的提示模板文件（.md 文件） */
 function collectAutoPromptEntries(dir: string): string[] {
 	const entries: string[] = [];
 	if (!existsSync(dir)) return entries;
@@ -477,6 +643,7 @@ function collectAutoPromptEntries(dir: string): string[] {
 	return entries;
 }
 
+/** 自动发现目录中的主题文件（.json 文件） */
 function collectAutoThemeEntries(dir: string): string[] {
 	const entries: string[] = [];
 	if (!existsSync(dir)) return entries;
@@ -514,6 +681,7 @@ function collectAutoThemeEntries(dir: string): string[] {
 	return entries;
 }
 
+/** 读取 package.json 中的 pi manifest 声明 */
 function readPiManifestFile(packageJsonPath: string): PiManifest | null {
 	try {
 		const content = readFileSync(packageJsonPath, "utf-8");
@@ -524,6 +692,13 @@ function readPiManifestFile(packageJsonPath: string): PiManifest | null {
 	}
 }
 
+/**
+ * 解析目录中的扩展入口文件
+ * 优先读取 package.json 中的 pi.extensions 声明，
+ * 其次查找 index.ts / index.js 文件
+ * @param dir 要查找的目录
+ * @returns 扩展入口文件路径列表，未找到返回 null
+ */
 function resolveExtensionEntries(dir: string): string[] | null {
 	const packageJsonPath = join(dir, "package.json");
 	if (existsSync(packageJsonPath)) {
@@ -554,6 +729,11 @@ function resolveExtensionEntries(dir: string): string[] | null {
 	return null;
 }
 
+/**
+ * 自动发现目录中的扩展文件
+ * 先检查目录本身是否有显式扩展入口（package.json 或 index），
+ * 否则从目录内容中发现 .ts/.js 文件和子目录中的扩展
+ */
 function collectAutoExtensionEntries(dir: string): string[] {
 	const entries: string[] = [];
 	if (!existsSync(dir)) return entries;
@@ -609,8 +789,8 @@ function collectAutoExtensionEntries(dir: string): string[] {
 }
 
 /**
- * Collect resource files from a directory based on resource type.
- * Extensions use smart discovery (index.ts in subdirs), others use recursive collection.
+ * 根据资源类型从目录中收集资源文件。
+ * 扩展使用智能发现（子目录中的 index.ts），其他类型使用递归收集。
  */
 function collectResourceFiles(dir: string, resourceType: ResourceType): string[] {
 	if (resourceType === "skills") {
@@ -622,6 +802,10 @@ function collectResourceFiles(dir: string, resourceType: ResourceType): string[]
 	return collectFiles(dir, FILE_PATTERNS[resourceType]);
 }
 
+/**
+ * 检查文件路径是否匹配任意一个模式
+ * 支持相对路径、文件名和绝对路径的匹配，对 SKILL.md 还匹配其父目录
+ */
 function matchesAnyPattern(filePath: string, patterns: string[], baseDir: string): boolean {
 	const rel = toPosixPath(relative(baseDir, filePath));
 	const name = basename(filePath);
@@ -650,11 +834,13 @@ function matchesAnyPattern(filePath: string, patterns: string[], baseDir: string
 	});
 }
 
+/** 规范化精确路径模式（去除 "./" 前缀，转换路径分隔符） */
 function normalizeExactPattern(pattern: string): string {
 	const normalized = pattern.startsWith("./") || pattern.startsWith(".\\") ? pattern.slice(2) : pattern;
 	return toPosixPath(normalized);
 }
 
+/** 检查文件路径是否精确匹配任意一个模式（不支持通配符，仅路径完全相等） */
 function matchesAnyExactPattern(filePath: string, patterns: string[], baseDir: string): boolean {
 	if (patterns.length === 0) return false;
 	const rel = toPosixPath(relative(baseDir, filePath));
@@ -675,6 +861,7 @@ function matchesAnyExactPattern(filePath: string, patterns: string[], baseDir: s
 	});
 }
 
+/** 从条目列表中提取覆盖模式（!、+、- 前缀的条目） */
 function getOverridePatterns(entries: string[]): string[] {
 	return entries.filter((pattern) => pattern.startsWith("!") || pattern.startsWith("+") || pattern.startsWith("-"));
 }
@@ -699,12 +886,12 @@ function isEnabledByOverrides(filePath: string, patterns: string[], baseDir: str
 }
 
 /**
- * Apply patterns to paths and return a Set of enabled paths.
- * Pattern types:
- * - Plain patterns: include matching paths
- * - `!pattern`: exclude matching paths
- * - `+path`: force-include exact path (overrides exclusions)
- * - `-path`: force-exclude exact path (overrides force-includes)
+ * 将模式应用于路径列表，返回启用路径的集合。
+	 * 模式类型：
+	 * - 普通模式：包含匹配的路径
+	 * - `!模式`：排除匹配的路径
+	 * - `+路径`：强制包含精确路径（覆盖排除）
+	 * - `-路径`：强制排除精确路径（覆盖强制包含）
  */
 function applyPatterns(allPaths: string[], patterns: string[], baseDir: string): Set<string> {
 	const includes: string[] = [];
@@ -865,7 +1052,7 @@ export class DefaultPackageManager implements PackageManager {
 		const globalSettings = this.settingsManager.getGlobalSettings();
 		const projectSettings = this.settingsManager.getProjectSettings();
 
-		// Collect all packages with scope (project first so cwd resources win collisions)
+		// 收集所有包源及其作用域（项目级优先，确保 cwd 资源在冲突时胜出）
 		const allPackages: Array<{ pkg: PackageSource; scope: SourceScope }> = [];
 		for (const pkg of projectSettings.packages ?? []) {
 			allPackages.push({ pkg, scope: "project" });
@@ -874,7 +1061,7 @@ export class DefaultPackageManager implements PackageManager {
 			allPackages.push({ pkg, scope: "user" });
 		}
 
-		// Dedupe: project scope wins over global for same package identity
+		// 去重：相同包标识时项目级优先于用户级
 		const packageSources = this.dedupePackages(allPackages);
 		await this.resolvePackageSources(packageSources, accumulator, onMissing);
 
@@ -1047,8 +1234,8 @@ export class DefaultPackageManager implements PackageManager {
 
 		for (const entry of sources) {
 			const parsed = this.parseSource(entry.source);
-			// Pinned npm versions are fixed. Pinned git refs are configured checkout targets,
-			// so include them to reconcile an existing clone when the configured ref changes.
+			// 固定版本的 npm 包不会更新。固定 ref 的 git 包是配置的检出目标，
+			// 需要包含在内以在配置的 ref 变更时协调已有克隆。
 			if (parsed.type === "npm") {
 				if (!parsed.pinned) {
 					npmCandidates.push({ ...entry, parsed });
@@ -1608,10 +1795,10 @@ export class DefaultPackageManager implements PackageManager {
 	}
 
 	/**
-	 * Get a unique identity for a package, ignoring version/ref.
-	 * Used to detect when the same package is in both global and project settings.
-	 * For git packages, uses normalized host/path to ensure SSH and HTTPS URLs
-	 * for the same repository are treated as identical.
+	 * 获取包的唯一标识（忽略版本/ref）。
+	 * 用于检测同一包同时存在于全局和项目设置中的情况。
+	 * 对于 git 包，使用规范化的 host/path 确保同一仓库的 SSH 和 HTTPS URL
+	 * 被视为同一标识。
 	 */
 	private getPackageIdentity(source: string, scope?: SourceScope): string {
 		const parsed = this.parseSource(source);
@@ -1630,8 +1817,8 @@ export class DefaultPackageManager implements PackageManager {
 	}
 
 	/**
-	 * Dedupe packages: if same package identity appears in both global and project,
-	 * keep only the project one (project wins).
+	 * 去重包源：如果同一包标识同时出现在全局和项目设置中，
+	 * 仅保留项目级条目（项目级优先）。
 	 */
 	private dedupePackages(
 		packages: Array<{ pkg: PackageSource; scope: SourceScope }>,
@@ -1706,10 +1893,10 @@ export class DefaultPackageManager implements PackageManager {
 
 	private getNpmInstallArgs(specs: string[], installRoot: string): string[] {
 		const packageManagerName = this.getPackageManagerName();
-		// Extension packages run inside pi and resolve pi APIs through loader aliases/virtual modules.
-		// Disable peer dependency resolution for managed installs (npm's --legacy-peer-deps, and
-		// equivalent bun/pnpm settings) so package managers do not install or solve host-provided
-		// @earendil-works/pi-* peers. Stale auto-installed pi peers can otherwise block updates.
+		// 扩展包在 pi 内部运行，通过 loader 别名/虚拟模块解析 pi API。
+		// 禁用托管安装的 peer 依赖解析（npm 的 --legacy-peer-deps 及 bun/pnpm 的等效配置），
+		// 以防包管理器安装或解析宿主提供的 @earendil-works/pi-* peer 依赖。
+		// 过时的自动安装 pi peer 依赖可能会阻塞更新。
 		if (packageManagerName === "bun") {
 			return ["install", ...specs, "--cwd", installRoot, "--omit=peer"];
 		}
@@ -1789,7 +1976,7 @@ export class DefaultPackageManager implements PackageManager {
 	}
 
 	private async ensureGitRef(targetDir: string, fetchArgs: string[], ref: string): Promise<void> {
-		// Fetch only the ref we will reset to, avoiding unrelated branch/tag noise.
+		// 仅拉取目标 ref，避免不相关的分支/标签干扰。
 		await this.runCommand("git", fetchArgs, { cwd: targetDir });
 
 		const localHead = await this.runCommandCapture("git", ["rev-parse", "HEAD"], {
@@ -1807,7 +1994,7 @@ export class DefaultPackageManager implements PackageManager {
 
 		await this.runCommand("git", ["reset", "--hard", commitRef], { cwd: targetDir });
 
-		// Clean untracked files (extensions should be pristine)
+		// 清理未跟踪文件（扩展应保持干净状态）
 		await this.runCommand("git", ["clean", "-fdx"], { cwd: targetDir });
 
 		const packageJsonPath = join(targetDir, "package.json");
@@ -2092,9 +2279,9 @@ export class DefaultPackageManager implements PackageManager {
 	}
 
 	/**
-	 * Collect all files from a package for a resource type, applying manifest patterns.
-	 * Returns { allFiles, enabledByManifest } where enabledByManifest is the set of files
-	 * that pass the manifest's own patterns.
+	 * 从包中收集指定资源类型的所有文件，应用 manifest 模式。
+	 * 返回 { allFiles, enabledByManifest }，其中 enabledByManifest 是
+	 * 通过 manifest 自身模式筛选的文件集合。
 	 */
 	private collectManifestFiles(
 		packageRoot: string,

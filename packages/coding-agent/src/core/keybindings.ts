@@ -1,3 +1,11 @@
+/**
+ * 快捷键配置模块
+ *
+ * 定义应用程序的所有快捷键绑定（包括 TUI 基础快捷键和应用层快捷键），
+ * 支持从 keybindings.json 文件加载用户自定义配置，并提供旧版名称到新版
+ * 名称的迁移功能。KeybindingsManager 管理快捷键的合并、重载和查询。
+ */
+
 import {
 	type Keybinding,
 	type KeybindingDefinitions,
@@ -10,6 +18,7 @@ import { existsSync, readFileSync } from "fs";
 import { join } from "path";
 import { getAgentDir } from "../config.ts";
 
+/** 应用层快捷键定义接口——每个布尔值字段代表一个可绑定的快捷键动作 */
 export interface AppKeybindings {
 	"app.interrupt": true;
 	"app.clear": true;
@@ -54,12 +63,15 @@ export interface AppKeybindings {
 	"app.tree.filter.cycleBackward": true;
 }
 
+/** 应用快捷键名称的联合类型 */
 export type AppKeybinding = keyof AppKeybindings;
 
+/** 向 pi-tui 的 Keybindings 接口合并应用层快捷键类型 */
 declare module "@earendil-works/pi-tui" {
 	interface Keybindings extends AppKeybindings {}
 }
 
+/** 合并后的完整快捷键定义表（TUI 基础 + 应用层） */
 export const KEYBINDINGS = {
 	...TUI_KEYBINDINGS,
 	"app.interrupt": { defaultKeys: "escape", description: "Cancel or abort" },
@@ -201,6 +213,7 @@ export const KEYBINDINGS = {
 	},
 } as const satisfies KeybindingDefinitions;
 
+/** 旧版快捷键名称到新版名称的迁移映射表 */
 const KEYBINDING_NAME_MIGRATIONS = {
 	cursorUp: "tui.editor.cursorUp",
 	cursorDown: "tui.editor.cursorDown",
@@ -263,14 +276,17 @@ const KEYBINDING_NAME_MIGRATIONS = {
 	deleteSessionNoninvasive: "app.session.deleteNoninvasive",
 } as const satisfies Record<string, Keybinding>;
 
+/** 判断值是否为普通对象 */
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+/** 判断快捷键名称是否为旧版格式 */
 function isLegacyKeybindingName(key: string): key is keyof typeof KEYBINDING_NAME_MIGRATIONS {
 	return key in KEYBINDING_NAME_MIGRATIONS;
 }
 
+/** 将原始配置值转换为 KeybindingsConfig 格式 */
 function toKeybindingsConfig(value: unknown): KeybindingsConfig {
 	if (!isRecord(value)) return {};
 
@@ -287,6 +303,11 @@ function toKeybindingsConfig(value: unknown): KeybindingsConfig {
 	return config;
 }
 
+/**
+ * 迁移旧版快捷键配置到新版名称
+ * @param rawConfig 原始配置对象
+ * @returns 迁移后的配置和是否发生了迁移
+ */
 export function migrateKeybindingsConfig(rawConfig: Record<string, unknown>): {
 	config: Record<string, unknown>;
 	migrated: boolean;
@@ -309,6 +330,7 @@ export function migrateKeybindingsConfig(rawConfig: Record<string, unknown>): {
 	return { config: orderKeybindingsConfig(config), migrated };
 }
 
+/** 按 KEYBINDINGS 定义顺序排列配置项，未定义的附加项排在末尾 */
 function orderKeybindingsConfig(config: Record<string, unknown>): Record<string, unknown> {
 	const ordered: Record<string, unknown> = {};
 	for (const keybinding of Object.keys(KEYBINDINGS)) {
@@ -327,6 +349,11 @@ function orderKeybindingsConfig(config: Record<string, unknown>): Record<string,
 	return ordered;
 }
 
+/**
+ * 从 JSON 文件加载原始快捷键配置
+ * @param path 配置文件路径
+ * @returns 解析后的配置对象，文件不存在或解析失败返回 undefined
+ */
 function loadRawConfig(path: string): Record<string, unknown> | undefined {
 	if (!existsSync(path)) return undefined;
 	try {
@@ -337,7 +364,13 @@ function loadRawConfig(path: string): Record<string, unknown> | undefined {
 	}
 }
 
+/**
+ * 快捷键管理器
+ * 继承自 TUI 层的 KeybindingsManager，扩展了应用层快捷键定义、
+ * 旧版名称迁移和文件加载/重载功能。
+ */
 export class KeybindingsManager extends TuiKeybindingsManager {
+	/** 配置文件路径（如 ~/.pi/agent/keybindings.json） */
 	private configPath: string | undefined;
 
 	constructor(userBindings: KeybindingsConfig = {}, configPath?: string) {
@@ -345,21 +378,28 @@ export class KeybindingsManager extends TuiKeybindingsManager {
 		this.configPath = configPath;
 	}
 
+	/**
+	 * 从默认 agent 目录创建快捷键管理器
+	 * @param agentDir agent 配置目录
+	 */
 	static create(agentDir: string = getAgentDir()): KeybindingsManager {
 		const configPath = join(agentDir, "keybindings.json");
 		const userBindings = KeybindingsManager.loadFromFile(configPath);
 		return new KeybindingsManager(userBindings, configPath);
 	}
 
+	/** 从配置文件重新加载用户自定义快捷键 */
 	reload(): void {
 		if (!this.configPath) return;
 		this.setUserBindings(KeybindingsManager.loadFromFile(this.configPath));
 	}
 
+	/** 获取最终生效的快捷键配置（合并默认值和用户自定义） */
 	getEffectiveConfig(): KeybindingsConfig {
 		return this.getResolvedBindings();
 	}
 
+	/** 从文件加载并迁移快捷键配置 */
 	private static loadFromFile(path: string): KeybindingsConfig {
 		const rawConfig = loadRawConfig(path);
 		if (!rawConfig) return {};

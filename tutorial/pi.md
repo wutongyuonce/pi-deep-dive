@@ -51,5 +51,9 @@ pi-mono 通过在根 `package.json` 的 `build` 脚本中**手动编排构建顺
 
 
 1. [pi-ai](./pi-ai.md)
-2. [pi-ai-streaing-architecture](./pi-ai-streaing-architecture.md)
-3. [pi-agent](./pi-agent.md)
+
+   [pi-ai-streaing-architecture](./pi-ai-streaing-architecture.md)
+
+2. [pi-agent](./pi-agent.md)
+
+3. [pi-coding-agent](./pi-coding-agent.md)

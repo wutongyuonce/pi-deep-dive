@@ -1,3 +1,28 @@
+/**
+ * agent-session-runtime.ts - 会话运行时生命周期管理
+ *
+ * 作用：管理 AgentSession 及其运行时服务的完整生命周期，包括会话的创建、切换、
+ *       分支（fork）、导入和销毁。是连接 CLI/TUI 层和 core 层的核心桥梁。
+ *
+ * 定位：core 层的运行时管理器，持有当前 AgentSession 和 cwd 绑定的服务集合，
+ *       并通过工厂函数在 cwd 变化时重建整个运行时。
+ *
+ * 提供的能力：
+ * - AgentSessionRuntime 类：运行时容器，封装会话和服务的生命周期操作
+ * - createAgentSessionRuntime()：创建初始运行时的工厂函数
+ * - switchSession()：切换到已有会话
+ * - newSession()：创建新会话
+ * - fork()：从指定条目分叉新会话
+ * - importFromJsonl()：从 JSONL 文件导入会话
+ * - dispose()：销毁运行时并释放资源
+ *
+ * 调用关系：
+ * - 被 CLI/TUI 的入口代码创建并持有
+ * - 内部调用 agent-session-services.ts 创建 cwd 绑定的服务
+ * - 内部调用 sdk.ts 的 createAgentSession() 创建 AgentSession
+ * - 通过 CreateAgentSessionRuntimeFactory 工厂函数在会话切换时重建运行时
+ */
+
 import { copyFileSync, existsSync, mkdirSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
 import { resolvePath } from "../utils/paths.ts";
@@ -10,10 +35,9 @@ import { assertSessionCwdExists } from "./session-cwd.ts";
 import { SessionManager } from "./session-manager.ts";
 
 /**
- * Result returned by runtime creation.
+ * 运行时创建返回的结果。
  *
- * The caller gets the created session, its cwd-bound services, and all
- * diagnostics collected during setup.
+ * 调用方获得创建的会话、cwd 绑定的服务以及设置过程中收集的所有诊断信息。
  */
 export interface CreateAgentSessionRuntimeResult extends CreateAgentSessionResult {
 	services: AgentSessionServices;
@@ -21,11 +45,10 @@ export interface CreateAgentSessionRuntimeResult extends CreateAgentSessionResul
 }
 
 /**
- * Creates a full runtime for a target cwd and session manager.
+ * 为目标 cwd 和会话管理器创建完整运行时的工厂函数类型。
  *
- * The factory closes over process-global fixed inputs, recreates cwd-bound
- * services for the effective cwd, resolves session options against those
- * services, and finally creates the AgentSession.
+ * 工厂函数捕获进程级的固定输入，为有效 cwd 重建 cwd 绑定的服务，
+ * 基于这些服务解析会话选项，最终创建 AgentSession。
  */
 export type CreateAgentSessionRuntimeFactory = (options: {
 	cwd: string;
@@ -35,7 +58,7 @@ export type CreateAgentSessionRuntimeFactory = (options: {
 }) => Promise<CreateAgentSessionRuntimeResult>;
 
 /**
- * Thrown when /import references a JSONL file path that does not exist.
+ * 当 /import 引用的 JSONL 文件路径不存在时抛出。
  */
 export class SessionImportFileNotFoundError extends Error {
 	readonly filePath: string;
@@ -59,11 +82,10 @@ function extractUserMessageText(content: string | Array<{ type: string; text?: s
 }
 
 /**
- * Owns the current AgentSession plus its cwd-bound services.
+ * 持有当前 AgentSession 及其 cwd 绑定的服务。
  *
- * Session replacement methods tear down the current runtime first, then create
- * and apply the next runtime. If creation fails, the error is propagated to the
- * caller. The caller is responsible for user-facing error handling.
+ * 会话替换方法会先销毁当前运行时，然后创建并应用下一个运行时。
+ * 如果创建失败，错误会传播给调用方。调用方负责面向用户的错误处理。
  */
 export class AgentSessionRuntime {
 	private rebindSession?: (session: AgentSession) => Promise<void>;
@@ -113,12 +135,10 @@ export class AgentSessionRuntime {
 	}
 
 	/**
-	 * Set a synchronous callback that runs after `session_shutdown` handlers finish
-	 * but before the current session is invalidated.
+	 * 设置在 session_shutdown 处理器完成后、当前会话失效前运行的同步回调。
 	 *
-	 * This is for host-owned UI teardown that must not yield to the event loop,
-	 * such as detaching extension-provided TUI components before the old extension
-	 * context becomes stale.
+	 * 用于宿主拥有的 UI 拆卸操作（不能让出事件循环），
+	 * 如在旧扩展上下文失效前分离扩展提供的 TUI 组件。
 	 */
 	setBeforeSessionInvalidate(beforeSessionInvalidate?: () => void): void {
 		this.beforeSessionInvalidate = beforeSessionInvalidate;
@@ -331,11 +351,11 @@ export class AgentSessionRuntime {
 	}
 
 	/**
-	 * Import a session JSONL file and switch runtime state to the imported session.
+	 * 导入会话 JSONL 文件并将运行时状态切换到导入的会话。
 	 *
-	 * @returns `{ cancelled: true }` when cancelled by `session_before_switch`, otherwise `{ cancelled: false }`.
-	 * @throws {SessionImportFileNotFoundError} When the input path does not exist.
-	 * @throws {MissingSessionCwdError} When the imported session cwd cannot be resolved and no override is provided.
+	 * @returns 当被 session_before_switch 取消时返回 `{ cancelled: true }`，否则返回 `{ cancelled: false }`
+	 * @throws {SessionImportFileNotFoundError} 当输入路径不存在时
+	 * @throws {MissingSessionCwdError} 当导入的会话 cwd 无法解析且未提供覆盖时
 	 */
 	async importFromJsonl(inputPath: string, cwdOverride?: string): Promise<{ cancelled: boolean }> {
 		const resolvedPath = resolvePath(inputPath);
@@ -385,10 +405,10 @@ export class AgentSessionRuntime {
 }
 
 /**
- * Create the initial runtime from a runtime factory and initial session target.
+ * 从运行时工厂和初始会话目标创建初始运行时。
  *
- * The same factory is stored on the returned AgentSessionRuntime and reused for
- * later /new, /resume, /fork, and import flows.
+ * 同一个工厂函数存储在返回的 AgentSessionRuntime 上，供后续的
+ * /new、/resume、/fork 和 import 流程复用。
  */
 export async function createAgentSessionRuntime(
 	createRuntime: CreateAgentSessionRuntimeFactory,

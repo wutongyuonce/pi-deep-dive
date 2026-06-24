@@ -1,3 +1,25 @@
+/**
+ * 文件读取工具 (read.ts)
+ *
+ * 本文件实现了文件读取工具，允许 Agent 读取文本文件和图片文件的内容。
+ *
+ * 提供的能力：
+ *   - 读取文本文件，支持 offset/limit 分页读取
+ *   - 读取图片文件（jpg/png/gif/webp），自动调整大小后作为附件返回
+ *   - 输出截断：通过 truncateHead 保持头部输出，超限时提供续读 offset 提示
+ *   - TUI 渲染：支持紧凑模式（SKILL.md、AGENTS.md 等特殊文件折叠显示）
+ *   - 语法高亮：根据文件扩展名自动高亮显示代码
+ *
+ * 调用链路：index.ts createReadTool → createReadToolDefinition → wrapToolDefinition
+ * 依赖模块：
+ *   - path-utils.ts：路径解析（resolveReadPathAsync，macOS 兼容）
+ *   - truncate.ts：头部截断（truncateHead）
+ *   - render-utils.ts：文本渲染辅助
+ *   - tool-definition-wrapper.ts：ToolDef → AgentTool 包装
+ *   - utils/image-resize.ts：图片调整大小
+ *   - utils/mime.ts：图片 MIME 类型检测
+ */
+
 import { basename, dirname, isAbsolute, relative, resolve as resolvePath, sep } from "node:path";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import type { Api, ImageContent, Model, TextContent } from "@earendil-works/pi-ai";
@@ -17,6 +39,7 @@ import { getTextOutput, invalidArgText, replaceTabs, shortenPath, str } from "./
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
 import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize, type TruncationResult, truncateHead } from "./truncate.ts";
 
+/** read 工具的输入参数 schema：文件路径 + 可选的 offset/limit 分页参数 */
 const readSchema = Type.Object({
 	path: Type.String({ description: "Path to the file to read (relative or absolute)" }),
 	offset: Type.Optional(Type.Number({ description: "Line number to start reading from (1-indexed)" })),
@@ -25,45 +48,53 @@ const readSchema = Type.Object({
 
 export type ReadToolInput = Static<typeof readSchema>;
 
+/** read 工具执行结果的附加详情 */
 export interface ReadToolDetails {
+	/** 截断信息（如有） */
 	truncation?: TruncationResult;
 }
 
+/** 紧凑模式下文件的分类，决定 TUI 中的折叠显示方式 */
 interface CompactReadClassification {
 	kind: "docs" | "resource" | "skill";
 	label: string;
 }
 
+/** 需要以紧凑模式显示的资源文件名集合 */
 const COMPACT_RESOURCE_FILE_NAMES = new Set(["AGENTS.md", "AGENTS.MD", "CLAUDE.md", "CLAUDE.MD"]);
 
 /**
- * Pluggable operations for the read tool.
- * Override these to delegate file reading to remote systems (for example SSH).
+ * read 工具的可插拔操作接口。
+ * 覆盖这些方法可将文件读取委托到远程系统（如 SSH）。
  */
 export interface ReadOperations {
-	/** Read file contents as a Buffer */
+	/** 读取文件内容为 Buffer */
 	readFile: (absolutePath: string) => Promise<Buffer>;
-	/** Check if file is readable (throw if not) */
+	/** 检查文件是否可读（不可读时抛出异常） */
 	access: (absolutePath: string) => Promise<void>;
-	/** Detect image MIME type, return null or undefined for non-images */
+	/** 检测图片 MIME 类型，非图片返回 null 或 undefined */
 	detectImageMimeType?: (absolutePath: string) => Promise<string | null | undefined>;
 }
 
+/** 默认的本地文件系统读取操作 */
 const defaultReadOperations: ReadOperations = {
 	readFile: (path) => fsReadFile(path),
 	access: (path) => fsAccess(path, constants.R_OK),
 	detectImageMimeType: detectSupportedImageMimeTypeFromFile,
 };
 
+/** read 工具的配置选项 */
 export interface ReadToolOptions {
-	/** Whether to auto-resize images to 2000x2000 max. Default: true */
+	/** 是否自动调整图片大小到 2000x2000 以内，默认 true */
 	autoResizeImages?: boolean;
-	/** Custom operations for file reading. Default: local filesystem */
+	/** 自定义文件读取操作，默认使用本地文件系统 */
 	operations?: ReadOperations;
 }
 
+/** read 工具渲染用的参数类型 */
 type ReadRenderArgs = { path?: string; file_path?: string; offset?: number; limit?: number };
 
+/** 格式化行范围显示（如 ":10-50"） */
 function formatReadLineRange(args: ReadRenderArgs | undefined, theme: Theme): string {
 	if (args?.offset === undefined && args?.limit === undefined) return "";
 	const startLine = args.offset ?? 1;
@@ -71,6 +102,7 @@ function formatReadLineRange(args: ReadRenderArgs | undefined, theme: Theme): st
 	return theme.fg("warning", `:${startLine}${endLine ? `-${endLine}` : ""}`);
 }
 
+/** 格式化 read 工具调用的显示文本 */
 function formatReadCall(args: ReadRenderArgs | undefined, theme: Theme): string {
 	const rawPath = str(args?.file_path ?? args?.path);
 	const path = rawPath !== null ? shortenPath(rawPath) : null;
@@ -79,6 +111,7 @@ function formatReadCall(args: ReadRenderArgs | undefined, theme: Theme): string 
 	return `${theme.fg("toolTitle", theme.bold("read"))} ${pathDisplay}${formatReadLineRange(args, theme)}`;
 }
 
+/** 去除行数组末尾的空行 */
 function trimTrailingEmptyLines(lines: string[]): string[] {
 	let end = lines.length;
 	while (end > 0 && lines[end - 1] === "") {
@@ -87,6 +120,10 @@ function trimTrailingEmptyLines(lines: string[]): string[] {
 	return lines.slice(0, end);
 }
 
+/**
+ * 获取当前模型不支持图片时的提示信息。
+ * 如果模型支持图片输入则返回 undefined。
+ */
 function getNonVisionImageNote(model: Model<Api> | undefined): string | undefined {
 	if (!model || model.input.includes("image")) {
 		return undefined;
@@ -94,10 +131,15 @@ function getNonVisionImageNote(model: Model<Api> | undefined): string | undefine
 	return "[Current model does not support images. The image will be omitted from this request.]";
 }
 
+/** 将路径分隔符统一为 POSIX 格式（/） */
 function toPosixPath(filePath: string): string {
 	return filePath.split(sep).join("/");
 }
 
+/**
+ * 检查路径是否属于 pi 文档（README.md、docs/、examples/ 下的文件）。
+ * 用于紧凑模式下简化文档文件的显示。
+ */
 function getPiDocsClassification(absolutePath: string): CompactReadClassification | undefined {
 	const packageRoot = dirname(getReadmePath());
 	const relativePath = relative(resolvePath(packageRoot), resolvePath(absolutePath));
@@ -117,6 +159,10 @@ function getPiDocsClassification(absolutePath: string): CompactReadClassificatio
 	return undefined;
 }
 
+/**
+ * 获取文件的紧凑显示分类。
+ * SKILL.md、文档文件、资源文件（AGENTS.md 等）使用紧凑模式显示。
+ */
 function getCompactReadClassification(
 	args: ReadRenderArgs | undefined,
 	cwd: string,
@@ -140,6 +186,7 @@ function getCompactReadClassification(
 	return undefined;
 }
 
+/** 格式化紧凑模式下 read 工具调用的显示文本 */
 function formatCompactReadCall(
 	classification: CompactReadClassification,
 	args: ReadRenderArgs | undefined,
@@ -164,6 +211,7 @@ function formatCompactReadCall(
 	);
 }
 
+/** 格式化 read 工具结果的显示文本，包含语法高亮和截断信息 */
 function formatReadResult(
 	args: ReadRenderArgs | undefined,
 	result: { content: (TextContent | ImageContent)[]; details?: ReadToolDetails },
@@ -203,6 +251,10 @@ function formatReadResult(
 	return text;
 }
 
+/**
+ * 创建 read 工具定义。
+ * 包含工具的 schema、描述、执行逻辑和 TUI 渲染器。
+ */
 export function createReadToolDefinition(
 	cwd: string,
 	options?: ReadToolOptions,
@@ -240,7 +292,7 @@ export function createReadToolDefinition(
 						try {
 							const absolutePath = await resolveReadPathAsync(path, cwd);
 							if (aborted) return;
-							// Check if file exists and is readable.
+							// 检查文件是否存在且可读
 							await ops.access(absolutePath);
 							if (aborted) return;
 							const mimeType = ops.detectImageMimeType ? await ops.detectImageMimeType(absolutePath) : undefined;
@@ -248,10 +300,10 @@ export function createReadToolDefinition(
 							let details: ReadToolDetails | undefined;
 							const nonVisionImageNote = getNonVisionImageNote(ctx?.model);
 							if (mimeType) {
-								// Read image as binary.
+								// 读取图片为二进制数据
 								const buffer = await ops.readFile(absolutePath);
 								if (autoResizeImages) {
-									// Resize image if needed before sending it back to the model.
+									// 需要时调整图片大小后再返回给模型
 									const resized = await resizeImage(buffer, mimeType);
 									if (!resized) {
 										let textNote = `Read image file [${mimeType}]\n[Image omitted: could not be resized below the inline image size limit.]`;
@@ -276,21 +328,21 @@ export function createReadToolDefinition(
 									];
 								}
 							} else {
-								// Read text content.
+								// 读取文本内容
 								const buffer = await ops.readFile(absolutePath);
 								const textContent = buffer.toString("utf-8");
 								const allLines = textContent.split("\n");
 								const totalFileLines = allLines.length;
-								// Apply offset if specified. Convert from 1-indexed input to 0-indexed array access.
+								// 应用 offset（从 1-indexed 输入转换为 0-indexed 数组访问）
 								const startLine = offset ? Math.max(0, offset - 1) : 0;
 								const startLineDisplay = startLine + 1;
-								// Check if offset is out of bounds.
+								// 检查 offset 是否超出文件末尾
 								if (startLine >= allLines.length) {
 									throw new Error(`Offset ${offset} is beyond end of file (${allLines.length} lines total)`);
 								}
 								let selectedContent: string;
 								let userLimitedLines: number | undefined;
-								// If limit is specified by the user, honor it first. Otherwise truncateHead decides.
+								// 如果用户指定了 limit，优先使用；否则由 truncateHead 决定截断
 								if (limit !== undefined) {
 									const endLine = Math.min(startLine + limit, allLines.length);
 									selectedContent = allLines.slice(startLine, endLine).join("\n");
@@ -298,16 +350,16 @@ export function createReadToolDefinition(
 								} else {
 									selectedContent = allLines.slice(startLine).join("\n");
 								}
-								// Apply truncation, respecting both line and byte limits.
+								// 应用截断，同时考虑行数和字节限制
 								const truncation = truncateHead(selectedContent);
 								let outputText: string;
 								if (truncation.firstLineExceedsLimit) {
-									// First line alone exceeds the byte limit. Point the model at a bash fallback.
+									// 第一行就超过字节限制，引导模型使用 bash 回退方案
 									const firstLineSize = formatSize(Buffer.byteLength(allLines[startLine], "utf-8"));
 									outputText = `[Line ${startLineDisplay} is ${firstLineSize}, exceeds ${formatSize(DEFAULT_MAX_BYTES)} limit. Use bash: sed -n '${startLineDisplay}p' ${path} | head -c ${DEFAULT_MAX_BYTES}]`;
 									details = { truncation };
 								} else if (truncation.truncated) {
-									// Truncation occurred. Build an actionable continuation notice.
+									// 发生截断，构建可操作的续读提示
 									const endLineDisplay = startLineDisplay + truncation.outputLines - 1;
 									const nextOffset = endLineDisplay + 1;
 									outputText = truncation.content;
@@ -318,12 +370,12 @@ export function createReadToolDefinition(
 									}
 									details = { truncation };
 								} else if (userLimitedLines !== undefined && startLine + userLimitedLines < allLines.length) {
-									// User-specified limit stopped early, but the file still has more content.
+									// 用户指定的 limit 提前停止，但文件仍有更多内容
 									const remaining = allLines.length - (startLine + userLimitedLines);
 									const nextOffset = startLine + userLimitedLines + 1;
 									outputText = `${truncation.content}\n\n[${remaining} more lines in file. Use offset=${nextOffset} to continue.]`;
 								} else {
-									// No truncation and no remaining user-limited content.
+									// 无截断且无剩余用户限制内容
 									outputText = truncation.content;
 								}
 								content = [{ type: "text", text: outputText }];
@@ -358,6 +410,7 @@ export function createReadToolDefinition(
 	};
 }
 
+/** 创建 read 工具实例，通过 wrapToolDefinition 将 ToolDef 包装为 AgentTool */
 export function createReadTool(cwd: string, options?: ReadToolOptions): AgentTool<typeof readSchema> {
 	return wrapToolDefinition(createReadToolDefinition(cwd, options));
 }

@@ -1,3 +1,25 @@
+/**
+ * 资源加载器模块
+ *
+ * 文件定位：coding-agent 的统一资源加载与管理层。
+ *
+ * 功能概述：
+ * - 集中管理扩展、技能、提示模板、主题和上下文文件（AGENTS.md）的加载
+ * - 通过 package-manager.ts 解析包来源，合并用户级、项目级和 CLI 指定的资源
+ * - 支持资源的热重载（/reload 命令触发）
+ * - 处理资源冲突检测（同名资源的去重与诊断）
+ * - 支持扩展提供的额外资源路径（extendResources）
+ *
+ * 提供：
+ * - ResourceLoader 接口：统一的资源访问接口
+ * - DefaultResourceLoader：默认实现，协调所有资源的发现、加载和缓存
+ * - loadProjectContextFiles()：从 cwd 向上查找 AGENTS.md/CLAUDE.md 上下文文件
+ *
+ * 调用链路：
+ *   应用启动 → DefaultResourceLoader.reload() → packageManager.resolve() → 各资源加载器
+ *   扩展运行时 → extendResources() → 追加扩展提供的资源路径
+ *   /reload 命令 → reload() → 重新加载所有资源
+ */
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join, resolve, sep } from "node:path";
 import chalk from "chalk";
@@ -330,7 +352,7 @@ export class DefaultResourceLoader implements ResourceLoader {
 		this.extensionPromptSourceInfos = new Map();
 		this.extensionThemeSourceInfos = new Map();
 
-		// Helper to extract enabled paths and store metadata
+		// 辅助函数：提取已启用的路径并存储元数据
 		const getEnabledResources = (
 			resources: Array<{ path: string; enabled: boolean; metadata: PathMetadata }>,
 		): Array<{ path: string; enabled: boolean; metadata: PathMetadata }> => {
@@ -374,7 +396,7 @@ export class DefaultResourceLoader implements ResourceLoader {
 
 		const enabledSkills = enabledSkillResources.map(mapSkillPath);
 
-		// Add CLI paths metadata
+		// 添加 CLI 路径的元数据
 		for (const r of cliExtensionPaths.extensions) {
 			if (!metadataByPath.has(r.path)) {
 				metadataByPath.set(r.path, { source: "cli", scope: "temporary", origin: "top-level" });
@@ -400,8 +422,8 @@ export class DefaultResourceLoader implements ResourceLoader {
 		extensionsResult.extensions.push(...inlineExtensions.extensions);
 		extensionsResult.errors.push(...inlineExtensions.errors);
 
-		// Detect extension conflicts (tools, commands, flags with same names from different extensions)
-		// Keep all extensions loaded. Conflicts are reported as diagnostics, and precedence is handled by load order.
+		// 检测扩展冲突（不同扩展注册了同名工具、命令或标志）
+		// 保留所有已加载的扩展。冲突作为诊断报告，优先级由加载顺序决定。
 		const conflicts = this.detectExtensionConflicts(extensionsResult.extensions);
 		for (const conflict of conflicts) {
 			extensionsResult.errors.push({ path: conflict.path, error: conflict.message });
@@ -890,12 +912,12 @@ export class DefaultResourceLoader implements ResourceLoader {
 	private detectExtensionConflicts(extensions: Extension[]): Array<{ path: string; message: string }> {
 		const conflicts: Array<{ path: string; message: string }> = [];
 
-		// Track which extension registered each tool and flag
+		// 跟踪每个工具和标志由哪个扩展注册
 		const toolOwners = new Map<string, string>();
 		const flagOwners = new Map<string, string>();
 
 		for (const ext of extensions) {
-			// Check tools
+			// 检查工具冲突
 			for (const toolName of ext.tools.keys()) {
 				const existingOwner = toolOwners.get(toolName);
 				if (existingOwner && existingOwner !== ext.path) {
@@ -908,7 +930,7 @@ export class DefaultResourceLoader implements ResourceLoader {
 				}
 			}
 
-			// Check flags
+			// 检查标志冲突
 			for (const flagName of ext.flags.keys()) {
 				const existingOwner = flagOwners.get(flagName);
 				if (existingOwner && existingOwner !== ext.path) {

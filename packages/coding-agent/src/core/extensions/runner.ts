@@ -1,5 +1,31 @@
 /**
- * Extension runner - executes extensions and manages their lifecycle.
+ * 扩展运行器
+ *
+ * 作用/定位：扩展系统的核心运行时，负责管理扩展的完整生命周期。
+ * 提供：扩展事件分发、上下文创建、工具/命令/快捷键管理、provider 注册。
+ *
+ * 核心类 ExtensionRunner 的职责：
+ * - bindCore()    — 将宿主（session-manager 等）的真实操作注入共享运行时
+ * - emit*()       — 向所有已注册的扩展分发各类事件（通用 emit + 专用 emitXxx）
+ * - createContext() / createCommandContext() — 为事件处理器和工具执行创建上下文
+ * - 管理工具、命令、快捷键、flag 的注册与冲突检测
+ *
+ * 事件分发机制：
+ * - 通用 emit()：处理大多数事件类型，支持 session_before_* 类事件的取消操作
+ * - emitToolResult()：工具结果事件，支持链式修改（content/details/isError）
+ * - emitToolCall()：工具调用事件，支持阻止执行
+ * - emitUserBash()：用户 bash 命令事件
+ * - emitContext()：LLM 上下文事件，扩展可修改消息列表
+ * - emitMessageEnd()：消息结束事件，可替换最终消息
+ * - emitBeforeProviderRequest()：Provider 请求前，可替换请求体
+ * - emitBeforeAgentStart()：Agent 启动前，可注入消息和修改系统提示词
+ * - emitResourcesDiscover()：资源发现事件
+ * - emitInput()：用户输入事件，支持链式变换和短路处理
+ *
+ * 上下文创建：createContext() 使用属性描述符实现惰性求值，
+ * 确保扩展每次访问 ctx 都能获得最新值，并检查运行时是否已过期。
+ *
+ * 被谁调用：session-manager、agent-session、交互模式启动流程。
  */
 
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
@@ -57,8 +83,8 @@ import type {
 	UserBashEventResult,
 } from "./types.ts";
 
-// Extension shortcuts compete with canonical keybinding ids from keybindings.json.
-// Only editor-global shortcuts are reserved here. Picker-specific bindings are not.
+// 扩展快捷键会与 keybindings.json 中的标准快捷键 ID 竞争。
+// 仅保留编辑器全局级别的快捷键，选择器（picker）特定的绑定不受限制。
 const RESERVED_KEYBINDINGS_FOR_EXTENSION_CONFLICTS = [
 	"app.interrupt",
 	"app.clear",
@@ -81,6 +107,11 @@ const RESERVED_KEYBINDINGS_FOR_EXTENSION_CONFLICTS = [
 
 type BuiltInKeyBindings = Partial<Record<KeyId, { keybinding: string; restrictOverride: boolean }>>;
 
+/**
+ * 根据已解析的键盘绑定配置，构建内置快捷键映射。
+ * 返回按键 → { 快捷键ID, 是否禁止覆盖 } 的映射。
+ * 当多个动作绑定同一按键时，保留 reserved 优先的动作。
+ */
 const buildBuiltinKeybindings = (resolvedKeybindings: KeybindingsConfig): BuiltInKeyBindings => {
 	const builtinKeybindings = {} as BuiltInKeyBindings;
 	for (const [keybinding, keys] of Object.entries(resolvedKeybindings)) {
@@ -89,8 +120,8 @@ const buildBuiltinKeybindings = (resolvedKeybindings: KeybindingsConfig): BuiltI
 		const restrictOverride = (RESERVED_KEYBINDINGS_FOR_EXTENSION_CONFLICTS as readonly string[]).includes(keybinding);
 		for (const key of keyList) {
 			const normalizedKey = key.toLowerCase() as KeyId;
-			// If multiple actions bind the same key, the reserved action wins so extensions
-			// remain blocked by reserved shortcuts regardless of iteration order.
+			// 当多个动作绑定同一按键时，保留 reserved 优先的动作，确保扩展快捷键
+			// 始终被保留的内置快捷键阻止，不受遍历顺序影响。
 			const existing = builtinKeybindings[normalizedKey];
 			if (existing?.restrictOverride && !restrictOverride) continue;
 			builtinKeybindings[normalizedKey] = {
@@ -102,15 +133,15 @@ const buildBuiltinKeybindings = (resolvedKeybindings: KeybindingsConfig): BuiltI
 	return builtinKeybindings;
 };
 
-/** Combined result from all before_agent_start handlers */
+/** before_agent_start 事件所有处理器的合并结果 */
 interface BeforeAgentStartCombinedResult {
 	messages?: NonNullable<BeforeAgentStartEventResult["message"]>[];
 	systemPrompt?: string;
 }
 
 /**
- * Events handled by the generic emit() method.
- * Events with dedicated emitXxx() methods are excluded for stronger type safety.
+ * 由通用 emit() 方法处理的事件类型。
+ * 拥有专用 emitXxx() 方法的事件被排除，以获得更强的类型安全。
  */
 type RunnerEmitEvent = Exclude<
 	ExtensionEvent,
@@ -146,36 +177,43 @@ type RunnerEmitResult<TEvent extends RunnerEmitEvent> = TEvent extends { type: "
 				? SessionBeforeTreeResult | undefined
 				: undefined;
 
+/** 扩展错误监听器类型 */
 export type ExtensionErrorListener = (error: ExtensionError) => void;
 
+/** 新建会话处理器 */
 export type NewSessionHandler = (options?: {
 	parentSession?: string;
 	setup?: (sessionManager: SessionManager) => Promise<void>;
 	withSession?: (ctx: ReplacedSessionContext) => Promise<void>;
 }) => Promise<{ cancelled: boolean }>;
 
+/** 分叉会话处理器 */
 export type ForkHandler = (
 	entryId: string,
 	options?: { position?: "before" | "at"; withSession?: (ctx: ReplacedSessionContext) => Promise<void> },
 ) => Promise<{ cancelled: boolean }>;
 
+/** 导航会话树处理器 */
 export type NavigateTreeHandler = (
 	targetId: string,
 	options?: { summarize?: boolean; customInstructions?: string; replaceInstructions?: boolean; label?: string },
 ) => Promise<{ cancelled: boolean }>;
 
+/** 切换会话处理器 */
 export type SwitchSessionHandler = (
 	sessionPath: string,
 	options?: { withSession?: (ctx: ReplacedSessionContext) => Promise<void> },
 ) => Promise<{ cancelled: boolean }>;
 
+/** 重载处理器 */
 export type ReloadHandler = () => Promise<void>;
 
+/** 关闭处理器 */
 export type ShutdownHandler = () => void;
 
 /**
- * Helper function to emit session_shutdown event to extensions.
- * Returns true if the event was emitted, false if there were no handlers.
+ * 向扩展发送 session_shutdown 事件的辅助函数。
+ * 如果有处理器则发送事件并返回 true，否则返回 false。
  */
 export async function emitSessionShutdownEvent(
 	extensionRunner: ExtensionRunner,
@@ -188,6 +226,7 @@ export async function emitSessionShutdownEvent(
 	return false;
 }
 
+/** 无操作的 UI 上下文桩实现，用于无 UI 模式（如 print/RPC） */
 const noOpUIContext: ExtensionUIContext = {
 	select: async () => undefined,
 	confirm: async () => false,
@@ -221,6 +260,16 @@ const noOpUIContext: ExtensionUIContext = {
 	setToolsExpanded: () => {},
 };
 
+/**
+ * 扩展运行器核心类。
+ *
+ * 职责：
+ * 1. 管理所有已加载扩展的生命周期
+ * 2. 将宿主操作（bindCore）注入到共享运行时中
+ * 3. 分发各类事件到扩展的事件处理器
+ * 4. 管理工具、命令、快捷键、flag 的注册与查询
+ * 5. 创建 ExtensionContext / ExtensionCommandContext 供事件处理器使用
+ */
 export class ExtensionRunner {
 	private extensions: Extension[];
 	private runtime: ExtensionRuntime;
@@ -263,6 +312,21 @@ export class ExtensionRunner {
 		this.modelRegistry = modelRegistry;
 	}
 
+	/**
+	 * 将宿主的真实操作绑定到共享运行时。
+	 * 替换加载阶段的桩方法，并刷新在加载期间排队的 provider 注册。
+	 * 调用后 provider 注册/注销立即生效，无需 /reload。
+	 *
+	 * 实现步骤：
+	 * 1. 将 actions 属性复制到共享运行时上（所有扩展 API 引用此运行时）
+	 * 2. 设置上下文操作函数（getModel、isIdle 等）
+	 * 3. 刷新加载期间排队的 provider 注册请求
+	 * 4. 替换 provider 注册/注销桩方法为直接操作 ModelRegistry
+	 *
+	 * @param actions - 操作方法（sendMessage、setModel 等）
+	 * @param contextActions - 上下文方法（getModel、isIdle、abort 等）
+	 * @param providerActions - 可选的 provider 注册/注销覆盖
+	 */
 	bindCore(
 		actions: ExtensionActions,
 		contextActions: ExtensionContextActions,
@@ -335,6 +399,11 @@ export class ExtensionRunner {
 		};
 	}
 
+	/**
+	 * 绑定命令上下文操作（waitForIdle、newSession、fork 等）。
+	 * 仅在交互模式下需要，使得扩展命令处理器能够调用这些操作方法。
+	 * 传入 undefined 时重置为无操作桩。
+	 */
 	bindCommandContext(actions?: ExtensionCommandContextActions): void {
 		if (actions) {
 			this.waitForIdleFn = actions.waitForIdle;
@@ -354,23 +423,27 @@ export class ExtensionRunner {
 		this.reloadHandler = async () => {};
 	}
 
+	/** 设置 UI 上下文（print/RPC 模式为 noOpUIContext）。 */
 	setUIContext(uiContext?: ExtensionUIContext): void {
 		this.uiContext = uiContext ?? noOpUIContext;
 	}
 
+	/** 获取当前 UI 上下文。 */
 	getUIContext(): ExtensionUIContext {
 		return this.uiContext;
 	}
 
+	/** UI 是否可用（交互模式下为 true，print/RPC 模式下为 false）。 */
 	hasUI(): boolean {
 		return this.uiContext !== noOpUIContext;
 	}
 
+	/** 获取所有已加载扩展的文件路径。 */
 	getExtensionPaths(): string[] {
 		return this.extensions.map((e) => e.path);
 	}
 
-	/** Get all registered tools from all extensions (first registration per name wins). */
+	/** 获取所有已注册的扩展工具（同名工具以先注册者为准）。 */
 	getAllRegisteredTools(): RegisteredTool[] {
 		const toolsByName = new Map<string, RegisteredTool>();
 		for (const ext of this.extensions) {
@@ -383,7 +456,7 @@ export class ExtensionRunner {
 		return Array.from(toolsByName.values());
 	}
 
-	/** Get a tool definition by name. Returns undefined if not found. */
+	/** 根据名称获取工具定义，未找到则返回 undefined。 */
 	getToolDefinition(toolName: string): RegisteredTool["definition"] | undefined {
 		for (const ext of this.extensions) {
 			const tool = ext.tools.get(toolName);
@@ -559,16 +632,16 @@ export class ExtensionRunner {
 	}
 
 	/**
-	 * Request a graceful shutdown. Called by extension tools and event handlers.
-	 * The actual shutdown behavior is provided by the mode via bindExtensions().
+	 * 请求优雅关闭。由扩展工具和事件处理器调用。
+	 * 实际关闭行为由各模式通过 bindExtensions() 提供。
 	 */
 	shutdown(): void {
 		this.shutdownHandler();
 	}
 
 	/**
-	 * Create an ExtensionContext for use in event handlers and tool execution.
-	 * Context values are resolved at call time, so changes via bindCore/bindUI are reflected.
+	 * 创建 ExtensionContext，供事件处理器和工具执行使用。
+	 * 上下文值在调用时动态解析，因此通过 bindCore/bindUI 所做的更改会实时生效。
 	 */
 	createContext(): ExtensionContext {
 		const runner = this;
@@ -1035,7 +1108,7 @@ export class ExtensionRunner {
 		return { skillPaths, promptPaths, themePaths };
 	}
 
-	/** Emit input event. Transforms chain, "handled" short-circuits. */
+	/** 发送 input 事件。输入文本经过链式变换，遇到 "handled" 结果时短路返回。 */
 	async emitInput(text: string, images: ImageContent[] | undefined, source: InputSource): Promise<InputEventResult> {
 		const ctx = this.createContext();
 		let currentText = text;

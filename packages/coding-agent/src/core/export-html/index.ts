@@ -1,3 +1,22 @@
+/**
+ * 会话 HTML 导出模块
+ *
+ * 作用/定位：将会话数据导出为独立的 HTML 文件，支持主题、自定义工具渲染。
+ * 提供：exportSessionToHtml()（TUI /export 命令）、exportFromFile()（CLI 导出任意会话文件）。
+ *
+ * 模块结构：
+ * - 会话数据收集（SessionManager → SessionData）
+ * - 自定义工具预渲染（ToolHtmlRenderer → RenderedToolHtml）
+ * - 主题变量生成（generateThemeVars / deriveExportColors）
+ * - HTML 模板拼接（generateHtml：CSS + JS + 数据）
+ *
+ * 典型调用链路：
+ *   exportSessionToHtml() → preRenderCustomTools() → generateHtml() → writeFileSync()
+ *   exportFromFile() → SessionManager.open() → generateHtml() → writeFileSync()
+ *
+ * 被谁调用：TUI /export 命令、CLI export 子命令
+ */
+
 import type { AgentState } from "@earendil-works/pi-agent-core";
 import { existsSync, readFileSync, writeFileSync } from "fs";
 import { basename, join } from "path";
@@ -9,13 +28,13 @@ import type { SessionEntry } from "../session-manager.ts";
 import { SessionManager } from "../session-manager.ts";
 
 /**
- * Interface for rendering custom tools to HTML.
- * Used by agent-session to pre-render extension tool output.
+ * 自定义工具 HTML 渲染接口。
+ * 由 agent-session 用于预渲染扩展工具输出。
  */
 export interface ToolHtmlRenderer {
-	/** Render a tool call to HTML. Returns undefined if tool has no custom renderer. */
+	/** 将工具调用渲染为 HTML。工具无自定义渲染器时返回 undefined。 */
 	renderCall(toolCallId: string, toolName: string, args: unknown): string | undefined;
-	/** Render a tool result to HTML. Returns collapsed/expanded or undefined if tool has no custom renderer. */
+	/** 将工具结果渲染为 HTML。返回折叠/展开版本，工具无自定义渲染器时返回 undefined。 */
 	renderResult(
 		toolCallId: string,
 		toolName: string,
@@ -25,7 +44,7 @@ export interface ToolHtmlRenderer {
 	): { collapsed?: string; expanded?: string } | undefined;
 }
 
-/** Pre-rendered HTML for a custom tool call and result */
+/** 自定义工具调用和结果的预渲染 HTML */
 interface RenderedToolHtml {
 	callHtml?: string;
 	resultHtmlCollapsed?: string;
@@ -35,11 +54,15 @@ interface RenderedToolHtml {
 export interface ExportOptions {
 	outputPath?: string;
 	themeName?: string;
-	/** Optional tool renderer for custom tools */
+	/** 可选的自定义工具渲染器 */
 	toolRenderer?: ToolHtmlRenderer;
 }
 
-/** Parse a color string to RGB values. Supports hex (#RRGGBB) and rgb(r,g,b) formats. */
+/**
+ * 将颜色字符串解析为 RGB 值。支持十六进制（#RRGGBB）和 rgb(r,g,b) 格式。
+ *
+ * 被谁调用：getLuminance()、adjustBrightness()、deriveExportColors()
+ */
 function parseColor(color: string): { r: number; g: number; b: number } | undefined {
 	const hexMatch = color.match(/^#([0-9a-fA-F]{2})([0-9a-fA-F]{2})([0-9a-fA-F]{2})$/);
 	if (hexMatch) {
@@ -60,7 +83,13 @@ function parseColor(color: string): { r: number; g: number; b: number } | undefi
 	return undefined;
 }
 
-/** Calculate relative luminance of a color (0-1, higher = lighter). */
+/**
+ * 计算颜色的相对亮度（0-1，值越大越亮）。
+ * 使用标准亮度公式：0.2126*R + 0.7152*G + 0.0722*B。
+ * 用于判断主题是深色还是浅色模式。
+ *
+ * 被谁调用：deriveExportColors()
+ */
 function getLuminance(r: number, g: number, b: number): number {
 	const toLinear = (c: number) => {
 		const s = c / 255;
@@ -69,7 +98,10 @@ function getLuminance(r: number, g: number, b: number): number {
 	return 0.2126 * toLinear(r) + 0.7152 * toLinear(g) + 0.0722 * toLinear(b);
 }
 
-/** Adjust color brightness. Factor > 1 lightens, < 1 darkens. */
+/**
+ * 调整颜色亮度。factor > 1 变亮，< 1 变暗。
+ * 被谁调用：deriveExportColors()
+ */
 function adjustBrightness(color: string, factor: number): string {
 	const parsed = parseColor(color);
 	if (!parsed) return color;
@@ -77,7 +109,12 @@ function adjustBrightness(color: string, factor: number): string {
 	return `rgb(${adjust(parsed.r)}, ${adjust(parsed.g)}, ${adjust(parsed.b)})`;
 }
 
-/** Derive export background colors from a base color (e.g., userMessageBg). */
+/**
+ * 从基础颜色（如 userMessageBg）推导导出背景色。
+ * 根据颜色亮度（浅色/深色）采用不同的调整策略。
+ *
+ * 被谁调用：generateThemeVars()、generateHtml()
+ */
 function deriveExportColors(baseColor: string): { pageBg: string; cardBg: string; infoBg: string } {
 	const parsed = parseColor(baseColor);
 	if (!parsed) {
@@ -106,7 +143,10 @@ function deriveExportColors(baseColor: string): { pageBg: string; cardBg: string
 }
 
 /**
- * Generate CSS custom property declarations from theme colors.
+ * 从主题颜色生成 CSS 自定义属性声明。
+ * 优先使用主题显式定义的导出颜色，否则从 userMessageBg 推导。
+ *
+ * 被谁调用：generateHtml()
  */
 function generateThemeVars(themeName?: string): string {
 	const colors = getResolvedThemeColors(themeName);
@@ -115,7 +155,7 @@ function generateThemeVars(themeName?: string): string {
 		lines.push(`--${key}: ${value};`);
 	}
 
-	// Use explicit theme export colors if available, otherwise derive from userMessageBg
+	// 优先使用主题显式定义的导出颜色，否则从 userMessageBg 推导
 	const themeExport = getThemeExportColors(themeName);
 	const userMessageBg = colors.userMessageBg || "#343541";
 	const derivedColors = deriveExportColors(userMessageBg);
@@ -133,12 +173,21 @@ interface SessionData {
 	leafId: string | null;
 	systemPrompt?: string;
 	tools?: Array<Pick<ToolDefinition, "name" | "description" | "parameters">>;
-	/** Pre-rendered HTML for custom tool calls/results, keyed by tool call ID */
+	/** 自定义工具调用/结果的预渲染 HTML，以工具调用 ID 为键 */
 	renderedTools?: Record<string, RenderedToolHtml>;
 }
 
 /**
- * Core HTML generation logic shared by both export functions.
+ * 两个导出函数共用的核心 HTML 生成逻辑。
+ *
+ * 实现步骤：
+ * 1. 读取模板文件（template.html、template.css、template.js）
+ * 2. 读取第三方库（marked.min.js、highlight.min.js）
+ * 3. 生成主题 CSS 变量
+ * 4. 会话数据 Base64 编码后嵌入 HTML
+ * 5. 将占位符替换为实际内容并返回完整 HTML
+ *
+ * 被谁调用：exportSessionToHtml()、exportFromFile()
  */
 function generateHtml(sessionData: SessionData, themeName?: string): string {
 	const templateDir = getExportTemplateDir();
@@ -156,10 +205,10 @@ function generateHtml(sessionData: SessionData, themeName?: string): string {
 	const containerBg = themeExport.cardBg ?? derivedExportColors.cardBg;
 	const infoBg = themeExport.infoBg ?? derivedExportColors.infoBg;
 
-	// Base64 encode session data to avoid escaping issues
+	// 将会话数据 Base64 编码以避免转义问题
 	const sessionDataBase64 = Buffer.from(JSON.stringify(sessionData)).toString("base64");
 
-	// Build the CSS with theme variables injected
+	// 构建注入了主题变量的 CSS
 	const css = templateCss
 		.replace("{{THEME_VARS}}", themeVars)
 		.replace("{{BODY_BG}}", bodyBg)
@@ -174,11 +223,20 @@ function generateHtml(sessionData: SessionData, themeName?: string): string {
 		.replace("{{HIGHLIGHT_JS}}", hljsJs);
 }
 
-/** Tools rendered directly by the HTML template (not pre-rendered via TUI→ANSI→HTML pipeline) */
+/** 由 HTML 模板直接渲染的工具（非通过 TUI→ANSI→HTML 管线预渲染） */
 const TEMPLATE_RENDERED_TOOLS = new Set(["bash", "read", "write", "edit", "ls"]);
 
 /**
- * Pre-render custom tools to HTML using their TUI renderers.
+ * 使用工具的 TUI 渲染器将自定义工具预渲染为 HTML。
+ *
+ * 实现逻辑：
+ * 1. 遍历所有会话条目
+ * 2. 在助手消息中查找非模板渲染的工具调用（非 bash/read/write/edit/ls）
+ * 3. 调用 toolRenderer.renderCall() 渲染工具调用
+ * 4. 查找工具结果，调用 toolRenderer.renderResult() 渲染结果
+ * 5. 以 toolCallId 为键存储预渲染的 HTML
+ *
+ * 被谁调用：exportSessionToHtml()
  */
 function preRenderCustomTools(
 	entries: SessionEntry[],
@@ -190,7 +248,7 @@ function preRenderCustomTools(
 		if (entry.type !== "message") continue;
 		const msg = entry.message;
 
-		// Find tool calls in assistant messages
+		// 在助手消息中查找工具调用
 		if (msg.role === "assistant" && Array.isArray(msg.content)) {
 			for (const block of msg.content) {
 				if (block.type === "toolCall" && !TEMPLATE_RENDERED_TOOLS.has(block.name)) {
@@ -202,10 +260,10 @@ function preRenderCustomTools(
 			}
 		}
 
-		// Find tool results
+		// 查找工具结果
 		if (msg.role === "toolResult" && msg.toolCallId) {
 			const toolName = msg.toolName || "";
-			// Only render if we have a pre-rendered call OR it's not template-rendered
+			// 仅在有预渲染的调用或非模板渲染工具时才渲染
 			const existing = renderedTools[msg.toolCallId];
 			if (existing || !TEMPLATE_RENDERED_TOOLS.has(toolName)) {
 				const rendered = toolRenderer.renderResult(
@@ -230,8 +288,18 @@ function preRenderCustomTools(
 }
 
 /**
- * Export session to HTML using SessionManager and AgentState.
- * Used by TUI's /export command.
+ * 使用 SessionManager 和 AgentState 导出会话为 HTML。
+ * 由 TUI 的 /export 命令调用。
+ *
+ * 实现步骤：
+ * 1. 检查会话文件是否存在
+ * 2. 获取会话条目
+ * 3. 如果提供工具渲染器，预渲染自定义工具
+ * 4. 构建 SessionData 对象
+ * 5. 调用 generateHtml() 生成 HTML
+ * 6. 写入文件并返回路径
+ *
+ * 被谁调用：TUI 的 /export 命令处理器
  */
 export async function exportSessionToHtml(
 	sm: SessionManager,
@@ -250,11 +318,11 @@ export async function exportSessionToHtml(
 
 	const entries = sm.getEntries();
 
-	// Pre-render custom tools if a tool renderer is provided
+	// 如果提供了工具渲染器则预渲染自定义工具
 	let renderedTools: Record<string, RenderedToolHtml> | undefined;
 	if (opts.toolRenderer) {
 		renderedTools = preRenderCustomTools(entries, opts.toolRenderer);
-		// Only include if we actually rendered something
+		// 仅在实际渲染了内容时才包含
 		if (Object.keys(renderedTools).length === 0) {
 			renderedTools = undefined;
 		}
@@ -282,8 +350,18 @@ export async function exportSessionToHtml(
 }
 
 /**
- * Export session file to HTML (standalone, without AgentState).
- * Used by CLI for exporting arbitrary session files.
+ * 将会话文件导出为 HTML（独立模式，无需 AgentState）。
+ * 由 CLI 用于导出任意会话文件。
+ *
+ * 实现步骤：
+ * 1. 解析输入路径
+ * 2. 检查文件存在
+ * 3. 使用 SessionManager.open() 打开会话文件
+ * 4. 构建 SessionData 对象（不含 systemPrompt 和 tools）
+ * 5. 调用 generateHtml() 生成 HTML
+ * 6. 写入文件并返回路径
+ *
+ * 被谁调用：CLI export 子命令
  */
 export async function exportFromFile(inputPath: string, options?: ExportOptions | string): Promise<string> {
 	const opts: ExportOptions = typeof options === "string" ? { outputPath: options } : options || {};

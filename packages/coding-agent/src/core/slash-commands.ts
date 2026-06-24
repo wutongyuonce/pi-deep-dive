@@ -1,20 +1,42 @@
+/**
+ * 斜杠命令定义模块
+ *
+ * 定义了 TUI 交互模式下可用的所有内置斜杠命令（/settings、/model、/login 等）。
+ * 斜杠命令还可以来自扩展、提示词模板和技能，本模块定义了它们的来源类型和信息结构。
+ */
+
 import { APP_NAME } from "../config.ts";
 import type { SourceInfo } from "./source-info.ts";
 
+/** 斜杠命令的来源类型 */
 export type SlashCommandSource = "extension" | "prompt" | "skill";
 
+/**
+ * 斜杠命令信息
+ * 描述一个可用的斜杠命令，包括其名称、描述、来源和来源详情。
+ */
 export interface SlashCommandInfo {
+	/** 命令名称（不含前导斜杠） */
 	name: string;
+	/** 命令描述（可选） */
 	description?: string;
+	/** 命令来源：extension（扩展）、prompt（提示词模板）、skill（技能） */
 	source: SlashCommandSource;
+	/** 来源详情 */
 	sourceInfo: SourceInfo;
 }
 
+/**
+ * 内置斜杠命令定义
+ */
 export interface BuiltinSlashCommand {
+	/** 命令名称 */
 	name: string;
+	/** 命令描述 */
 	description: string;
 }
 
+/** 内置斜杠命令列表 */
 export const BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
 	{ name: "settings", description: "Open settings menu" },
 	{ name: "model", description: "Select model (opens selector UI)" },

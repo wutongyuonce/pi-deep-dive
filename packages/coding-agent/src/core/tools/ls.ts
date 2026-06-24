@@ -1,3 +1,22 @@
+/**
+ * 目录列表工具 (ls.ts)
+ *
+ * 本文件实现了目录列表工具，允许 Agent 查看目录中的文件和子目录。
+ *
+ * 提供的能力：
+ *   - 列出目录内容，按字母顺序排列（大小写不敏感）
+ *   - 目录以 "/" 后缀标识，包含隐藏文件
+ *   - 输出截断：条目数限制（默认 500）+ 字节限制（默认 50KB）
+ *   - TUI 渲染：折叠/展开模式显示目录列表
+ *
+ * 调用链路：index.ts createLsTool → createLsToolDefinition → wrapToolDefinition
+ * 依赖模块：
+ *   - path-utils.ts：路径解析（resolveToCwd、pathExists）
+ *   - truncate.ts：头部截断（truncateHead）
+ *   - render-utils.ts：文本渲染辅助
+ *   - tool-definition-wrapper.ts：ToolDef → AgentTool 包装
+ */
+
 import { readdir as fsReaddir, stat as fsStat } from "node:fs/promises";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { Text } from "@earendil-works/pi-tui";
@@ -10,6 +29,7 @@ import { getTextOutput, invalidArgText, shortenPath, str } from "./render-utils.
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
 import { DEFAULT_MAX_BYTES, formatSize, type TruncationResult, truncateHead } from "./truncate.ts";
 
+/** ls 工具的输入参数 schema：可选的目录路径和条目数限制 */
 const lsSchema = Type.Object({
 	path: Type.Optional(Type.String({ description: "Directory to list (default: current directory)" })),
 	limit: Type.Optional(Type.Number({ description: "Maximum number of entries to return (default: 500)" })),
@@ -19,35 +39,41 @@ export type LsToolInput = Static<typeof lsSchema>;
 
 const DEFAULT_LIMIT = 500;
 
+/** ls 工具执行结果的附加详情 */
 export interface LsToolDetails {
+	/** 截断信息（字节限制触发时） */
 	truncation?: TruncationResult;
+	/** 条目数限制被触发时的限制值 */
 	entryLimitReached?: number;
 }
 
 /**
- * Pluggable operations for the ls tool.
- * Override these to delegate directory listing to remote systems (for example SSH).
+ * ls 工具的可插拔操作接口。
+ * 覆盖这些方法可将目录列表委托到远程系统（如 SSH）。
  */
 export interface LsOperations {
-	/** Check if path exists */
+	/** 检查路径是否存在 */
 	exists: (absolutePath: string) => Promise<boolean> | boolean;
-	/** Get file or directory stats. Throws if not found. */
+	/** 获取文件或目录的统计信息（不存在时抛出异常） */
 	stat: (absolutePath: string) => Promise<{ isDirectory: () => boolean }> | { isDirectory: () => boolean };
-	/** Read directory entries */
+	/** 读取目录条目列表 */
 	readdir: (absolutePath: string) => Promise<string[]> | string[];
 }
 
+/** 默认的本地文件系统目录列表操作 */
 const defaultLsOperations: LsOperations = {
 	exists: pathExists,
 	stat: fsStat,
 	readdir: fsReaddir,
 };
 
+/** ls 工具的配置选项 */
 export interface LsToolOptions {
-	/** Custom operations for directory listing. Default: local filesystem */
+	/** 自定义目录列表操作，默认使用本地文件系统 */
 	operations?: LsOperations;
 }
 
+/** 格式化 ls 工具调用的显示文本 */
 function formatLsCall(
 	args: { path?: string; limit?: number } | undefined,
 	theme: typeof import("../../modes/interactive/theme/theme.ts").theme,
@@ -63,6 +89,7 @@ function formatLsCall(
 	return text;
 }
 
+/** 格式化 ls 工具结果的显示文本 */
 function formatLsResult(
 	result: {
 		content: Array<{ type: string; text?: string; data?: string; mimeType?: string }>;
@@ -96,6 +123,7 @@ function formatLsResult(
 	return text;
 }
 
+/** 创建 ls 工具定义 */
 export function createLsToolDefinition(
 	cwd: string,
 	options?: LsToolOptions,
@@ -128,20 +156,20 @@ export function createLsToolDefinition(
 						const dirPath = resolveToCwd(path || ".", cwd);
 						const effectiveLimit = limit ?? DEFAULT_LIMIT;
 
-						// Check if path exists.
+						// 检查路径是否存在
 						if (!(await ops.exists(dirPath))) {
 							reject(new Error(`Path not found: ${dirPath}`));
 							return;
 						}
 
-						// Check if path is a directory.
+						// 检查路径是否为目录
 						const stat = await ops.stat(dirPath);
 						if (!stat.isDirectory()) {
 							reject(new Error(`Not a directory: ${dirPath}`));
 							return;
 						}
 
-						// Read directory entries.
+						// 读取目录条目
 						let entries: string[];
 						try {
 							entries = await ops.readdir(dirPath);
@@ -150,10 +178,10 @@ export function createLsToolDefinition(
 							return;
 						}
 
-						// Sort alphabetically, case-insensitive.
+						// 按字母顺序排序（大小写不敏感）
 						entries.sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase()));
 
-						// Format entries with directory indicators.
+						// 格式化条目，为目录添加 "/" 后缀标识
 						const results: string[] = [];
 						let entryLimitReached = false;
 						for (const entry of entries) {
@@ -168,7 +196,7 @@ export function createLsToolDefinition(
 								const entryStat = await ops.stat(fullPath);
 								if (entryStat.isDirectory()) suffix = "/";
 							} catch {
-								// Skip entries we cannot stat.
+								// 跳过无法获取统计信息的条目
 								continue;
 							}
 							results.push(entry + suffix);
@@ -182,11 +210,11 @@ export function createLsToolDefinition(
 						}
 
 						const rawOutput = results.join("\n");
-						// Apply byte truncation. There is no separate line limit because entry count is already capped.
+						// 应用字节截断。此处不设行数限制，因为条目数已经限制了行数
 						const truncation = truncateHead(rawOutput, { maxLines: Number.MAX_SAFE_INTEGER });
 						let output = truncation.content;
 						const details: LsToolDetails = {};
-						// Build actionable notices for truncation and entry limits.
+						// 构建截断和条目限制的可操作提示
 						const notices: string[] = [];
 						if (entryLimitReached) {
 							notices.push(`${effectiveLimit} entries limit reached. Use limit=${effectiveLimit * 2} for more`);
@@ -224,6 +252,7 @@ export function createLsToolDefinition(
 	};
 }
 
+/** 创建 ls 工具实例，通过 wrapToolDefinition 将 ToolDef 包装为 AgentTool */
 export function createLsTool(cwd: string, options?: LsToolOptions): AgentTool<typeof lsSchema> {
 	return wrapToolDefinition(createLsToolDefinition(cwd, options));
 }
