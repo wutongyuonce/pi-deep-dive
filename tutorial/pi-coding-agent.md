@@ -55,10 +55,6 @@ await session.prompt("帮我阅读当前项目的入口并解释启动流程");
 - 组装 system prompt
 - 将所有消息和状态写回 session 文件
 
-所以阅读这个包，最重要的心法不是"它又定义了一套新的 agent 协议"，而是：
-
-> **它把下层已有的协议和能力，收束成了一个持续运行的产品工作流。**
-
 ---
 
 ## 整个包的分层图
@@ -115,43 +111,210 @@ await session.prompt("帮我阅读当前项目的入口并解释启动流程");
   - `pi-agent-core` 提供 loop 和 tool runtime
   - `pi-coding-agent` 提供持久化、配置、扩展、UI、CLI、模式切换
 
----
+## 配置文件
 
-## 整包主调用链
+* package.json 是一个 JSON 格式的元数据文件，用于描述 JavaScript 项目的基本信息、依赖关系、构建配置和发布规范。它是 npm（Node Package Manager）生态系统的核心组成部分。
 
-从 `pi` 命令启动到进入交互模式，中间的大链路是：
+  ```json
+  {
+    "name": "@earendil-works/pi-coding-agent",      // npm 包名，发布到 npm 时用这个名字
+    "version": "0.75.5",                            // 当前版本号，遵循 semver（主版本.次版本.补丁）
+    "description": "Coding agent CLI with read, bash, edit, write tools and session management",  // 包的简短描述，npm search 时会显示
+  
+    "type": "module",                               // 使用 ES Modules（import/export）而非 CommonJS（require）
+  
+    "piConfig": {                                   // pi 自定义字段，非 npm 标准，pi 内部读取来确定项目级配置目录名
+      "configDir": ".pi"                            // 项目根目录下的配置文件夹名（如 .pi/settings.json、.pi/AGENTS.md）
+    },
+  
+    "bin": {                                        // npm 全局安装时创建的 CLI 命令
+      "pi": "dist/cli.js"                           // 用户敲 `pi` 时执行 dist/cli.js
+    },
+  
+    "main": "./dist/index.js",                      // CommonJS 时代的主要入口，现在被 "exports" 取代，但保留兼容性
+    "types": "./dist/index.d.ts",                   // TypeScript 类型声明入口，供导入这个包的项目获得类型提示
+  
+    "exports": {                                    // Node.js 的现代模块入口映射，控制 `import "xxx"` 时解析到哪个文件
+      ".": {                                        // import "@earendil-works/pi-coding-agent" 时
+        "types": "./dist/index.d.ts",              //   TypeScript 去哪找类型 index.d.ts
+        "import": "./dist/index.js"                //   Node.js 运行时去哪找代码 index.js
+      },
+      "./hooks": {                                  // import "@earendil-works/pi-coding-agent/hooks" 时（子路径导出）
+        "types": "./dist/core/hooks/index.d.ts",   //   类型解析到 hooks/index.d.ts
+        "import": "./dist/core/hooks/index.js"     //   运行时解析到 hooks/index.js
+      }
+    },
+  
+    "files": [                                      // npm publish 时只包含这些文件/目录到包里
+      "dist",                                       //   编译产物
+      "docs",                                       //   文档
+      "examples",                                   //   示例代码
+      "CHANGELOG.md",                               //   变更日志
+      "npm-shrinkwrap.json"                         //   锁定依赖版本（发布时用）
+    ],
+  
+    "scripts": {                                    // npm run xxx 执行的脚本
+      "clean": "shx rm -rf dist",                   // 清理编译产物（shx 是跨平台的 shell 命令封装）
+      "build": "tsgo -p tsconfig.build.json && shx chmod +x dist/cli.js && npm run copy-assets",  // 编译 TS -> JS，给 cli.js 加可执行权限，复制静态资源
+      "build:binary": "...",                        // 编译成独立 Bun 二进制文件（用于发布独立可执行程序）
+      "copy-assets": "...",                         // 复制主题 JSON、图标 PNG、HTML 模板等静态资源到 dist/
+      "copy-binary-assets": "...",                  // Bun 二进制构建时的资源复制（路径不同）
+      "test": "vitest --run",                       // 运行测试（vitest，单次运行）
+      "shrinkwrap": "node ../../scripts/generate-coding-agent-shrinkwrap.mjs",  // 生成锁文件，固定发布包的依赖版本
+      "prepublishOnly": "npm run clean && npm run build && npm run shrinkwrap"  // npm publish 之前自动执行：清理 -> 编译 -> 生成锁文件
+    },
+  
+    "dependencies": {                               // 运行时依赖（用户安装这个包时会自动安装这些）
+      "@earendil-works/pi-agent-core": "^0.75.5",   // agent 循环引擎
+      "@earendil-works/pi-ai": "^0.75.5",           // AI 模型调用层
+      "@earendil-works/pi-tui": "^0.75.5",          // 终端 UI 框架
+  	...
+    },
+  
+    "overrides": {                                  // 强制覆盖传递依赖的版本（解决安全漏洞或兼容性问题）
+      "rimraf": "6.1.2",
+      "gaxios": { "rimraf": "6.1.2" }
+    },
+  
+    "optionalDependencies": {                       // 可选依赖，安装失败不会中断（比如剪贴板功能）
+      "@mariozechner/clipboard": "0.3.6"
+    },
+  
+    "devDependencies": {                            // 开发时依赖（不会随包发布）
+      "@types/cross-spawn": "6.0.6",                // 类型定义
+      "@types/diff": "7.0.2",
+      "@types/hosted-git-info": "3.0.5",
+      "@types/ms": "2.1.0",
+      "@types/node": "24.12.4",
+      "@types/proper-lockfile": "4.1.4",
+      "shx": "0.4.0",                               // 跨平台 shell 命令（在 scripts 里用）
+      "typescript": "5.9.3",                        // TypeScript 编译器
+      "vitest": "3.2.4"                             // 测试框架
+    },
+  
+    "keywords": [                                   // npm 搜索关键词
+      "coding-agent", "ai", "llm", "cli", "tui", "agent"
+    ],
+  
+    "author": "Mario Zechner",                      // 作者
+    "license": "MIT",                               // 开源协议
+  
+    "repository": {                                 // 源码仓库地址
+      "type": "git",
+      "url": "git+https://github.com/earendil-works/pi-mono.git",
+      "directory": "packages/coding-agent"          // 在 monorepo 中的子目录位置
+    },
+  
+    "engines": {                                    // 要求的 Node.js 最低版本
+      "node": ">=22.19.0"
+    }
+  }
+  ```
 
-```mermaid
-flowchart TD
-    A["src/cli.ts"] --> B["src/main.ts"]
-    B --> C["parseArgs + 选择 session"]
-    C --> D["createRuntime 工厂"]
-    D --> E["createAgentSessionServices"]
-    E --> F["Settings / Auth / ModelRegistry / ResourceLoader"]
-    F --> G["createAgentSessionFromServices"]
-    G --> H["sdk.ts:createAgentSession"]
-    H --> I["AgentSession"]
-    I --> J["bindExtensions"]
-    J --> K{"运行模式"}
-    K -->|interactive| L["InteractiveMode"]
-    K -->|print/json| M["runPrintMode"]
-    K -->|rpc| N["runRpcMode"]
+* npm-shrinkwrap.json - npm 锁定文件，确保依赖版本在所有环境中保持一致。与 package-lock.json 类似，但会被发布到 npm 注册表中。
+
+  自动生成，由 scripts/generate-coding-agent-shrinkwrap.mjs 脚本从根目录的 package-lock.json 提取和转换而来。不要手动编辑。
+
+* tsconfig.build.json - TypeScript 构建配置，用于将 TypeScript 代码编译为 JavaScript。指定了输出目录、根目录和包含/排除的文件。手写。
+
+* tsconfig.examples.json - 示例代码的 TypeScript 配置，专门用于检查 examples/ 目录下的示例文件。配置了路径别名，让示例代码可以直接引用本地源代码而不是编译后的包。手写。
+
+* vitest.config.ts - Vitest 测试框架的配置文件，设置测试环境、超时时间、依赖处理和路径别名。路径别名让测试可以直接引用源代码，便于调试和开发。手写。
+
+## 主调用链
+
+从 `pi` 命令启动到进入交互模式，主调用链路本质上是在**启动一个可切换、可恢复、可扩展的 session runtime**，然后再给这个 runtime 套上 interactive / print / rpc 三种外壳：
+
+`cli.ts -> main.ts -> runtime -> services -> session -> modes`
+
+```ts
+cli.ts // coding-agent 的 CLI 入口文件（shebang 脚本）
+
+main.ts
+  -> 1、定义 createRuntime 工厂函数
+  -> 2、createAgentSessionRuntime(createRuntime, initialOptions) // 把工厂和初始结果装进 runtime
+  	-> （1）先调用 createRuntime(initialOptions) 工厂
+  	  -> createAgentSessionServices(...) // 先造 services
+  	    -> 返回 AgentSessionServices
+  	  -> createAgentSessionFromServices(...) // 再基于 services 造 AgentSession
+  	    -> 内部委托给 sdk.ts:createAgentSession(...)，得到 AgentSession(...)
+  	    -> 返回 { session, extensionsResult, modelFallbackMessage }
+  	  -> 工厂返回 { session, services, diagnostics, modelFallbackMessage }
+ 	-> （2）再 new AgentSessionRuntime(session, services, createRuntime, diagnostics, modelFallbackMessage) // AgentSessionRuntime 持有 session: AgentSession、services: AgentSessionServices，也持有“如何重新创建它们”的 createRuntime 工厂函数
+       
+interactive / print / rpc 三个 mode 共用同一个会话核心
+InteractiveMode runPrintMode runRpcMode
+  -> AgentSessionRuntime.session
+      -> AgentSession.prompt()
+      -> AgentSession.compact()
+      -> AgentSession.bindExtensions()
+      -> AgentSession.navigateTree()
+而 `AgentSession` 内部又会继续调用：
+- `sessionManager`
+- `settingsManager`
+- `resourceLoader`
+- `modelRegistry`
+- 底层 `agent`
+
+根据参数选择运行模式（interactive / print / rpc）
 ```
 
-其中最关键的分层不是 CLI 和 TUI，而是这四个对象：
+1. 设置进程元数据（标题、环境变量）
+1. 配置全局 HTTP 调度器
+1. 将控制权交给 `main()` 启动应用
 
-- `AgentSessionRuntime`
-  - 当前激活 session 的宿主，负责 `new / resume / fork / import / dispose`
-- `AgentSessionServices`
-  - 与 cwd 绑定的基础设施集合，负责 auth、settings、resource loader、model registry
-- `createAgentSession()`
-  - 真正把 `pi-ai + pi-agent-core + tools + prompt + session context` 组装成会话的工厂
-- `AgentSession`
-  - 产品层真正的核心对象，承担 prompt、持久化、自动压缩、bash、扩展绑定、tree navigation
+package.json 里的 bin 字段设置
 
-这四者基本对应本包的四个核心层级：
+```json
+{
+  "name": "pi-coding-agent",
+  "bin": {
+    "pi": "./dist/cli.js"
+  }
+}
+```
 
-```text
+npm 读到这个配置后，在 npm install -g 时会自动在全局 bin/ 目录（比如 /usr/local/bin/ ）创建一个符号链接 pi 指向 ./dist/cli.js。当用户敲 pi 时，系统沿着符号链接找到 cli.js ，看到它的 shebang #!/usr/bin/env node，就用 node 来执行它。
+
+
+
+
+
+```ts
+// ── import ──────────────────────────────────────────────────────────
+// 应用名称常量，用于设置进程标题和窗口标识
+import { APP_NAME } from "./config.ts";
+// 配置 undici 全局 HTTP 调度器，统一管理所有出站 HTTP 请求的行为（超时、重试等）
+import { configureHttpDispatcher } from "./core/http-dispatcher.ts";
+// 应用主函数，负责解析参数并启动对应的运行模式
+import { main } from "./main.ts";
+
+// ── 进程设置 ────────────────────────────────────────────────────────
+// 设置进程标题，使其在 `ps` / `top` 等工具中显示为应用名称而非 "node"
+process.title = APP_NAME;
+// process.env 就像一张"进程信息贴纸"
+// 启动时 Shell 已经贴了一些（PATH、HOME、API_KEY...）
+// 代码运行时可以再往上贴自己的标签，这里标记当前进程为 coding-agent
+process.env.PI_CODING_AGENT = "true";
+// 禁用 Node.js 的 process.emitWarning，避免在运行过程中输出无关的警告信息干扰用户
+process.emitWarning = (() => {}) as typeof process.emitWarning;
+
+// ── 配置 HTTP 调度器 ────────────────────────────────────────────────
+// 在任何 provider SDK 发起请求之前，配置 undici 的全局 HTTP 调度器。
+// 运行时的详细设置（如代理、超时）会在 SettingsManager 加载全局/项目配置后应用。
+configureHttpDispatcher();
+
+// ── 启动应用 ────────────────────────────────────────────────────────
+// 将命令行参数（去掉前两个元素：node 和脚本路径）传入 main 函数，
+// 由 main.ts 根据参数决定进入哪种运行模式（交互模式 / 打印模式 / RPC 模式）。
+main(process.argv.slice(2));
+```
+
+> process 是 Node.js 的**全局对象**，代表当前运行的进程。
+
+四个对象分层：
+
+```
 runtime 宿主
   ↓ 持有
 services 基础设施
@@ -161,9 +324,98 @@ session 工厂
 AgentSession 业务核心
 ```
 
----
+核心是  `services -> sdk -> session` 三层：
 
-## `src/` 源码地图
+- `core/agent-session-services.ts` **与 cwd 绑定的环境基础设施集合**
+  - 解决的是 **cwd 环境问题**，关心“这轮对话是站在哪个目录里跑”，包含 `createAgentSessionServices()` 函数，以这个目录为中心，向外推导出当前 session 可见的配置、资源、上下文规则和相对路径语义，具体包括：
+    - 项目配置环境
+      - 这个目录下有没有 .pi/settings.json
+    - 上下文规则环境
+      - 从这个目录向上找哪些 AGENTS.md / CLAUDE.md
+    - 资源发现环境
+      - 这个项目下有哪些本地 extensions / skills / prompts / themes
+    - 路径解析环境
+      - 用户说“读 src/index.ts ”时， src/index.ts 相对谁解析
+    - session 归属环境
+      - 这个 session 属于哪个项目/子目录视角
+  - 负责创建 `authStorage`、`settingsManager`、`modelRegistry`、`resourceLoader` 等
+- `core/sdk.ts` **会话装配逻辑**
+  - 解决的是**会话装配问题**，包含 `createAgentSession()` 函数，真正把 `pi-ai + pi-agent-core + tools + prompt + session context` 组装成会话的工厂
+- `core/agent-session.ts` **产品层真正的核心对象**
+  - 解决的是**运行问题**，关心“这轮对话怎么跑”
+  - 真正负责 prompt、持久化消息、tool hooks、extension 扩展绑定、compaction、bash、tree navigation
+
+在此基础之上，又包了一层 `core/agent-session-runtime.ts` **当前激活 session 的宿主对象**
+
+- 它不负责“具体一轮 prompt 怎么跑”，而负责“当前宿主现在挂着哪个 session，以及如何切换到另一个 session”
+
+> **如果只有 `sdk.ts -> AgentSession`，其实已经能跑了，那为什么还需要 `AgentSessionRuntime`？**
+>
+> * `AgentSession` 只负责“这个 session 怎么活”
+> * 产品层还要支持：`newSession()`、`switchSession()`、`fork()`、`importFromJsonl()`
+>
+> * 这些都不是“当前会话内部行为”，而是“当前宿主切到另一个会话”的行为。
+
+例如 `switchSession()` 的流程是：
+
+1. 打开目标 `SessionManager`
+2. teardown 当前 session
+3. 用同一个 `createRuntime` 工厂重新创建一套新的 `services + session`
+4. `apply()` 到 runtime
+5. `rebindSession()` 让 UI 或外部宿主重新绑定新 session
+
+`newSession()`、`fork()`、`importFromJsonl()` 也都是同样套路：
+
+- 先准备新的 `SessionManager`
+- 再重建一整套 runtime 结果
+- 最后替换当前 `session/services`
+
+## 为什么 runtime / services / session 三层拆得这么细
+
+这一点是整层架构最值得强调的设计。
+
+如果不拆，会出现两种坏结果：
+
+### 坏结果 1：一个类承担两种生命周期
+
+- 会话内生命周期
+  - prompt
+  - tool calls
+  - retry
+  - compaction
+- 宿主生命周期
+  - new session
+  - resume
+  - fork
+  - import
+  - UI rebind
+
+这两类生命周期天然不同，不该由同一对象同时负责。
+
+### 坏结果 2：cwd 绑定的环境状态和会话状态缠在一起
+
+例如切 session 时，哪些东西要变？
+
+- `cwd`
+- `settingsManager`
+- `resourceLoader`
+- `modelRegistry`
+- `systemPrompt`
+- 可能的 extension runtime
+
+这些都是环境层的变化，不该和“当前 turn 队列里有哪些消息”放在同一个对象里处理。
+
+所以最终拆成：
+
+```text
+宿主层：AgentSessionRuntime
+环境层：AgentSessionServices
+业务层：AgentSession
+```
+
+这是整个启动架构最核心的设计判断。
+
+## 源码地图
 
 ### 顶层文件
 
@@ -329,23 +581,16 @@ AgentSession 业务核心
 
 ---
 
-## 这个包和已有专题文档的关系
+所以阅读它时，最值得关心的不是某个函数局部怎么写，而是这些问题：
 
-你已经有四篇非常关键的专题：
+- 哪些对象是"纯运行时"的，哪些是"可持久化"的？
+- 哪些机制属于 `Agent`，哪些是 `AgentSession` 额外加上去的？
+- 哪些资源在 session 启动前装配，哪些会在运行中动态注入？
+- 为什么 extension、skills、tools、prompts 最终都会流入同一个 `system prompt + active tools` 视图？
 
-- `tutorial/coding-agent/pi-session-tree.md`
-- `tutorial/coding-agent/pi-compaction.md`
-- `tutorial/coding-agent/pi-config-layers.md`
-- `tutorial/coding-agent/pi-system-prompt.md`
+搞清这几个问题，整个 `coding-agent` 包的结构就不会再散。
 
-它们分别覆盖了：
-
-- 会话树与持久化
-- 上下文压缩
-- 配置分层
-- prompt 装配
-
-这四篇已经构成了 `coding-agent` 的中段主干，但还缺三块总览性内容：
+缺三块总览性内容：
 
 1. **整包分层图和源码地图**
    - 整个 `packages/coding-agent` 到底有哪些层
@@ -401,300 +646,3 @@ AgentSession 业务核心
 - 本文和新增两篇分册，负责**搭骨架**
 - `session/config/prompt/compaction` 四篇，负责**讲产品机制**
 - 第 15/16/17/19/20/21/22/23 章，负责**给机制补专题级深描**
-
----
-
-## 这一层最重要的设计判断
-
-最后先下一个总判断，后面所有章节都可以围绕它展开：
-
-> `pi-coding-agent` 不是在重复造一个 agent runtime。
-> 它真正做的是：
-> **把模型层、agent loop、持久化、配置、prompt、工具、扩展、模式 UI 统一装配成一个可长期工作的产品系统。**
-
-所以阅读它时，最值得关心的不是某个函数局部怎么写，而是这些问题：
-
-- 哪些对象是"纯运行时"的，哪些是"可持久化"的？
-- 哪些机制属于 `Agent`，哪些是 `AgentSession` 额外加上去的？
-- 哪些资源在 session 启动前装配，哪些会在运行中动态注入？
-- 为什么 extension、skills、tools、prompts 最终都会流入同一个 `system prompt + active tools` 视图？
-
-搞清这几个问题，整个 `coding-agent` 包的结构就不会再散。
-
-
-
-
-
-
-
-
-
-```text
-createRuntime 工厂内部：
-  createAgentSessionServices()
-    -> 先造 services
-  createAgentSessionFromServices()
-    -> 再基于 services 造 AgentSession
-        -> 内部委托给 sdk.ts:createAgentSession()
-            -> 最终 new AgentSession(...)
-```
-
----
-
-**一、四者各自是什么**
-
-- `core/agent-session-runtime.ts`
-  - 当前激活 session 的宿主对象
-  - 它不负责“具体一轮 prompt 怎么跑”，而负责“当前宿主现在挂着哪个 session，以及如何切换到另一个 session”
-  - 入口见 [agent-session-runtime.ts](file:///Users/a/Desktop/WorkSpace/ALL/我的Github项目/pi-deep-dive/packages/coding-agent/src/core/agent-session-runtime.ts#L413-L430)
-
-- `core/agent-session-services.ts`
-  - cwd 绑定的基础设施集合
-  - 负责创建 `authStorage`、`settingsManager`、`modelRegistry`、`resourceLoader`
-  - 接口和工厂见 [agent-session-services.ts](file:///Users/a/Desktop/WorkSpace/ALL/我的Github项目/pi-deep-dive/packages/coding-agent/src/core/agent-session-services.ts#L109-L124) 和 [createAgentSessionServices](file:///Users/a/Desktop/WorkSpace/ALL/我的Github项目/pi-deep-dive/packages/coding-agent/src/core/agent-session-services.ts#L203-L246)
-
-- `core/sdk.ts`
-  - 真正的会话装配器
-  - 它把 `services + sessionManager + model/thinking/tools` 拼成一个可运行的 `AgentSession`
-  - 入口见 [createAgentSession](file:///Users/a/Desktop/WorkSpace/ALL/我的Github项目/pi-deep-dive/packages/coding-agent/src/core/sdk.ts#L207-L425)
-
-- `core/agent-session.ts`
-  - 产品核心对象
-  - 真正负责 prompt、持久化、tool hooks、extension 绑定、compaction、tree navigation
-  - 类和构造入口见 [AgentSession](file:///Users/a/Desktop/WorkSpace/ALL/我的Github项目/pi-deep-dive/packages/coding-agent/src/core/agent-session.ts#L264-L355)
-
----
-
-**二、对象持有关系**
-
-最准确的理解不是“谁调用谁一次”，而是“谁长期持有谁”。
-
-```text
-main.ts
-  ↓ 创建 createRuntime 工厂
-AgentSessionRuntime
-  ├─ 持有 session: AgentSession
-  ├─ 持有 services: AgentSessionServices
-  └─ 持有 createRuntime: 工厂函数
-
-AgentSession
-  ├─ 持有 agent
-  ├─ 持有 sessionManager
-  ├─ 持有 settingsManager
-  ├─ 持有 resourceLoader
-  ├─ 持有 modelRegistry
-  └─ 持有 extensionRunnerRef 等运行时状态
-```
-
-对应代码：
-- `AgentSessionRuntime.apply()` 会把新的 `session/services` 填进去 [agent-session-runtime.ts](file:///Users/a/Desktop/WorkSpace/ALL/我的Github项目/pi-deep-dive/packages/coding-agent/src/core/agent-session-runtime.ts#L191-L196)
-- `AgentSession` 构造函数里把这些核心依赖全部存成字段 [agent-session.ts](file:///Users/a/Desktop/WorkSpace/ALL/我的Github项目/pi-deep-dive/packages/coding-agent/src/core/agent-session.ts#L331-L355)
-
-所以层级关系可以概括成：
-
-- `runtime` 是“当前会话宿主”
-- `services` 是“当前 cwd 环境”
-- `sdk` 是“装配器”
-- `session` 是“真正跑业务的核心对象”
-
----
-
-**三、启动时的调用链**
-
-这是最关键的一条链。
-
-在 `main.ts` 里，会先定义一个 `createRuntime` 工厂；这个工厂内部按顺序做两件事：
-
-1. `createAgentSessionServices(...)`
-2. `createAgentSessionFromServices(...)`
-
-见 [main.ts](file:///Users/a/Desktop/WorkSpace/ALL/我的Github项目/pi-deep-dive/packages/coding-agent/src/main.ts#L893-L977)
-
-具体顺序是：
-
-```text
-main.ts
-  -> createAgentSessionServices(...)
-       先创建 services
-  -> createAgentSessionFromServices(...)
-       再用 services 创建 session
-  -> createAgentSessionRuntime(createRuntime, ...)
-       把上面的工厂和初始结果装进 runtime
-```
-
-再细一点是：
-
-```text
-main.ts
-  -> createAgentSessionServices()
-       -> AuthStorage
-       -> SettingsManager
-       -> ModelRegistry
-       -> DefaultResourceLoader
-       -> resourceLoader.reload()
-
-  -> createAgentSessionFromServices()
-       -> sdk.ts:createAgentSession()
-
-  -> sdk.ts:createAgentSession()
-       -> sessionManager.buildSessionContext()
-       -> new Agent(...)
-       -> 恢复消息 / model / thinking
-       -> new AgentSession(...)
-```
-
-对应代码：
-- `main.ts` 先创建 services，再创建 session [main.ts](file:///Users/a/Desktop/WorkSpace/ALL/我的Github项目/pi-deep-dive/packages/coding-agent/src/main.ts#L895-L966)
-- `createAgentSessionFromServices()` 本质就是把 services 拆开传给 `sdk.ts` [agent-session-services.ts](file:///Users/a/Desktop/WorkSpace/ALL/我的Github项目/pi-deep-dive/packages/coding-agent/src/core/agent-session-services.ts#L259-L278)
-- `sdk.ts` 里最终 `new AgentSession(...)` [sdk.ts](file:///Users/a/Desktop/WorkSpace/ALL/我的Github项目/pi-deep-dive/packages/coding-agent/src/core/sdk.ts#L392-L425)
-
----
-
-**四、为什么要拆成 `services -> sdk -> session` 三层**
-
-这是这四个文件最容易看乱的点。
-
-**`services` 解决的是“环境问题”**
-- 当前 cwd 是什么
-- 当前项目有哪些 settings
-- 当前可见哪些 extensions/skills/prompts/themes
-- 当前有哪些 provider/model 可用
-
-这些都属于“环境事实”。
-
-**`sdk` 解决的是“装配问题”**
-- 用哪些 services
-- 用哪个 `SessionManager`
-- 恢复哪个 model / thinking
-- 激活哪些 tools
-- 如何创建底层 `Agent`
-
-它是“把零件装成成品”的地方。
-
-**`AgentSession` 解决的是“运行问题”**
-- prompt 进入队列
-- 持久化消息
-- tool hook
-- extension event
-- compaction
-- bash
-- tree navigation
-
-它才是真正承接业务生命周期的对象。
-
-所以不是为了抽象而抽象，而是把三类不同变化频率的东西拆开：
-
-- 环境状态：`services`
-- 装配逻辑：`sdk`
-- 会话业务：`AgentSession`
-
----
-
-**五、`AgentSessionRuntime` 为什么还要再包一层**
-
-如果只有 `sdk.ts -> AgentSession`，其实已经能跑了。
-
-那为什么还需要 `AgentSessionRuntime`？
-
-因为产品层还要支持：
-
-- `newSession()`
-- `switchSession()`
-- `fork()`
-- `importFromJsonl()`
-
-这些都不是“当前会话内部行为”，而是“当前宿主切到另一个会话”的行为。
-
-例如 `switchSession()` 的流程是：
-
-1. 打开目标 `SessionManager`
-2. teardown 当前 session
-3. 用同一个 `createRuntime` 工厂重新创建一套新的 `services + session`
-4. `apply()` 到 runtime
-5. `rebindSession()` 让 UI 或外部宿主重新绑定新 session
-
-见 [switchSession](file:///Users/a/Desktop/WorkSpace/ALL/我的Github项目/pi-deep-dive/packages/coding-agent/src/core/agent-session-runtime.ts#L207-L230)
-
-`newSession()`、`fork()`、`importFromJsonl()` 也都是同样套路：
-- 先准备新的 `SessionManager`
-- 再重建一整套 runtime 结果
-- 最后替换当前 `session/services`
-
-见 [newSession](file:///Users/a/Desktop/WorkSpace/ALL/我的Github项目/pi-deep-dive/packages/coding-agent/src/core/agent-session-runtime.ts#L232-L264)、[fork](file:///Users/a/Desktop/WorkSpace/ALL/我的Github项目/pi-deep-dive/packages/coding-agent/src/core/agent-session-runtime.ts#L266-L351)、[importFromJsonl](file:///Users/a/Desktop/WorkSpace/ALL/我的Github项目/pi-deep-dive/packages/coding-agent/src/core/agent-session-runtime.ts#L360-L395)
-
-所以：
-
-> `AgentSession` 只负责“这个 session 怎么活”
-> `AgentSessionRuntime` 负责“当前宿主现在挂哪一个 session”
-
----
-
-**六、运行中的调用方向**
-
-启动之后，常见调用方向是这样的：
-
-```text
-InteractiveMode / PrintMode / RpcMode
-  -> AgentSessionRuntime.session
-      -> AgentSession.prompt()
-      -> AgentSession.compact()
-      -> AgentSession.bindExtensions()
-      -> AgentSession.navigateTree()
-```
-
-对应入口：
-- [prompt](file:///Users/a/Desktop/WorkSpace/ALL/我的Github项目/pi-deep-dive/packages/coding-agent/src/core/agent-session.ts#L981-L1007)
-- [compact](file:///Users/a/Desktop/WorkSpace/ALL/我的Github项目/pi-deep-dive/packages/coding-agent/src/core/agent-session.ts#L1636-L1720)
-- [bindExtensions](file:///Users/a/Desktop/WorkSpace/ALL/我的Github项目/pi-deep-dive/packages/coding-agent/src/core/agent-session.ts#L2062-L2119)
-- [navigateTree](file:///Users/a/Desktop/WorkSpace/ALL/我的Github项目/pi-deep-dive/packages/coding-agent/src/core/agent-session.ts#L2687-L2857)
-
-而 `AgentSession` 内部又会继续调用：
-- `sessionManager`
-- `settingsManager`
-- `resourceLoader`
-- `modelRegistry`
-- 底层 `agent`
-
-这也是为什么它是“产品核心对象”。
-
----
-
-**七、一张总图**
-
-如果你要把这四者的关系写进教程，我建议直接用这张图：
-
-```mermaid
-flowchart TD
-    A["main.ts"] --> B["createRuntime 工厂"]
-
-    B --> C["createAgentSessionServices()"]
-    C --> C1["AuthStorage"]
-    C --> C2["SettingsManager"]
-    C --> C3["ModelRegistry"]
-    C --> C4["ResourceLoader"]
-
-    B --> D["createAgentSessionFromServices()"]
-    D --> E["sdk.ts:createAgentSession()"]
-    E --> E1["sessionManager.buildSessionContext()"]
-    E --> E2["new Agent(...)"]
-    E --> F["new AgentSession(...)"]
-
-    B --> G["createAgentSessionRuntime(...)"]
-    G --> H["AgentSessionRuntime"]
-    H --> F
-    H --> C
-
-    I["Interactive / Print / RPC"] --> H
-    I --> F
-```
-
----
-
-**八、一句话总结四者关系**
-
-- `agent-session-services.ts`：先把“当前 cwd 的环境”造出来
-- `sdk.ts`：再把这些环境零件装成一个 `AgentSession`
-- `agent-session.ts`：这个 `AgentSession` 才是真正承接 prompt、持久化、压缩、扩展、导航的业务核心
-- `agent-session-runtime.ts`：最后再在外面包一个“当前会话宿主”，负责 `new/resume/fork/import/switch`
-
-如果你要，我下一步可以直接把这段整理成一小节，补进 [pi-coding-agent.md](file:///Users/a/Desktop/WorkSpace/ALL/我的Github项目/pi-deep-dive/tutorial/pi-coding-agent.md) 当前“分层图”后面。

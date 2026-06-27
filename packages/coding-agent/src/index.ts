@@ -6,10 +6,9 @@
  * - 它既是 CLI 产品的 SDK 入口，也是大量程序化扩展能力的统一导出面
  *
  * 谁会 import 我：
- * - `packages/coding-agent` 自己的 CLI 启动流程最终会走这里暴露的 `main()`
- * - 仓库外部的 npm 使用者可以通过这里创建 `AgentSession` / `AgentSessionRuntime`
- * - 扩展开发者会从这里拿工具定义、扩展类型、UI 组件、运行模式等能力
- *
+ * - 外部 npm 使用者通过包名 `@earendil-works/pi-coding-agent` 导入这里，创建 `AgentSession` / `AgentSessionRuntime`
+ * - 扩展开发者从这里拿工具定义、扩展类型、UI 组件、运行模式等能力
+ * 
  * 我在整个体系中的作用：
  * - 把 `coding-agent` 自己的三大能力聚合在一个入口：
  *   1. session/runtime/sdk
