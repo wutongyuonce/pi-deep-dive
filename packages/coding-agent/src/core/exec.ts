@@ -55,6 +55,10 @@ export interface ExecResult {
  * 5. 进程终止时先发 SIGTERM，5秒后如果仍在运行则发 SIGKILL
  * 6. 使用 waitForChildProcess 等待进程退出，避免被后代进程的继承 stdio 阻塞
  *
+ * 定位：单次命令执行场景的底层封装。
+ * 作用：统一 spawn、超时、中止和退出等待逻辑，避免上层重复处理细节。
+ * 调用关系：被扩展系统、自定义工具以及其他需要非流式命令执行的模块调用。
+ *
  * @param command 要执行的命令（如 "git"、"npm"）
  * @param args 命令参数数组
  * @param cwd 工作目录
@@ -68,6 +72,7 @@ export async function execCommand(
 	options?: ExecOptions,
 ): Promise<ExecResult> {
 	return new Promise((resolve) => {
+		// 以非 shell 方式启动，保持参数边界清晰，降低命令注入风险。
 		const proc = spawn(command, args, {
 			cwd,
 			shell: false,

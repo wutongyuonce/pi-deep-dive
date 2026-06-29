@@ -528,7 +528,7 @@ function prepareWindowsNpmSelfUpdate(): void {
  *   4. 调用 selectConfig 启动交互式配置 UI
  *   5. 配置完成后 exit(0)
  *
- * 被 main.ts 的 handleConfigCommand 调用
+ * 被 main.ts 调用
  * 调用 cli/config-selector.ts 的 selectConfig
  */
 export async function handleConfigCommand(args: string[]): Promise<boolean> {
@@ -576,7 +576,7 @@ export async function handleConfigCommand(args: string[]): Promise<boolean> {
  *   7. runSelfUpdate(command)   → 执行更新命令
  *   8. 异常时 printSelfUpdateFallback() 提示手动更新
  *
- * 被 main.ts 的 handlePackageCommand 调用
+ * 被 main.ts 调用
  * 调用 config.ts 的 detectInstallMethod、getSelfUpdateCommand
  * 调用 core/package-manager.ts 的 DefaultPackageManager
  */

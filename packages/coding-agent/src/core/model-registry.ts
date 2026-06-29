@@ -370,6 +370,10 @@ export class ModelRegistry {
 	/**
 	 * 从磁盘重新加载模型（内置 + models.json 自定义）。
 	 * 清除现有状态，重置 API provider 注册，然后重新加载并应用已注册的扩展配置。
+	 *
+	 * 定位：模型注册表的全量重建入口。
+	 * 作用：在设置变更或 provider 注销后，重新构造内置模型、自定义模型和动态 provider 状态。
+	 * 调用关系：被设置重载、provider 注销和外部显式刷新逻辑调用。
 	 */
 	refresh(): void {
 		this.providerRequestConfigs.clear();
@@ -393,6 +397,13 @@ export class ModelRegistry {
 		return this.loadError;
 	}
 
+	/**
+	 * 加载当前应生效的完整模型列表。
+	 *
+	 * 定位：构造函数和 `refresh()` 的共享装载步骤。
+	 * 作用：组合内置模型、自定义模型和覆盖配置，并把错误保存在注册表上。
+	 * 调用关系：仅由本类内部调用。
+	 */
 	private loadModels(): void {
 		// 从 models.json 加载自定义模型和覆盖配置
 		const {
@@ -460,6 +471,13 @@ export class ModelRegistry {
 		return merged;
 	}
 
+	/**
+	 * 从 `models.json` 读取自定义模型与 provider 覆盖配置。
+	 *
+	 * 定位：磁盘配置装载入口。
+	 * 作用：读取、去注释、校验 schema、执行业务校验，并抽取 provider/model 级覆盖信息。
+	 * 调用关系：由 `loadModels()` 调用。
+	 */
 	private loadCustomModels(modelsJsonPath: string): CustomModelsResult {
 		// 文件不存在时返回空结果
 		if (!existsSync(modelsJsonPath)) {
@@ -565,6 +583,13 @@ export class ModelRegistry {
 		}
 	}
 
+	/**
+	 * 把通过校验的 `models.json` 配置转成运行时模型对象。
+	 *
+	 * 定位：自定义模型构建步骤。
+	 * 作用：解析 provider / model 级默认值，并为每个模型补齐缺省字段。
+	 * 调用关系：由 `loadCustomModels()` 在校验完成后调用。
+	 */
 	private parseModels(config: ModelsConfig): Model<Api>[] {
 		const models: Model<Api>[] = [];
 		const builtInProviders = new Set<string>(getProviders());
@@ -688,6 +713,10 @@ export class ModelRegistry {
 	 * 获取模型的 API key 和请求头。
 	 * 解析优先级：authStorage > models.json 中的 apiKey 配置
 	 * 请求头合并优先级：model.headers < providerHeaders < modelHeaders
+	 *
+	 * 定位：模型请求发送前的认证解析出口。
+	 * 作用：综合 auth storage、provider 配置和模型级请求头，生成可直接发请求的认证信息。
+	 * 调用关系：被 `agent-session.ts`、模型探测和其他发起模型请求的流程调用。
 	 */
 	async getApiKeyAndHeaders(model: Model<Api>): Promise<ResolvedRequestAuth> {
 		try {
@@ -705,6 +734,7 @@ export class ModelRegistry {
 				`model "${model.provider}/${model.id}"`,
 			);
 
+			// 头部按模型内置 < provider 配置 < 模型覆盖的顺序合并。
 			let headers =
 				model.headers || providerHeaders || modelHeaders
 					? { ...model.headers, ...providerHeaders, ...modelHeaders }
@@ -793,6 +823,10 @@ export class ModelRegistry {
 	 * 如果 provider 包含 models：替换该 provider 的所有现有模型。
 	 * 如果 provider 仅有 baseUrl/headers：覆盖现有模型的 URL。
 	 * 已存储的认证配置仍由 AuthStorage 和 /login 管理。
+	 *
+	 * 定位：扩展系统动态接入模型 provider 的主入口。
+	 * 作用：校验输入、把 provider 应用到当前注册表，并保存到可重建的注册列表中。
+	 * 调用关系：由扩展运行时通过 `registerProvider()` 调用。
 	 */
 	registerProvider(providerName: string, config: ProviderConfigInput): void {
 		this.validateProviderConfig(providerName, config);
@@ -856,6 +890,13 @@ export class ModelRegistry {
 		}
 	}
 
+	/**
+	 * 将单个 provider 配置实际应用到当前注册表。
+	 *
+	 * 定位：动态 provider 注册与 refresh 重建时的共享落地逻辑。
+	 * 作用：注册 API provider、保存认证配置，并根据配置更新模型列表或覆盖 baseUrl。
+	 * 调用关系：被 `registerProvider()` 和 `refresh()` 调用。
+	 */
 	private applyProviderConfig(providerName: string, config: ProviderConfigInput): void {
 		if (config.streamSimple) {
 			const streamSimple = config.streamSimple;

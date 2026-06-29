@@ -138,7 +138,13 @@ export function bashExecutionToText(msg: BashExecutionMessage): string {
 	return text;
 }
 
-/** 创建分支摘要消息的工厂函数 */
+/**
+ * 创建分支摘要消息。
+ *
+ * 定位：会话树导航返回主线时的消息工厂。
+ * 作用：把持久化层中的分支摘要数据转成运行时 `AgentMessage` 结构。
+ * 调用关系：被会话树、摘要恢复和消息装载流程调用。
+ */
 export function createBranchSummaryMessage(summary: string, fromId: string, timestamp: string): BranchSummaryMessage {
 	return {
 		role: "branchSummary",
@@ -148,7 +154,13 @@ export function createBranchSummaryMessage(summary: string, fromId: string, time
 	};
 }
 
-/** 创建压缩摘要消息的工厂函数 */
+/**
+ * 创建压缩摘要消息。
+ *
+ * 定位：压缩记录装载到运行时上下文时的工厂函数。
+ * 作用：把 compaction 条目转换成统一的消息对象，供对话和导出流程复用。
+ * 调用关系：被压缩历史恢复和消息转换流程调用。
+ */
 export function createCompactionSummaryMessage(
 	summary: string,
 	tokensBefore: number,
@@ -162,7 +174,13 @@ export function createCompactionSummaryMessage(
 	};
 }
 
-/** 创建自定义消息，将扩展的自定义内容转换为 AgentMessage 格式 */
+/**
+ * 创建扩展自定义消息。
+ *
+ * 定位：扩展消息进入运行时消息流的标准入口。
+ * 作用：把扩展侧 payload 标准化为 `AgentMessage` 兼容结构。
+ * 调用关系：被扩展系统、会话恢复和消息持久化装载流程调用。
+ */
 export function createCustomMessage(
 	customType: string,
 	content: string | (TextContent | ImageContent)[],
@@ -201,8 +219,8 @@ export function convertToLlm(messages: AgentMessage[]): Message[] {
 		.map((m): Message | undefined => {
 			switch (m.role) {
 				case "bashExecution":
-				// 跳过排除在上下文之外的消息（!! 前缀）
-				if (m.excludeFromContext) {
+					// 跳过排除在上下文之外的消息（!! 前缀）
+					if (m.excludeFromContext) {
 						return undefined;
 					}
 					return {
@@ -211,6 +229,7 @@ export function convertToLlm(messages: AgentMessage[]): Message[] {
 						timestamp: m.timestamp,
 					};
 				case "custom": {
+					// 统一把字符串包装成文本块，数组内容则按多模态原样透传。
 					const content = typeof m.content === "string" ? [{ type: "text" as const, text: m.content }] : m.content;
 					return {
 						role: "user",

@@ -21,6 +21,7 @@ import type { RegisteredTool } from "./types.ts";
  * 使用 runner 的 createContext() 确保工具和事件处理器的上下文一致。
  */
 export function wrapRegisteredTool(registeredTool: RegisteredTool, runner: ExtensionRunner): AgentTool {
+	// 每次执行工具时都重新取 runner 上下文，避免扩展拿到过期 ctx。
 	return wrapToolDefinition(registeredTool.definition, () => runner.createContext());
 }
 
@@ -29,6 +30,7 @@ export function wrapRegisteredTool(registeredTool: RegisteredTool, runner: Exten
  * 使用 runner 的 createContext() 确保工具和事件处理器的上下文一致。
  */
 export function wrapRegisteredTools(registeredTools: RegisteredTool[], runner: ExtensionRunner): AgentTool[] {
+	// 先抽出 RegisteredTool 里的定义对象，再批量挂上统一的上下文工厂。
 	return wrapToolDefinitions(
 		registeredTools.map((registeredTool) => registeredTool.definition),
 		() => runner.createContext(),

@@ -132,6 +132,10 @@ export interface AgentSessionServices {
  * 3. 未注册的标志收集为诊断错误
  * 4. 类型不匹配的标志也记录为诊断错误
  *
+ * 定位：服务创建流程里的扩展标志归并器。
+ * 作用：把 CLI 传入的扩展 flag 写入扩展运行时，并把所有非法输入转成非致命诊断。
+ * 调用关系：仅由 `createAgentSessionServices()` 在资源加载完成后调用。
+ *
  * @param resourceLoader 资源加载器实例
  * @param extensionFlagValues CLI 传入的扩展标志值
  * @returns 收集到的诊断信息数组
@@ -203,6 +207,7 @@ function applyExtensionFlagValues(
 export async function createAgentSessionServices(
 	options: CreateAgentSessionServicesOptions,
 ): Promise<AgentSessionServices> {
+	// 先固定 cwd / agentDir，避免后续会话切换时对相对路径产生二次解释。
 	const cwd = resolvePath(options.cwd);
 	const agentDir = options.agentDir ? resolvePath(options.agentDir) : getAgentDir();
 	const authStorage = options.authStorage ?? AuthStorage.create(join(agentDir, "auth.json"));
@@ -250,6 +255,10 @@ export async function createAgentSessionServices(
  *
  * 将会话创建与服务创建分离，使调用方可以先基于服务解析模型、思维级别、工具等选项，
  * 再构造 AgentSession。
+ *
+ * 定位：服务层通往会话层的单一桥接函数。
+ * 作用：把已准备好的基础设施转交给 `sdk.ts`，避免上层重复组装 create 参数。
+ * 调用关系：由 `agent-session-runtime.ts` 的 createRuntime 工厂调用。
  *
  * 内部委托给 sdk.ts 中的 createAgentSession()，传入服务中已初始化的基础设施。
  *

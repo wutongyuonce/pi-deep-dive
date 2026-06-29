@@ -188,20 +188,20 @@ export function parseArgs(args: string[]): Args {
 		} else if (arg === "--version" || arg === "-v") {
 			result.version = true;
 
-		// ==================== 输出模式 ====================
+			// ==================== 输出模式 ====================
 		} else if (arg === "--mode" && i + 1 < args.length) {
 			const mode = args[++i];
 			if (mode === "text" || mode === "json" || mode === "rpc") {
 				result.mode = mode;
 			}
 
-		// ==================== 会话控制 ====================
+			// ==================== 会话控制 ====================
 		} else if (arg === "--continue" || arg === "-c") {
 			result.continue = true;
 		} else if (arg === "--resume" || arg === "-r") {
 			result.resume = true;
 
-		// ==================== 模型配置 ====================
+			// ==================== 模型配置 ====================
 		} else if (arg === "--provider" && i + 1 < args.length) {
 			result.provider = args[++i];
 		} else if (arg === "--model" && i + 1 < args.length) {
@@ -209,14 +209,14 @@ export function parseArgs(args: string[]): Args {
 		} else if (arg === "--api-key" && i + 1 < args.length) {
 			result.apiKey = args[++i];
 
-		// ==================== 系统提示词 ====================
+			// ==================== 系统提示词 ====================
 		} else if (arg === "--system-prompt" && i + 1 < args.length) {
 			result.systemPrompt = args[++i];
 		} else if (arg === "--append-system-prompt" && i + 1 < args.length) {
 			result.appendSystemPrompt = result.appendSystemPrompt ?? [];
 			result.appendSystemPrompt.push(args[++i]);
 
-		// ==================== 会话文件 ====================
+			// ==================== 会话文件 ====================
 		} else if (arg === "--no-session") {
 			result.noSession = true;
 		} else if (arg === "--session" && i + 1 < args.length) {
@@ -226,11 +226,11 @@ export function parseArgs(args: string[]): Args {
 		} else if (arg === "--session-dir" && i + 1 < args.length) {
 			result.sessionDir = args[++i];
 
-		// ==================== 模型循环列表 ====================
+			// ==================== 模型循环列表 ====================
 		} else if (arg === "--models" && i + 1 < args.length) {
 			result.models = args[++i].split(",").map((s) => s.trim());
 
-		// ==================== 工具控制 ====================
+			// ==================== 工具控制 ====================
 		} else if (arg === "--no-tools" || arg === "-nt") {
 			result.noTools = true;
 		} else if (arg === "--no-builtin-tools" || arg === "-nbt") {
@@ -241,7 +241,7 @@ export function parseArgs(args: string[]): Args {
 				.map((s) => s.trim())
 				.filter((name) => name.length > 0);
 
-		// ==================== 思考级别 ====================
+			// ==================== 思考级别 ====================
 		} else if (arg === "--thinking" && i + 1 < args.length) {
 			const level = args[++i];
 			if (isValidThinkingLevel(level)) {
@@ -253,7 +253,7 @@ export function parseArgs(args: string[]): Args {
 				});
 			}
 
-		// ==================== 打印模式 ====================
+			// ==================== 打印模式 ====================
 		} else if (arg === "--print" || arg === "-p") {
 			result.print = true;
 			// --print 后可选跟随一个消息文本（如果不是标志或 @file 参数）
@@ -263,33 +263,33 @@ export function parseArgs(args: string[]): Args {
 				i++;
 			}
 
-		// ==================== 导出 ====================
+			// ==================== 导出 ====================
 		} else if (arg === "--export" && i + 1 < args.length) {
 			result.export = args[++i];
 
-		// ==================== 扩展 ====================
+			// ==================== 扩展 ====================
 		} else if ((arg === "--extension" || arg === "-e") && i + 1 < args.length) {
 			result.extensions = result.extensions ?? [];
 			result.extensions.push(args[++i]);
 		} else if (arg === "--no-extensions" || arg === "-ne") {
 			result.noExtensions = true;
 
-		// ==================== 技能 ====================
+			// ==================== 技能 ====================
 		} else if (arg === "--skill" && i + 1 < args.length) {
 			result.skills = result.skills ?? [];
 			result.skills.push(args[++i]);
 
-		// ==================== 提示模板 ====================
+			// ==================== 提示模板 ====================
 		} else if (arg === "--prompt-template" && i + 1 < args.length) {
 			result.promptTemplates = result.promptTemplates ?? [];
 			result.promptTemplates.push(args[++i]);
 
-		// ==================== 主题 ====================
+			// ==================== 主题 ====================
 		} else if (arg === "--theme" && i + 1 < args.length) {
 			result.themes = result.themes ?? [];
 			result.themes.push(args[++i]);
 
-		// ==================== 禁用标志 ====================
+			// ==================== 禁用标志 ====================
 		} else if (arg === "--no-skills" || arg === "-ns") {
 			result.noSkills = true;
 		} else if (arg === "--no-prompt-templates" || arg === "-np") {
@@ -299,7 +299,7 @@ export function parseArgs(args: string[]): Args {
 		} else if (arg === "--no-context-files" || arg === "-nc") {
 			result.noContextFiles = true;
 
-		// ==================== 列出模型 ====================
+			// ==================== 列出模型 ====================
 		} else if (arg === "--list-models") {
 			// 检查下一个参数是否为搜索模式（非标志、非文件参数）
 			if (i + 1 < args.length && !args[i + 1].startsWith("-") && !args[i + 1].startsWith("@")) {
@@ -308,18 +308,18 @@ export function parseArgs(args: string[]): Args {
 				result.listModels = true;
 			}
 
-		// ==================== 调试和离线 ====================
+			// ==================== 调试和离线 ====================
 		} else if (arg === "--verbose") {
 			result.verbose = true;
 		} else if (arg === "--offline") {
 			result.offline = true;
 
-		// ==================== 文件参数（@file） ====================
+			// ==================== 文件参数（@file） ====================
 		} else if (arg.startsWith("@")) {
 			// 移除 @ 前缀，存储文件路径
 			result.fileArgs.push(arg.slice(1));
 
-		// ==================== 未知的长标志 ====================
+			// ==================== 未知的长标志 ====================
 		} else if (arg.startsWith("--")) {
 			const eqIndex = arg.indexOf("=");
 			if (eqIndex !== -1) {
@@ -338,11 +338,11 @@ export function parseArgs(args: string[]): Args {
 				}
 			}
 
-		// ==================== 未知的短标志 ====================
+			// ==================== 未知的短标志 ====================
 		} else if (arg.startsWith("-") && !arg.startsWith("--")) {
 			result.diagnostics.push({ type: "error", message: `Unknown option: ${arg}` });
 
-		// ==================== 普通消息文本 ====================
+			// ==================== 普通消息文本 ====================
 		} else if (!arg.startsWith("-")) {
 			result.messages.push(arg);
 		}

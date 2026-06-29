@@ -27,43 +27,37 @@
 // 消息渲染组件
 export { ArminComponent } from "./armin.ts";
 export { AssistantMessageComponent } from "./assistant-message.ts";
-export { BranchSummaryMessageComponent } from "./branch-summary-message.ts";
-export { CompactionSummaryMessageComponent } from "./compaction-summary-message.ts";
-export { CustomMessageComponent } from "./custom-message.ts";
-export { SkillInvocationMessageComponent } from "./skill-invocation-message.ts";
-export { UserMessageComponent } from "./user-message.ts";
-
-// 工具执行与 Diff 组件
-export { BashExecutionComponent } from "./bash-execution.ts";
-export { type RenderDiffOptions, renderDiff } from "./diff.ts";
-export { ToolExecutionComponent, type ToolExecutionOptions } from "./tool-execution.ts";
-
 // 选择器组件
 export { AuthSelectorComponent } from "./auth-selector.ts";
+// 工具执行与 Diff 组件
+export { BashExecutionComponent } from "./bash-execution.ts";
+// 布局与装饰组件
+export { BorderedLoader } from "./bordered-loader.ts";
+export { BranchSummaryMessageComponent } from "./branch-summary-message.ts";
+export { CompactionSummaryMessageComponent } from "./compaction-summary-message.ts";
+// 编辑器组件
+export { CustomEditor } from "./custom-editor.ts";
+export { CustomMessageComponent } from "./custom-message.ts";
+export { type RenderDiffOptions, renderDiff } from "./diff.ts";
+export { DynamicBorder } from "./dynamic-border.ts";
+export { ExtensionEditorComponent } from "./extension-editor.ts";
+export { ExtensionInputComponent } from "./extension-input.ts";
 export { ExtensionSelectorComponent } from "./extension-selector.ts";
+export { FooterComponent } from "./footer.ts";
+// 键绑定提示与辅助工具
+export { keyHint, keyText, rawKeyHint } from "./keybinding-hints.ts";
+// 认证与登录
+export { LoginDialogComponent } from "./login-dialog.ts";
 export { ModelSelectorComponent } from "./model-selector.ts";
 export { type ModelsCallbacks, type ModelsConfig, ScopedModelsSelectorComponent } from "./scoped-models-selector.ts";
 export { SessionSelectorComponent } from "./session-selector.ts";
 export { type SettingsCallbacks, type SettingsConfig, SettingsSelectorComponent } from "./settings-selector.ts";
 export { ShowImagesSelectorComponent } from "./show-images-selector.ts";
+export { SkillInvocationMessageComponent } from "./skill-invocation-message.ts";
 export { ThemeSelectorComponent } from "./theme-selector.ts";
 export { ThinkingSelectorComponent } from "./thinking-selector.ts";
+export { ToolExecutionComponent, type ToolExecutionOptions } from "./tool-execution.ts";
 export { TreeSelectorComponent } from "./tree-selector.ts";
+export { UserMessageComponent } from "./user-message.ts";
 export { UserMessageSelectorComponent } from "./user-message-selector.ts";
-
-// 编辑器组件
-export { CustomEditor } from "./custom-editor.ts";
-export { ExtensionEditorComponent } from "./extension-editor.ts";
-export { ExtensionInputComponent } from "./extension-input.ts";
-
-// 认证与登录
-export { LoginDialogComponent } from "./login-dialog.ts";
-
-// 布局与装饰组件
-export { BorderedLoader } from "./bordered-loader.ts";
-export { DynamicBorder } from "./dynamic-border.ts";
-export { FooterComponent } from "./footer.ts";
-
-// 键绑定提示与辅助工具
-export { keyHint, keyText, rawKeyHint } from "./keybinding-hints.ts";
 export { truncateToVisualLines, type VisualTruncateResult } from "./visual-truncate.ts";

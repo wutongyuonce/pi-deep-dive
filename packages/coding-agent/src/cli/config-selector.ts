@@ -76,20 +76,20 @@ export async function selectConfig(options: ConfigSelectorOptions): Promise<void
 			() => {
 				if (!resolved) {
 					resolved = true;
-					ui.stop();           // 停止 TUI 渲染循环
-					stopThemeWatcher();  // 停止主题文件监听
-					resolve();           // 解除 Promise，恢复调用者的执行流
+					ui.stop(); // 停止 TUI 渲染循环
+					stopThemeWatcher(); // 停止主题文件监听
+					resolve(); // 解除 Promise，恢复调用者的执行流
 				}
 			},
 			// onQuit 回调：用户选择退出程序时调用
 			() => {
 				ui.stop();
 				stopThemeWatcher();
-				process.exit(0);  // 直接退出进程
+				process.exit(0); // 直接退出进程
 			},
 			// requestRender 回调：组件内容变化时触发重新渲染
 			() => ui.requestRender(),
-			ui.terminal.rows,  // 传入终端行数，用于组件布局计算
+			ui.terminal.rows, // 传入终端行数，用于组件布局计算
 		);
 
 		// 将配置组件挂载到 TUI 树中

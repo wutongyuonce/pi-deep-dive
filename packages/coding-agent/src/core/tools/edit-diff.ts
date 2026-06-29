@@ -355,7 +355,7 @@ export function generateDiffString(
 		}
 
 		if (part.added || part.removed) {
-				// 记录第一个变更行（在新文件中的位置）
+			// 记录第一个变更行（在新文件中的位置）
 			if (firstChangedLine === undefined) {
 				firstChangedLine = newLineNum;
 			}

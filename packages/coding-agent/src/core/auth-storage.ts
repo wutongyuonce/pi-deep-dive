@@ -1,16 +1,19 @@
 /**
- * API 密钥凭证存储模块
+ * auth-storage.ts - 认证凭据读写与解析中心
  *
- * 管理 auth.json 文件中的 API 密钥凭证的加载、保存和查询。
- * 使用文件锁（proper-lockfile）防止多个 pi 实例并发更新凭证时产生竞态条件。
+ * 定位：core 层的认证基础设施，负责把磁盘凭据、运行时覆盖、环境变量和自定义回退来源
+ * 统一抽象成可查询的 provider 认证状态。
  *
- * 支持多级密钥查找优先级：
- *   1. 运行时覆盖（CLI --api-key 参数）
- *   2. auth.json 中存储的密钥
- *   3. 环境变量
- *   4. 回退解析器（models.json 自定义提供商）
+ * 作用：
+ * - 持久化 `auth.json` 中的 provider 凭据
+ * - 通过文件锁保护多进程并发写入
+ * - 按优先级解析实际可用的 API key
+ * - 向模型注册表和登录流程暴露“是否已配置”的只读状态
  *
- * 提供 FileAuthStorageBackend（文件持久化）和 InMemoryAuthStorageBackend（内存）两种后端。
+ * 调用关系：
+ * - 被 `model-registry.ts` 调用，用于模型可用性判断和请求认证解析
+ * - 被 CLI `/login`、`/logout` 等认证流程读写
+ * - 被会话启动流程注入到 `AgentSessionServices`
  */
 
 import { findEnvKeys, getEnvApiKey } from "@earendil-works/pi-ai";
@@ -317,15 +320,21 @@ export class AuthStorage {
 	}
 
 	/**
-	 * 从存储后端重新加载凭证
+	 * 从后端重新加载当前凭据快照。
+	 *
+	 * 定位：`AuthStorage` 的初始化和显式刷新入口。
+	 * 作用：在持锁状态下读取最新内容，更新内存缓存，并记录加载失败信息。
+	 * 调用关系：构造函数会先调用一次；上层也可在外部文件变化后再次调用。
 	 */
 	reload(): void {
 		let content: string | undefined;
 		try {
+			// 先在锁内读取当前文件内容，避免并发写入期间读到中间态。
 			this.storage.withLock((current) => {
 				content = current;
 				return { result: undefined };
 			});
+			// 读取成功后再刷新内存中的凭据快照。
 			this.data = this.parseStorageData(content);
 			this.loadError = null;
 		} catch (error) {
@@ -334,7 +343,13 @@ export class AuthStorage {
 		}
 	}
 
-	/** 将单个提供商的凭证变更持久化到存储 */
+	/**
+	 * 将单个 provider 的变更写回底层存储。
+	 *
+	 * 定位：`set()` / `remove()` 的共享落盘实现。
+	 * 作用：读取当前文件、合并单个 provider 的增删改，再原子写回。
+	 * 调用关系：仅由本类的写操作入口调用，不直接暴露给外部。
+	 */
 	private persistProviderChange(provider: string, credential: AuthCredential | undefined): void {
 		if (this.loadError) {
 			return;
@@ -342,6 +357,7 @@ export class AuthStorage {
 
 		try {
 			this.storage.withLock((current) => {
+				// 先基于磁盘最新内容合并，避免覆盖并发写入的其他 provider。
 				const currentData = this.parseStorageData(current);
 				const merged: AuthStorageData = { ...currentData };
 				if (credential) {
@@ -401,8 +417,12 @@ export class AuthStorage {
 	}
 
 	/**
-	 * 检查指定提供商是否有任何形式的认证配置
-	 * 与 getApiKey() 不同，此方法仅报告是否存在某种认证来源，不获取实际密钥。
+	 * 检查 provider 是否存在任意认证来源。
+	 *
+	 * 定位：认证可用性的快速布尔判断。
+	 * 作用：不解析真实密钥值，只判断运行时覆盖、磁盘、环境变量或回退解析器是否命中。
+	 * 调用关系：被 `model-registry.ts` 用于 `hasConfiguredAuth()` 等快速过滤逻辑。
+	 *
 	 * @param provider 提供商名称
 	 */
 	hasAuth(provider: string): boolean {
@@ -414,7 +434,12 @@ export class AuthStorage {
 	}
 
 	/**
-	 * 获取认证状态（不暴露密钥值或刷新令牌）
+	 * 获取 provider 的认证来源描述。
+	 *
+	 * 定位：对外展示层使用的只读状态接口。
+	 * 作用：返回是否已配置以及来源标签，但不会暴露真正的密钥或刷新令牌。
+	 * 调用关系：被模型列表、登录状态展示和诊断信息生成流程调用。
+	 *
 	 * @param provider 提供商名称
 	 * @returns 认证状态描述
 	 */
@@ -460,12 +485,17 @@ export class AuthStorage {
 	}
 
 	/**
-	 * 获取指定提供商的 API 密钥
+	 * 解析指定 provider 的最终 API key。
+	 *
+	 * 定位：认证读取链路的最终出口。
+	 * 作用：按固定优先级返回真实可用的密钥，并在需要时解析配置引用值。
+	 * 调用关系：被 `model-registry.ts` 的请求认证解析流程直接调用。
+	 *
 	 * 查找优先级：
-	 *   1. 运行时覆盖（CLI --api-key）
-	 *   2. auth.json 中的存储密钥
-	 *   3. 环境变量
-	 *   4. 回退解析器（models.json 自定义提供商）
+	 * 1. 运行时覆盖（CLI `--api-key`）
+	 * 2. `auth.json` 中的存储密钥
+	 * 3. 环境变量
+	 * 4. 回退解析器（如 `models.json` 自定义 provider）
 	 *
 	 * @param providerId 提供商标识
 	 * @param options 选项；includeFallback 为 false 时不查找回退解析器
@@ -481,6 +511,7 @@ export class AuthStorage {
 		const cred = this.data[providerId];
 
 		if (cred?.type === "api_key") {
+			// 存储值可能是环境变量名或命令引用，这里统一做一次解析。
 			return resolveConfigValue(cred.key);
 		}
 

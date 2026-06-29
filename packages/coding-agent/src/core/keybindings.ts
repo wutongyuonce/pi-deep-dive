@@ -1,9 +1,16 @@
 /**
- * 快捷键配置模块
+ * keybindings.ts - 应用层快捷键定义与迁移入口
  *
- * 定义应用程序的所有快捷键绑定（包括 TUI 基础快捷键和应用层快捷键），
- * 支持从 keybindings.json 文件加载用户自定义配置，并提供旧版名称到新版
- * 名称的迁移功能。KeybindingsManager 管理快捷键的合并、重载和查询。
+ * 定位：core 层的快捷键配置中心，位于 `pi-tui` 基础能力之上，补充 coding-agent 自己的动作定义。
+ *
+ * 作用：
+ * - 汇总默认快捷键定义
+ * - 读取并迁移用户 `keybindings.json`
+ * - 生成最终生效的按键绑定配置
+ *
+ * 调用关系：
+ * - 被 interactive 模式初始化时创建
+ * - 依赖 `pi-tui` 的 `KeybindingsManager` 承载解析与匹配能力
  */
 
 import {
@@ -304,7 +311,12 @@ function toKeybindingsConfig(value: unknown): KeybindingsConfig {
 }
 
 /**
- * 迁移旧版快捷键配置到新版名称
+ * 迁移旧版快捷键配置到新版名称。
+ *
+ * 定位：历史配置兼容层。
+ * 作用：把旧动作名重写为新命名，同时避免与用户已写入的新名字冲突。
+ * 调用关系：被 `loadFromFile()` 在读取磁盘配置后调用。
+ *
  * @param rawConfig 原始配置对象
  * @returns 迁移后的配置和是否发生了迁移
  */
@@ -350,7 +362,12 @@ function orderKeybindingsConfig(config: Record<string, unknown>): Record<string,
 }
 
 /**
- * 从 JSON 文件加载原始快捷键配置
+ * 从 JSON 文件加载原始快捷键配置。
+ *
+ * 定位：文件读取层的最底层辅助函数。
+ * 作用：负责安全读取和 JSON 解析，失败时统一返回 `undefined`。
+ * 调用关系：被 `KeybindingsManager.loadFromFile()` 调用。
+ *
  * @param path 配置文件路径
  * @returns 解析后的配置对象，文件不存在或解析失败返回 undefined
  */
@@ -379,7 +396,12 @@ export class KeybindingsManager extends TuiKeybindingsManager {
 	}
 
 	/**
-	 * 从默认 agent 目录创建快捷键管理器
+	 * 从默认 agent 目录创建快捷键管理器。
+	 *
+	 * 定位：interactive 模式最常用的构造入口。
+	 * 作用：推导 `keybindings.json` 路径，加载用户配置，再实例化管理器。
+	 * 调用关系：通常由应用启动流程调用。
+	 *
 	 * @param agentDir agent 配置目录
 	 */
 	static create(agentDir: string = getAgentDir()): KeybindingsManager {
@@ -388,7 +410,13 @@ export class KeybindingsManager extends TuiKeybindingsManager {
 		return new KeybindingsManager(userBindings, configPath);
 	}
 
-	/** 从配置文件重新加载用户自定义快捷键 */
+	/**
+	 * 从配置文件重新加载用户自定义快捷键。
+	 *
+	 * 定位：运行时刷新入口。
+	 * 作用：重新读取磁盘配置并覆盖当前用户绑定，不改动默认绑定表。
+	 * 调用关系：由设置重载或显式刷新逻辑调用。
+	 */
 	reload(): void {
 		if (!this.configPath) return;
 		this.setUserBindings(KeybindingsManager.loadFromFile(this.configPath));
@@ -399,7 +427,13 @@ export class KeybindingsManager extends TuiKeybindingsManager {
 		return this.getResolvedBindings();
 	}
 
-	/** 从文件加载并迁移快捷键配置 */
+	/**
+	 * 从文件加载并迁移快捷键配置。
+	 *
+	 * 定位：类内部的标准化读取入口。
+	 * 作用：把原始 JSON 依次经过读取、迁移、类型收窄，最终转成 `KeybindingsConfig`。
+	 * 调用关系：被 `create()` 和 `reload()` 复用。
+	 */
 	private static loadFromFile(path: string): KeybindingsConfig {
 		const rawConfig = loadRawConfig(path);
 		if (!rawConfig) return {};

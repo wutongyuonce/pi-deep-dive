@@ -237,7 +237,12 @@ export function parseModelPattern(
 }
 
 /**
- * 将模型模式列表解析为实际的 Model 对象（附带可选思考级别）。
+ * 将模型模式列表解析为实际的 `Model` 对象集合。
+ *
+ * 定位：模型作用域解析入口，主要服务于 `--models` 和模型切换器。
+ * 作用：把 glob、模糊匹配、显式思考级别等输入统一解析为去重后的模型列表。
+ * 调用关系：被 TUI 模型范围解析和启动前模型约束逻辑调用。
+ *
  * 格式："pattern:level"，其中 :level 可选。
  * 对每个模式，查找所有匹配的模型并选择最佳版本：
  * 1. 优先选择别名（如 claude-sonnet-4-5）而非带日期版本（claude-sonnet-4-5-20250929）
@@ -268,8 +273,7 @@ export async function resolveModelScope(patterns: string[], modelRegistry: Model
 				}
 			}
 
-			// 匹配 "provider/modelId" 格式或仅匹配模型 ID
-			// 这允许 "*sonnet*" 匹配而无需写成 "anthropic/*sonnet*"
+			// 同时匹配 "provider/modelId" 和裸 modelId，兼容更宽松的用户输入。
 			const matchingModels = availableModels.filter((m) => {
 				const fullId = `${m.provider}/${m.id}`;
 				return minimatch(fullId, globPattern, { nocase: true }) || minimatch(m.id, globPattern, { nocase: true });
@@ -323,6 +327,10 @@ export interface ResolveCliModelResult {
 /**
  * 从 CLI 参数解析单个模型。
  *
+ * 定位：命令行启动路径的模型解析主入口。
+ * 作用：组合 `--provider`、`--model`、模糊匹配和 provider 推断规则，返回最合理的目标模型。
+ * 调用关系：被启动流程和初始模型选择逻辑调用。
+ *
  * 支持的格式：
  * - --provider <provider> --model <pattern>
  * - --model <provider>/<pattern>
@@ -342,8 +350,7 @@ export function resolveCliModel(options: {
 		return { model: undefined, warning: undefined, error: undefined };
 	}
 
-	// 重要：此处使用*所有*模型，不仅限于已配置认证的模型。
-	// 这允许 "--api-key" 用于首次设置。
+	// CLI 显式指定模型时要看全量模型，这样首次通过 --api-key 启动也能命中目标模型。
 	const availableModels = modelRegistry.getAll();
 	if (availableModels.length === 0) {
 		return {
@@ -468,7 +475,13 @@ export interface InitialModelResult {
 }
 
 /**
- * 按优先级确定会话的初始模型：
+ * 按优先级确定会话的初始模型。
+ *
+ * 定位：启动流程的最终模型决策器。
+ * 作用：把 CLI、作用域、设置和可用模型列表按固定优先级折叠成一个初始选择。
+ * 调用关系：被 agent 启动阶段直接调用。
+ *
+ * 优先级：
  * 1. CLI 参数（--provider + --model）
  * 2. 作用域模型列表中的第一个（非继续/恢复会话时）
  * 3. 从会话恢复的模型（继续/恢复会话时）
@@ -499,7 +512,7 @@ export async function findInitialModel(options: {
 	let model: Model<Api> | undefined;
 	let thinkingLevel: ThinkingLevel = DEFAULT_THINKING_LEVEL;
 
-	// 1. CLI 参数优先级最高
+	// 1. CLI 显式输入优先级最高，命中后直接返回。
 	if (cliProvider && cliModel) {
 		const resolved = resolveCliModel({
 			cliProvider,
@@ -536,7 +549,7 @@ export async function findInitialModel(options: {
 		}
 	}
 
-	// 4. 尝试第一个有有效 API key 的可用模型
+	// 4. 设置未命中时，再从当前真实可用模型里挑默认值。
 	const availableModels = await modelRegistry.getAvailable();
 
 	if (availableModels.length > 0) {
@@ -558,8 +571,11 @@ export async function findInitialModel(options: {
 }
 
 /**
- * 从会话恢复模型，带降级逻辑。
- * 如果保存的模型不再可用或无认证配置，回退到当前模型或第一个可用模型。
+ * 从会话记录恢复模型，并在失败时执行降级。
+ *
+ * 定位：恢复/继续会话时的模型回放逻辑。
+ * 作用：优先尝试使用会话保存的模型，失败后回退到当前模型或任一可用模型。
+ * 调用关系：被恢复会话流程调用。
  */
 export async function restoreModelFromSession(
 	savedProvider: string,

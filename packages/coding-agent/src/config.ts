@@ -598,7 +598,7 @@ interface PackageJson {
 	name?: string;
 	version?: string;
 	piConfig?: {
-		name?: string;      // 应用名称（如 "pi" 或自定义名称）
+		name?: string; // 应用名称（如 "pi" 或自定义名称）
 		configDir?: string; // 用户配置目录名（默认 ".pi"）
 	};
 }

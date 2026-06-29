@@ -340,18 +340,16 @@ export function getLatestCompactionEntry(entries: SessionEntry[]): CompactionEnt
 }
 
 /**
- * 从会话条目构建会话上下文（通过树遍历）。
- * 如果指定了 leafId，从该条目遍历到根节点。
- * 处理路径上的压缩摘要和分支摘要。
- *
- * 被 SessionManager.buildSessionContext() 调用，是构建 LLM 消息列表的核心逻辑。
+ * 定位：会话树到 LLM 上下文的核心转换函数。
+ * 作用：从当前叶子回溯整条路径，组装消息、模型和思考级别等运行态上下文。
+ * 调用关系：由 `SessionManager.buildSessionContext()` 调用，是会话恢复与发送前的核心步骤。
  */
 export function buildSessionContext(
 	entries: SessionEntry[],
 	leafId?: string | null,
 	byId?: Map<string, SessionEntry>,
 ): SessionContext {
-	// 构建 UUID 索引（如果未提供）
+	// 步骤 1：必要时先构建 id 索引，方便后续从叶子回溯父链。
 	if (!byId) {
 		byId = new Map<string, SessionEntry>();
 		for (const entry of entries) {
@@ -359,7 +357,7 @@ export function buildSessionContext(
 		}
 	}
 
-	// 查找叶子节点
+	// 步骤 2：确定本次要构建上下文的叶子节点。
 	let leaf: SessionEntry | undefined;
 	if (leafId === null) {
 		// 显式为 null——不返回消息（导航到第一条条目之前）
@@ -377,7 +375,7 @@ export function buildSessionContext(
 		return { messages: [], thinkingLevel: "off", model: null };
 	}
 
-	// 从叶子节点遍历到根节点，收集路径
+	// 步骤 3：从叶子一路回溯到根，得到当前分支的完整路径。
 	const path: SessionEntry[] = [];
 	let current: SessionEntry | undefined = leaf;
 	while (current) {
@@ -385,7 +383,7 @@ export function buildSessionContext(
 		current = current.parentId ? byId.get(current.parentId) : undefined;
 	}
 
-	// 提取设置并查找压缩条目
+	// 步骤 4：沿路径提取模型、思考级别和最近一次压缩摘要。
 	let thinkingLevel = "off";
 	let model: { provider: string; modelId: string } | null = null;
 	let compaction: CompactionEntry | null = null;
@@ -402,11 +400,7 @@ export function buildSessionContext(
 		}
 	}
 
-	// 构建消息列表并收集对应条目
-	// 存在压缩条目时需要：
-	// 1. 先输出摘要（entry = compaction）
-	// 2. 输出保留的消息（从 firstKeptEntryId 到 compaction）
-	// 3. 输出压缩之后的消息
+	// 步骤 5：按“压缩摘要 + 保留消息 + 压缩后消息”规则重建最终消息列表。
 	const messages: AgentMessage[] = [];
 
 	const appendMessage = (entry: SessionEntry) => {
@@ -455,9 +449,9 @@ export function buildSessionContext(
 	return { messages, thinkingLevel, model };
 }
 
-	/** 计算 cwd 对应的默认会话目录。
-	 * 将 cwd 编码为安全目录名存储在 ~/.pi/agent/sessions/ 下。
-	 */
+/** 计算 cwd 对应的默认会话目录。
+ * 将 cwd 编码为安全目录名存储在 ~/.pi/agent/sessions/ 下。
+ */
 export function getDefaultSessionDir(cwd: string, agentDir: string = getDefaultAgentDir()): string {
 	const resolvedCwd = resolvePath(cwd);
 	const resolvedAgentDir = resolvePath(agentDir);
@@ -775,8 +769,8 @@ export class SessionManager {
 			this.fileEntries = loadEntriesFromFile(this.sessionFile);
 
 			// 如果文件为空或损坏（无有效会话头），截断并重新创建，
-		// 避免在缺少会话头的情况下追加消息（会导致会话损坏）
-		if (this.fileEntries.length === 0) {
+			// 避免在缺少会话头的情况下追加消息（会导致会话损坏）
+			if (this.fileEntries.length === 0) {
 				const explicitPath = this.sessionFile;
 				this.newSession();
 				this.sessionFile = explicitPath;
@@ -794,7 +788,7 @@ export class SessionManager {
 
 			this._buildIndex();
 			this.flushed = true;
-			} else {
+		} else {
 			const explicitPath = this.sessionFile;
 			this.newSession();
 			this.sessionFile = explicitPath; // 保留 --session 标志传入的显式路径
@@ -832,6 +826,7 @@ export class SessionManager {
 		this.leafId = null;
 		for (const entry of this.fileEntries) {
 			if (entry.type === "session") continue;
+			// 顺序扫描追加式文件，最后一个非头条目天然就是当前叶子。
 			this.byId.set(entry.id, entry);
 			this.leafId = entry.id;
 			if (entry.type === "label") {
@@ -878,16 +873,18 @@ export class SessionManager {
 		const hasAssistant = this.fileEntries.some((e) => e.type === "message" && e.message.role === "assistant");
 		if (!hasAssistant) {
 			// 标记为未刷新，这样当助手消息到达时，所有条目会被一次性写入
-		this.flushed = false;
+			this.flushed = false;
 			return;
 		}
 
 		if (!this.flushed) {
+			// 首次落盘时重写当前内存快照，确保头和历史条目完整写入。
 			for (const e of this.fileEntries) {
 				appendFileSync(this.sessionFile, `${JSON.stringify(e)}\n`);
 			}
 			this.flushed = true;
 		} else {
+			// 之后只需追加最新条目，保持 JSONL 追加式持久化模型。
 			appendFileSync(this.sessionFile, `${JSON.stringify(entry)}\n`);
 		}
 	}
@@ -1169,7 +1166,7 @@ export class SessionManager {
 					parent.children.push(node);
 				} else {
 					// 孤立节点——视为根节点
-				roots.push(node);
+					roots.push(node);
 				}
 			}
 		}
@@ -1247,7 +1244,7 @@ export class SessionManager {
 			throw new Error(`Entry ${leafId} not found`);
 		}
 
-		// 从路径中过滤掉 LabelEntry——稍后从已解析映射中重建
+		// 步骤 1：先截出目标分支路径，再把标签条目单独剥离，稍后重建。
 		const pathWithoutLabels = path.filter((e) => e.type !== "label");
 
 		const newSessionId = createSessionId();
@@ -1264,7 +1261,7 @@ export class SessionManager {
 			parentSession: this.persist ? previousSessionFile : undefined,
 		};
 
-		// 收集路径中条目的标签
+		// 步骤 2：收集该路径上仍然生效的标签，保证导出的分支可继续导航。
 		const pathEntryIds = new Set(pathWithoutLabels.map((e) => e.id));
 		const labelsToWrite: Array<{ targetId: string; label: string; timestamp: string }> = [];
 		for (const [targetId, label] of this.labelsById) {
@@ -1274,7 +1271,7 @@ export class SessionManager {
 		}
 
 		if (this.persist) {
-			// 构建标签条目
+			// 步骤 3：持久化模式下为新文件重建尾部标签条目。
 			const lastEntryId = pathWithoutLabels[pathWithoutLabels.length - 1]?.id || null;
 			let parentId = lastEntryId;
 			const labelEntries: LabelEntry[] = [];
@@ -1312,7 +1309,7 @@ export class SessionManager {
 			return newSessionFile;
 		}
 
-		// 内存模式：用路径 + 标签替换当前会话
+		// 步骤 4：内存模式直接用“路径 + 标签”替换当前会话快照。
 		const labelEntries: LabelEntry[] = [];
 		let parentId = pathWithoutLabels[pathWithoutLabels.length - 1]?.id || null;
 		for (const { targetId, label, timestamp: labelTimestamp } of labelsToWrite) {

@@ -108,16 +108,16 @@ export function collectEntriesForBranchSummary(
 	oldLeafId: string | null,
 	targetId: string,
 ): CollectEntriesResult {
-	// If no old position, nothing to summarize
+	// 没有旧位置时，说明不存在“离开中的分支”，无需生成摘要。
 	if (!oldLeafId) {
 		return { entries: [], commonAncestorId: null };
 	}
 
-	// Find common ancestor (deepest node that's on both paths)
+	// 先分别取出旧叶子和目标节点的路径，用于查找最深公共祖先。
 	const oldPath = new Set(session.getBranch(oldLeafId).map((e) => e.id));
 	const targetPath = session.getBranch(targetId);
 
-	// targetPath is root-first, so iterate backwards to find deepest common ancestor
+	// targetPath 按 root-first 排列，因此倒序扫描即可命中“最深”的公共祖先。
 	let commonAncestorId: string | null = null;
 	for (let i = targetPath.length - 1; i >= 0; i--) {
 		if (oldPath.has(targetPath[i].id)) {
@@ -126,7 +126,7 @@ export function collectEntriesForBranchSummary(
 		}
 	}
 
-	// Collect entries from old leaf back to common ancestor
+	// 从旧叶子向上回溯，只收集离开分支上的条目。
 	const entries: SessionEntry[] = [];
 	let current: string | null = oldLeafId;
 
@@ -137,7 +137,7 @@ export function collectEntriesForBranchSummary(
 		current = entry.parentId;
 	}
 
-	// Reverse to get chronological order
+	// 回溯得到的是倒序结果，这里翻转回时间正序再交给摘要流程。
 	entries.reverse();
 
 	return { entries, commonAncestorId };
@@ -157,7 +157,7 @@ export function collectEntriesForBranchSummary(
 function getMessageFromEntry(entry: SessionEntry): AgentMessage | undefined {
 	switch (entry.type) {
 		case "message":
-			// Skip tool results - context is in assistant's tool call
+			// toolResult 已经由前面的 assistant toolCall 提供上下文，这里直接跳过。
 			if (entry.message.role === "toolResult") return undefined;
 			return entry.message;
 
@@ -170,7 +170,7 @@ function getMessageFromEntry(entry: SessionEntry): AgentMessage | undefined {
 		case "compaction":
 			return createCompactionSummaryMessage(entry.summary, entry.tokensBefore, entry.timestamp);
 
-		// These don't contribute to conversation content
+		// 这些条目不参与摘要上下文拼接。
 		case "thinking_level_change":
 		case "model_change":
 		case "custom":
@@ -202,9 +202,8 @@ export function prepareBranchEntries(entries: SessionEntry[], tokenBudget: numbe
 	const fileOps = createFileOps();
 	let totalTokens = 0;
 
-	// First pass: collect file ops from ALL entries (even if they don't fit in token budget)
-	// This ensures we capture cumulative file tracking from nested branch summaries
-	// Only extract from pi-generated summaries (fromHook !== true), not extension-generated ones
+	// 第一轮先吃全量条目里的文件操作，确保即使消息被预算裁掉，文件轨迹也不会丢。
+	// 这里只复用 pi 自己生成的 branch_summary，避免把扩展私有摘要混进来。
 	for (const entry of entries) {
 		if (entry.type === "branch_summary" && !entry.fromHook && entry.details) {
 			const details = entry.details as BranchSummaryDetails;
@@ -212,7 +211,7 @@ export function prepareBranchEntries(entries: SessionEntry[], tokenBudget: numbe
 				for (const f of details.readFiles) fileOps.read.add(f);
 			}
 			if (Array.isArray(details.modifiedFiles)) {
-				// Modified files go into both edited and written for proper deduplication
+				// 修改文件统一计入 modified 语义，后续会做去重和列表归并。
 				for (const f of details.modifiedFiles) {
 					fileOps.edited.add(f);
 				}
@@ -220,27 +219,27 @@ export function prepareBranchEntries(entries: SessionEntry[], tokenBudget: numbe
 		}
 	}
 
-	// Second pass: walk from newest to oldest, adding messages until token budget
+	// 第二轮从新到旧装入消息，尽量把最近上下文留给摘要模型。
 	for (let i = entries.length - 1; i >= 0; i--) {
 		const entry = entries[i];
 		const message = getMessageFromEntry(entry);
 		if (!message) continue;
 
-		// Extract file ops from assistant messages (tool calls)
+		// 助手消息里的工具调用也可能携带文件路径，需要一并累积。
 		extractFileOpsFromMessage(message, fileOps);
 
 		const tokens = estimateTokens(message);
 
-		// Check budget before adding
+		// 在放入消息前先检查预算，避免超出模型可承受的上下文大小。
 		if (tokenBudget > 0 && totalTokens + tokens > tokenBudget) {
-			// If this is a summary entry, try to fit it anyway as it's important context
+			// 摘要条目价值更高；如果预算还留有余量，优先保住它。
 			if (entry.type === "compaction" || entry.type === "branch_summary") {
 				if (totalTokens < tokenBudget * 0.9) {
 					messages.unshift(message);
 					totalTokens += tokens;
 				}
 			}
-			// Stop - we've hit the budget
+			// 命中预算上限后立即停止，避免再引入更旧的上下文。
 			break;
 		}
 
@@ -312,7 +311,7 @@ export async function generateBranchSummary(
 ): Promise<BranchSummaryResult> {
 	const { model, apiKey, headers, signal, customInstructions, replaceInstructions, reserveTokens = 16384 } = options;
 
-	// Token budget = context window minus reserved space for prompt + response
+	// 先扣掉提示词和回复预留空间，剩余部分才可用于装载待摘要消息。
 	const contextWindow = model.contextWindow || 128000;
 	const tokenBudget = contextWindow - reserveTokens;
 
@@ -322,12 +321,11 @@ export async function generateBranchSummary(
 		return { summary: "No content to summarize" };
 	}
 
-	// Transform to LLM-compatible messages, then serialize to text
-	// Serialization prevents the model from treating it as a conversation to continue
+	// 先转换成 LLM 兼容消息，再序列化成纯文本，避免模型把输入当成待继续的对话。
 	const llmMessages = convertToLlm(messages);
 	const conversationText = serializeConversation(llmMessages);
 
-	// Build prompt
+	// 根据“替换”或“追加”模式组装最终指令。
 	let instructions: string;
 	if (replaceInstructions && customInstructions) {
 		instructions = customInstructions;
@@ -346,14 +344,14 @@ export async function generateBranchSummary(
 		},
 	];
 
-	// Call LLM for summarization
+	// 调用摘要模型生成分支总结正文。
 	const response = await completeSimple(
 		model,
 		{ systemPrompt: SUMMARIZATION_SYSTEM_PROMPT, messages: summarizationMessages },
 		{ apiKey, headers, signal, maxTokens: 2048 },
 	);
 
-	// Check if aborted or errored
+	// 显式区分中止和错误，交给上层决定是否落盘摘要条目。
 	if (response.stopReason === "aborted") {
 		return { aborted: true };
 	}
@@ -366,10 +364,10 @@ export async function generateBranchSummary(
 		.map((c) => c.text)
 		.join("\n");
 
-	// Prepend preamble to provide context about the branch summary
+	// 先补上固定前导语，说明这是“离开分支”的摘要。
 	summary = BRANCH_SUMMARY_PREAMBLE + summary;
 
-	// Compute file lists and append to summary
+	// 最后把文件读写轨迹附在摘要末尾，方便后续恢复工作现场。
 	const { readFiles, modifiedFiles } = computeFileLists(fileOps);
 	summary += formatFileOperations(readFiles, modifiedFiles);
 

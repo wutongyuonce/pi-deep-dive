@@ -55,9 +55,9 @@ function pathOrNull(file: PathOrFileDescriptor): string | null {
 function getFallbackWasmPaths(): string[] {
 	const execDir = path.dirname(process.execPath);
 	return [
-		path.join(execDir, WASM_FILENAME),              // 可执行文件同目录
-		path.join(execDir, "photon", WASM_FILENAME),    // 可执行文件下的 photon 子目录
-		path.join(process.cwd(), WASM_FILENAME),        // 当前工作目录
+		path.join(execDir, WASM_FILENAME), // 可执行文件同目录
+		path.join(execDir, "photon", WASM_FILENAME), // 可执行文件下的 photon 子目录
+		path.join(process.cwd(), WASM_FILENAME), // 当前工作目录
 	];
 }
 

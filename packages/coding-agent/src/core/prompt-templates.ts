@@ -46,11 +46,11 @@ export interface PromptTemplate {
 }
 
 /**
- * 解析命令参数字符串，支持 bash 风格的引号处理。
+ * 定位：提示模板命令行参数解析器。
+ * 作用：把 `/prompt foo "bar baz"` 这种输入拆成稳定的参数数组，供模板展开使用。
+ * 调用关系：仅由 `expandPromptTemplate()` 调用，结果继续传给 `substituteArgs()`。
  *
  * 例如: `'hello world' arg2 "arg three"` → ["hello world", "arg2", "arg three"]
- *
- * 被 expandPromptTemplate() 调用，用于解析模板命令的参数。
  */
 export function parseCommandArgs(argsString: string): string[] {
 	const args: string[] = [];
@@ -61,15 +61,18 @@ export function parseCommandArgs(argsString: string): string[] {
 		const char = argsString[i];
 
 		if (inQuote) {
+			// 引号内保留空白，仅在遇到同类引号时结束当前片段。
 			if (char === inQuote) {
 				inQuote = null;
 			} else {
 				current += char;
 			}
 		} else if (char === '"' || char === "'") {
+			// 非引号态遇到引号，开始收集一个整体参数。
 			inQuote = char;
 		} else if (/\s/.test(char)) {
 			if (current) {
+				// 空白只在当前片段非空时切分参数，避免生成空字符串参数。
 				args.push(current);
 				current = "";
 			}
@@ -86,18 +89,15 @@ export function parseCommandArgs(argsString: string): string[] {
 }
 
 /**
- * 替换模板内容中的参数占位符。
+ * 定位：提示模板正文的参数替换器。
+ * 作用：把模板中的位置参数和聚合参数占位符替换成用户输入的实参。
+ * 调用关系：由 `expandPromptTemplate()` 在模板命中后调用。
  *
  * 支持的占位符：
  * - $1, $2, ...  → 位置参数（1-indexed）
  * - $@ 和 $ARGUMENTS  → 所有参数拼接
  * - ${@:N}  → 从第 N 个参数开始的所有参数（bash 风格切片）
  * - ${@:N:L}  → 从第 N 个参数开始的 L 个参数
- *
- * 注意：替换只在模板字符串上执行一次，参数值中包含的 $1、$@ 等不会被递归替换。
- * 这是因为位置参数在通配符之前替换，防止二次替换。
- *
- * 被 expandPromptTemplate() 在匹配到模板后调用。
  */
 export function substituteArgs(content: string, args: string[]): string {
 	let result = content;
@@ -133,11 +133,13 @@ export function substituteArgs(content: string, args: string[]): string {
 }
 
 /**
- * 从文件路径加载单个提示模板。
- * 解析 .md 文件的 frontmatter 元数据和正文内容。
+ * 定位：单个提示模板文件的加载器。
+ * 作用：读取 `.md` 模板、解析 frontmatter，并产出运行时可消费的 `PromptTemplate`。
+ * 调用关系：由 `loadTemplatesFromDir()` 和显式文件路径加载流程调用。
  */
 function loadTemplateFromFile(filePath: string, sourceInfo: SourceInfo): PromptTemplate | null {
 	try {
+		// 先解析 frontmatter，再从文件名与正文补齐模板元数据。
 		const rawContent = readFileSync(filePath, "utf-8");
 		const { frontmatter, body } = parseFrontmatter<Record<string, string>>(rawContent);
 
@@ -168,7 +170,9 @@ function loadTemplateFromFile(filePath: string, sourceInfo: SourceInfo): PromptT
 }
 
 /**
- * 扫描目录中的 .md 文件（非递归），加载为提示模板。
+ * 定位：目录级提示模板收集器。
+ * 作用：扫描单层目录中的 `.md` 文件并批量转成模板对象。
+ * 调用关系：由 `loadPromptTemplates()` 在默认目录和显式目录路径上调用。
  */
 function loadTemplatesFromDir(dir: string, getSourceInfo: (filePath: string) => SourceInfo): PromptTemplate[] {
 	const templates: PromptTemplate[] = [];
@@ -196,6 +200,7 @@ function loadTemplatesFromDir(dir: string, getSourceInfo: (filePath: string) => 
 			}
 
 			if (isFile && entry.name.endsWith(".md")) {
+				// 仅收集 markdown 模板文件，其他文件类型直接跳过。
 				const template = loadTemplateFromFile(fullPath, getSourceInfo(fullPath));
 				if (template) {
 					templates.push(template);
@@ -221,7 +226,11 @@ export interface LoadPromptTemplatesOptions {
 }
 
 /**
- * 从所有配置位置加载提示模板：
+ * 定位：提示模板总加载入口。
+ * 作用：合并全局、项目级和显式路径中的模板，生成启动期模板列表。
+ * 调用关系：由资源加载与会话初始化流程调用，结果再交给输入处理阶段展开命令。
+ *
+ * 加载顺序：
  * 1. 全局：agentDir/prompts/
  * 2. 项目级：cwd/{CONFIG_DIR_NAME}/prompts/
  * 3. 显式指定的提示模板路径
@@ -247,6 +256,7 @@ export function loadPromptTemplates(options: LoadPromptTemplatesOptions): Prompt
 	};
 
 	const getSourceInfo = (resolvedPath: string): SourceInfo => {
+		// 先判断是否落在默认目录中，以便写入准确的 scope/baseDir。
 		if (isUnderPath(resolvedPath, globalPromptsDir)) {
 			return createSyntheticSourceInfo(resolvedPath, {
 				source: "local",
@@ -268,6 +278,7 @@ export function loadPromptTemplates(options: LoadPromptTemplatesOptions): Prompt
 	};
 
 	if (includeDefaults) {
+		// 先装载默认目录，再追加显式路径，保持来源顺序稳定。
 		templates.push(...loadTemplatesFromDir(globalPromptsDir, getSourceInfo));
 		templates.push(...loadTemplatesFromDir(projectPromptsDir, getSourceInfo));
 	}
@@ -298,8 +309,9 @@ export function loadPromptTemplates(options: LoadPromptTemplatesOptions): Prompt
 }
 
 /**
- * 展开提示模板。如果输入匹配某个模板名称，则替换为模板内容；
- * 否则返回原始文本。
+ * 定位：用户输入到模板正文的展开入口。
+ * 作用：识别 `/name args` 形式的输入，命中模板时返回替换后的正文，否则原样透传。
+ * 调用关系：由输入处理链路调用；内部依次复用 `parseCommandArgs()` 和 `substituteArgs()`。
  *
  * @param text - 用户输入文本（如 "/review src/foo.ts"）
  * @param templates - 已加载的提示模板列表
@@ -316,6 +328,7 @@ export function expandPromptTemplate(text: string, templates: PromptTemplate[]):
 
 	const template = templates.find((t) => t.name === templateName);
 	if (template) {
+		// 先解析参数，再把参数灌入模板正文。
 		const args = parseCommandArgs(argsString);
 		return substituteArgs(template.content, args);
 	}

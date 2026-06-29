@@ -86,6 +86,7 @@ let _aliases: Record<string, string> | null = null;
 function getAliases(): Record<string, string> {
 	if (_aliases) return _aliases;
 
+	// 基于当前源码位置推导工作区各包的入口，兼容源码运行和已构建产物。
 	const __dirname = path.dirname(fileURLToPath(import.meta.url));
 	const packageIndex = path.resolve(__dirname, "../..", "index.js");
 
@@ -96,6 +97,7 @@ function getAliases(): Record<string, string> {
 	const packagesRoot = path.resolve(__dirname, "../../../../");
 	const resolveWorkspaceOrImport = (workspaceRelativePath: string, specifier: string): string => {
 		const workspacePath = path.join(packagesRoot, workspaceRelativePath);
+		// 开发态优先走工作区产物；离开 monorepo 后再回退到真实依赖解析。
 		if (fs.existsSync(workspacePath)) {
 			return workspacePath;
 		}
@@ -152,6 +154,7 @@ export function createExtensionRuntime(): ExtensionRuntime {
 	};
 	const state: { staleMessage?: string } = {};
 	const assertActive = () => {
+		// 运行时被替换或重载后，阻止旧 ctx 继续操作宿主。
 		if (state.staleMessage) {
 			throw new Error(state.staleMessage);
 		}
@@ -219,6 +222,7 @@ function createExtensionAPI(
 		// 注册方法 - 写入扩展对象
 		on(event: string, handler: HandlerFn): void {
 			runtime.assertActive();
+			// 以事件名为键累积处理器，后续由 runner 统一分发。
 			const list = extension.handlers.get(event) ?? [];
 			list.push(handler);
 			extension.handlers.set(event, list);
@@ -226,6 +230,7 @@ function createExtensionAPI(
 
 		registerTool(tool: ToolDefinition): void {
 			runtime.assertActive();
+			// 记录工具定义及来源信息，并立即刷新宿主可见的工具列表。
 			extension.tools.set(tool.name, {
 				definition: tool,
 				sourceInfo: extension.sourceInfo,
@@ -235,6 +240,7 @@ function createExtensionAPI(
 
 		registerCommand(name: string, options: Omit<RegisteredCommand, "name" | "sourceInfo">): void {
 			runtime.assertActive();
+			// 命令名在扩展内唯一，来源信息用于冲突诊断和 UI 展示。
 			extension.commands.set(name, {
 				name,
 				sourceInfo: extension.sourceInfo,
@@ -259,6 +265,7 @@ function createExtensionAPI(
 		): void {
 			runtime.assertActive();
 			extension.flags.set(name, { name, extensionPath: extension.path, ...options });
+			// 默认值只在首次注册时落入共享状态，避免覆盖用户显式设置。
 			if (options.default !== undefined && !runtime.flagValues.has(name)) {
 				runtime.flagValues.set(name, options.default);
 			}
@@ -273,6 +280,7 @@ function createExtensionAPI(
 		getFlag(name: string): boolean | string | undefined {
 			runtime.assertActive();
 			if (!extension.flags.has(name)) return undefined;
+			// 仅允许扩展读取自己声明过的 flag，避免越权访问其他扩展配置。
 			return runtime.flagValues.get(name);
 		},
 
@@ -309,6 +317,7 @@ function createExtensionAPI(
 
 		exec(command: string, args: string[], options?: ExecOptions) {
 			runtime.assertActive();
+			// 未显式传 cwd 时，统一继承扩展加载时绑定的工作目录。
 			return execCommand(command, args, options?.cwd ?? cwd, options);
 		},
 
@@ -374,17 +383,19 @@ function createExtensionAPI(
  * 被谁调用：loadExtension()
  */
 async function loadExtensionModule(extensionPath: string) {
+	// 根据运行环境准备 jiti：Bun 二进制走 virtualModules，开发态走 alias。
 	const jiti = createJiti(import.meta.url, {
 		moduleCache: false,
 		// In Bun binary: use virtualModules for bundled packages (no filesystem resolution)
 		// Also disable tryNative so jiti handles ALL imports (not just the entry point)
 		// In Node.js/dev: use aliases to resolve to node_modules paths
-			// Bun 二进制模式：使用 virtualModules 提供打包的包（不走文件系统解析）
+		// Bun 二进制模式：使用 virtualModules 提供打包的包（不走文件系统解析）
 		// 同时禁用 tryNative，让 jiti 处理所有导入（不仅仅是入口点）
 		// Node.js/开发模式：使用别名解析到 node_modules 路径
 		...(isBunBinary ? { virtualModules: VIRTUAL_MODULES, tryNative: false } : { alias: getAliases() }),
 	});
 
+	// 约定默认导出必须是扩展工厂函数，其他导出形态直接判为无效。
 	const module = await jiti.import(extensionPath, { default: true });
 	const factory = module as ExtensionFactory;
 	return typeof factory !== "function" ? undefined : factory;
@@ -398,12 +409,14 @@ async function loadExtensionModule(extensionPath: string) {
  *           初始化所有 Map 集合用于后续注册。
  */
 function createExtension(extensionPath: string, resolvedPath: string): Extension {
+	// 内联扩展用尖括号路径标识来源；文件扩展默认视为本地扩展。
 	const source =
 		extensionPath.startsWith("<") && extensionPath.endsWith(">")
 			? extensionPath.slice(1, -1).split(":")[0] || "temporary"
 			: "local";
 	const baseDir = extensionPath.startsWith("<") ? undefined : path.dirname(resolvedPath);
 
+	// 初始化所有注册容器，后续由 createExtensionAPI 中的 register* 方法填充。
 	return {
 		path: extensionPath,
 		resolvedPath,
@@ -438,6 +451,7 @@ async function loadExtension(
 	const resolvedPath = resolvePath(extensionPath, cwd, { normalizeUnicodeSpaces: true });
 
 	try {
+		// 先加载工厂函数，再基于同一 runtime 构造扩展实例和 API。
 		const factory = await loadExtensionModule(resolvedPath);
 		if (!factory) {
 			return { extension: null, error: `Extension does not export a valid factory function: ${extensionPath}` };
@@ -467,6 +481,7 @@ export async function loadExtensionFromFactory(
 	runtime: ExtensionRuntime,
 	extensionPath = "<inline>",
 ): Promise<Extension> {
+	// 内联工厂不需要文件解析，直接复用标准创建和初始化流程。
 	const extension = createExtension(extensionPath, extensionPath);
 	const resolvedCwd = resolvePath(cwd);
 	const api = createExtensionAPI(extension, runtime, resolvedCwd, eventBus);
@@ -487,6 +502,7 @@ export async function loadExtensions(paths: string[], cwd: string, eventBus?: Ev
 	const resolvedEventBus = eventBus ?? createEventBus();
 	const runtime = createExtensionRuntime();
 
+	// 所有扩展共享一个 runtime，后续由 runner 统一绑定到宿主能力。
 	for (const extPath of paths) {
 		const { extension, error } = await loadExtension(extPath, resolvedCwd, resolvedEventBus, runtime);
 
@@ -523,6 +539,7 @@ interface PiManifest {
  */
 function readPiManifest(packageJsonPath: string): PiManifest | null {
 	try {
+		// 只提取 package.json 里的 pi 字段，其余内容对扩展发现流程无关。
 		const content = fs.readFileSync(packageJsonPath, "utf-8");
 		const pkg = JSON.parse(content);
 		if (pkg.pi && typeof pkg.pi === "object") {
@@ -548,7 +565,7 @@ function isExtensionFile(name: string): boolean {
  * 返回解析后的路径数组，如果未找到入口点则返回 null。
  */
 function resolveExtensionEntries(dir: string): string[] | null {
-	// Check for package.json with "pi" field first
+	// 优先尊重 package.json 里的清单声明，显式入口比约定式入口优先级更高。
 	const packageJsonPath = path.join(dir, "package.json");
 	if (fs.existsSync(packageJsonPath)) {
 		const manifest = readPiManifest(packageJsonPath);
@@ -556,6 +573,7 @@ function resolveExtensionEntries(dir: string): string[] | null {
 			const entries: string[] = [];
 			for (const extPath of manifest.extensions) {
 				const resolvedExtPath = path.resolve(dir, extPath);
+				// 只返回当前实际存在的入口，避免把失效路径传入加载器。
 				if (fs.existsSync(resolvedExtPath)) {
 					entries.push(resolvedExtPath);
 				}
@@ -566,7 +584,7 @@ function resolveExtensionEntries(dir: string): string[] | null {
 		}
 	}
 
-	// Check for index.ts or index.js
+	// 没有显式清单时，退回到 index.ts / index.js 的约定式发现。
 	const indexTs = path.join(dir, "index.ts");
 	const indexJs = path.join(dir, "index.js");
 	if (fs.existsSync(indexTs)) {
@@ -583,9 +601,9 @@ function resolveExtensionEntries(dir: string): string[] | null {
  * 从目录中发现扩展文件。
  *
  * 发现规则：
- * 1. 直接文件：extensions/*.ts 或 *.js → 加载
- * 2. 含 index 的子目录：extensions/*/index.ts 或 index.js → 加载
- * 3. 含 package.json 的子目录：extensions/*/package.json 包含 "pi" 字段 → 加载其声明的内容
+ * 1. 直接文件：`extensions/*.ts` 或 `extensions/*.js` -> 加载
+ * 2. 含 index 的子目录：`extensions/<name>/index.ts` 或 `extensions/<name>/index.js` -> 加载
+ * 3. 含 package.json 的子目录：`extensions/<name>/package.json` 包含 `pi` 字段 -> 加载其声明的内容
  *
  * 不递归超过一层。复杂包必须使用 package.json 清单。
  *
@@ -604,13 +622,13 @@ function discoverExtensionsInDir(dir: string): string[] {
 		for (const entry of entries) {
 			const entryPath = path.join(dir, entry.name);
 
-			// 1. Direct files: *.ts or *.js
+			// 规则 1：目录下直接可执行的 ts/js 文件。
 			if ((entry.isFile() || entry.isSymbolicLink()) && isExtensionFile(entry.name)) {
 				discovered.push(entryPath);
 				continue;
 			}
 
-			// 2 & 3. Subdirectories
+			// 规则 2/3：子目录通过清单或 index 文件继续解析入口。
 			if (entry.isDirectory() || entry.isSymbolicLink()) {
 				const entries = resolveExtensionEntries(entryPath);
 				if (entries) {
@@ -650,6 +668,7 @@ export async function discoverAndLoadExtensions(
 	const addPaths = (paths: string[]) => {
 		for (const p of paths) {
 			const resolved = path.resolve(p);
+			// 去重按绝对路径执行，避免同一扩展从多个来源被重复加载。
 			if (!seen.has(resolved)) {
 				seen.add(resolved);
 				allPaths.push(p);
@@ -657,25 +676,23 @@ export async function discoverAndLoadExtensions(
 		}
 	};
 
-	// 1. Project-local extensions: cwd/${CONFIG_DIR_NAME}/extensions/
+	// 先发现项目本地扩展，保证离当前仓库最近的配置优先生效。
 	const localExtDir = path.join(resolvedCwd, CONFIG_DIR_NAME, "extensions");
 	addPaths(discoverExtensionsInDir(localExtDir));
 
-	// 2. Global extensions: agentDir/extensions/
+	// 再补充全局扩展目录，提供跨项目共享的默认能力。
 	const globalExtDir = path.join(resolvedAgentDir, "extensions");
 	addPaths(discoverExtensionsInDir(globalExtDir));
 
-	// 3. Explicitly configured paths
+	// 最后处理用户显式配置的路径，文件直接加载，目录则继续按发现规则展开。
 	for (const p of configuredPaths) {
 		const resolved = resolvePath(p, resolvedCwd, { normalizeUnicodeSpaces: true });
 		if (fs.existsSync(resolved) && fs.statSync(resolved).isDirectory()) {
-			// Check for package.json with pi manifest or index.ts
 			const entries = resolveExtensionEntries(resolved);
 			if (entries) {
 				addPaths(entries);
 				continue;
 			}
-			// No explicit entries - discover individual files in directory
 			addPaths(discoverExtensionsInDir(resolved));
 			continue;
 		}

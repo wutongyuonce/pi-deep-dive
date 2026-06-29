@@ -789,8 +789,9 @@ function collectAutoExtensionEntries(dir: string): string[] {
 }
 
 /**
- * 根据资源类型从目录中收集资源文件。
- * 扩展使用智能发现（子目录中的 index.ts），其他类型使用递归收集。
+ * 定位：资源目录到文件列表的统一分发器。
+ * 作用：根据资源类型切换到对应的发现策略，屏蔽扩展/技能/普通文件的差异。
+ * 调用关系：被 manifest、包目录和本地路径解析流程复用。
  */
 function collectResourceFiles(dir: string, resourceType: ResourceType): string[] {
 	if (resourceType === "skills") {
@@ -887,11 +888,11 @@ function isEnabledByOverrides(filePath: string, patterns: string[], baseDir: str
 
 /**
  * 将模式应用于路径列表，返回启用路径的集合。
-	 * 模式类型：
-	 * - 普通模式：包含匹配的路径
-	 * - `!模式`：排除匹配的路径
-	 * - `+路径`：强制包含精确路径（覆盖排除）
-	 * - `-路径`：强制排除精确路径（覆盖强制包含）
+ * 模式类型：
+ * - 普通模式：包含匹配的路径
+ * - `!模式`：排除匹配的路径
+ * - `+路径`：强制包含精确路径（覆盖排除）
+ * - `-路径`：强制排除精确路径（覆盖强制包含）
  */
 function applyPatterns(allPaths: string[], patterns: string[], baseDir: string): Set<string> {
 	const includes: string[] = [];
@@ -1048,6 +1049,7 @@ export class DefaultPackageManager implements PackageManager {
 	}
 
 	async resolve(onMissing?: (source: string) => Promise<MissingSourceAction>): Promise<ResolvedPaths> {
+		// 步骤 1：先创建累积器并读取全局/项目设置快照。
 		const accumulator = this.createAccumulator();
 		const globalSettings = this.settingsManager.getGlobalSettings();
 		const projectSettings = this.settingsManager.getProjectSettings();
@@ -1061,13 +1063,14 @@ export class DefaultPackageManager implements PackageManager {
 			allPackages.push({ pkg, scope: "user" });
 		}
 
-		// 去重：相同包标识时项目级优先于用户级
+		// 步骤 2：对包源做作用域去重后解析包资源。
 		const packageSources = this.dedupePackages(allPackages);
 		await this.resolvePackageSources(packageSources, accumulator, onMissing);
 
 		const globalBaseDir = this.agentDir;
 		const projectBaseDir = join(this.cwd, CONFIG_DIR_NAME);
 
+		// 步骤 3：补齐顶层本地资源配置与自动发现资源。
 		for (const resourceType of RESOURCE_TYPES) {
 			const target = this.getTargetMap(accumulator, resourceType);
 			const globalEntries = (globalSettings[resourceType] ?? []) as string[];
@@ -1098,6 +1101,7 @@ export class DefaultPackageManager implements PackageManager {
 
 		this.addAutoDiscoveredResources(accumulator, globalSettings, projectSettings, globalBaseDir, projectBaseDir);
 
+		// 步骤 4：统一转换为排序后的已解析结果。
 		return this.toResolvedPaths(accumulator);
 	}
 
@@ -1229,6 +1233,7 @@ export class DefaultPackageManager implements PackageManager {
 			return;
 		}
 
+		// 步骤 1：先按 npm / git 类型拆分待更新目标。
 		const npmCandidates: NpmUpdateTarget[] = [];
 		const gitCandidates: GitUpdateTarget[] = [];
 
@@ -1245,6 +1250,7 @@ export class DefaultPackageManager implements PackageManager {
 			}
 		}
 
+		// 步骤 2：并发检查 npm 是否存在新版本，再按作用域批量更新。
 		const npmCheckTasks = npmCandidates.map((entry) => async () => ({
 			entry,
 			shouldUpdate: await this.shouldUpdateNpmSource(entry.parsed, entry.scope),
@@ -1263,6 +1269,7 @@ export class DefaultPackageManager implements PackageManager {
 			}
 		}
 
+		// 步骤 3：汇总用户级、项目级 npm 更新以及 git 更新任务并并发执行。
 		const tasks: Promise<void>[] = [];
 		if (userNpmUpdates.length > 0) {
 			tasks.push(this.updateNpmBatch(userNpmUpdates, "user"));
@@ -1395,6 +1402,7 @@ export class DefaultPackageManager implements PackageManager {
 			const parsed = this.parseSource(sourceStr);
 			const metadata: PathMetadata = { source: sourceStr, scope, origin: "package" };
 
+			// 步骤 1：本地路径不需要安装，直接按本地目录解析资源。
 			if (parsed.type === "local") {
 				const baseDir = this.getBaseDirForScope(scope);
 				this.resolveLocalExtensionSource(parsed, accumulator, filter, metadata, baseDir);
@@ -1416,6 +1424,7 @@ export class DefaultPackageManager implements PackageManager {
 				return true;
 			};
 
+			// 步骤 2：npm 源在缺失或版本不匹配时先安装，再收集包内资源。
 			if (parsed.type === "npm") {
 				let installedPath = this.getNpmInstallPath(parsed, scope);
 				const needsInstall =
@@ -1431,6 +1440,7 @@ export class DefaultPackageManager implements PackageManager {
 				continue;
 			}
 
+			// 步骤 3：git 源按已有 checkout、临时刷新和缺失安装三种情况处理。
 			if (parsed.type === "git") {
 				const installedPath = this.getGitInstallPath(parsed, scope);
 				if (!existsSync(installedPath)) {
@@ -2188,6 +2198,7 @@ export class DefaultPackageManager implements PackageManager {
 		metadata: PathMetadata,
 	): boolean {
 		if (filter) {
+			// 步骤 1：显式过滤器优先，逐类决定收集策略和启用状态。
 			for (const resourceType of RESOURCE_TYPES) {
 				const patterns = filter[resourceType as keyof PackageFilter];
 				const target = this.getTargetMap(accumulator, resourceType);
@@ -2202,6 +2213,7 @@ export class DefaultPackageManager implements PackageManager {
 
 		const manifest = this.readPiManifest(packageRoot);
 		if (manifest) {
+			// 步骤 2：没有显式过滤器时，优先尊重包内 manifest 声明。
 			for (const resourceType of RESOURCE_TYPES) {
 				const entries = manifest[resourceType as keyof PiManifest];
 				this.addManifestEntries(
@@ -2215,6 +2227,7 @@ export class DefaultPackageManager implements PackageManager {
 			return true;
 		}
 
+		// 步骤 3：最后回退到目录约定扫描 extensions/skills/prompts/themes。
 		let hasAnyDir = false;
 		for (const resourceType of RESOURCE_TYPES) {
 			const dir = join(packageRoot, resourceType);
@@ -2439,12 +2452,13 @@ export class DefaultPackageManager implements PackageManager {
 		) => {
 			const target = this.getTargetMap(accumulator, resourceType);
 			for (const path of paths) {
+				// 自动发现也要套用 overrides，保持与显式配置一致的启用语义。
 				const enabled = isEnabledByOverrides(path, overrides, baseDir);
 				this.addResource(target, path, metadata, enabled);
 			}
 		};
 
-		// Project extensions from .pi/
+		// 步骤 1：先收集项目级 .pi/ 与 .agents/ 资源，保证项目覆盖优先。
 		addResources(
 			"extensions",
 			collectAutoExtensionEntries(projectDirs.extensions),
@@ -2493,7 +2507,7 @@ export class DefaultPackageManager implements PackageManager {
 			projectBaseDir,
 		);
 
-		// User extensions from ~/.pi/agent/
+		// 步骤 2：再补用户级 ~/.pi/agent/ 与 ~/.agents/ 资源。
 		addResources(
 			"extensions",
 			collectAutoExtensionEntries(userDirs.extensions),
@@ -2656,6 +2670,7 @@ export class DefaultPackageManager implements PackageManager {
 		options?: { cwd?: string; timeoutMs?: number; env?: Record<string, string> },
 	): Promise<string> {
 		return new Promise((resolvePromise, reject) => {
+			// 统一收集 stdout/stderr 和超时状态，给上层返回单个字符串结果。
 			const child = this.spawnCaptureCommand(command, args, options);
 			let stdout = "";
 			let stderr = "";

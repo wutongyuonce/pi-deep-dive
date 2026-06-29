@@ -38,23 +38,13 @@ export interface BuildSystemPromptOptions {
 }
 
 /**
- * 构建完整的系统提示字符串。
+ * 定位：Agent 系统提示词的总组装入口。
+ * 作用：把自定义提示、内置指南、项目上下文和技能说明拼成最终发送给模型的 system message。
+ * 调用关系：由会话初始化流程调用，返回结果直接进入 Agent 初始状态。
  *
  * 两种模式：
  * 1. 自定义模式（customPrompt 已设置）：直接使用自定义提示，追加上下文文件和技能
  * 2. 默认模式：生成包含角色定义、工具列表、使用指南、文档路径的完整提示
- *
- * 内部步骤：
- * 1. 解析配置项，准备当前日期和工作目录
- * 2. 若为自定义模式：拼接 appendSystemPrompt + 项目上下文 + 技能 + 日期/目录
- * 3. 若为默认模式：
- *    a. 获取 pi 文档/示例路径
- *    b. 根据 selectedTools 和 toolSnippets 构建可用工具列表
- *    c. 根据可用工具动态生成使用指南（去重）
- *    d. 拼接角色定义、工具列表、指南、文档路径
- * 4. 无论哪种模式，末尾都追加项目上下文文件、技能信息、当前日期和工作目录
- *
- * 被 agent 启动时调用，返回值作为 system message 发送给 LLM。
  */
 export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 	const {
@@ -85,6 +75,7 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 	if (customPrompt) {
 		let prompt = customPrompt;
 
+		// 步骤 1：先拼接调用方附加的补充段落。
 		if (appendSection) {
 			prompt += appendSection;
 		}
@@ -105,28 +96,26 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 			prompt += formatSkillsForPrompt(skills);
 		}
 
-		// 末尾追加当前日期和工作目录
+		// 步骤 2：最后统一追加运行时上下文，保证模型知道当前日期和 cwd。
 		prompt += `\nCurrent date: ${date}`;
 		prompt += `\nCurrent working directory: ${promptCwd}`;
 
 		return prompt;
 	}
 
-	// 默认提示模式：构建包含角色定义、工具列表和使用指南的完整提示
-
-	// 获取 pi 文档/示例的绝对路径（仅在默认模式下使用）
+	// 默认提示模式：构建包含角色定义、工具列表和使用指南的完整提示。
+	// 步骤 1：先解析 pi 文档/示例的绝对路径，供默认提示引用。
 	const readmePath = getReadmePath();
 	const docsPath = getDocsPath();
 	const examplesPath = getExamplesPath();
 
-	// 根据 selectedTools 和 toolSnippets 构建可见工具列表
-	// 只有同时在 selectedTools 和 toolSnippets 中存在的工具才会出现在提示中
+	// 步骤 2：根据 selectedTools 和 toolSnippets 计算真正可见的工具列表。
 	const tools = selectedTools || ["read", "bash", "edit", "write"];
 	const visibleTools = tools.filter((name) => !!toolSnippets?.[name]);
 	const toolsList =
 		visibleTools.length > 0 ? visibleTools.map((name) => `- ${name}: ${toolSnippets![name]}`).join("\n") : "(none)";
 
-	// 根据可用工具动态生成使用指南，使用 Set 去重
+	// 步骤 3：根据工具组合生成指南，并用 Set 去重，避免提示词重复。
 	const guidelinesList: string[] = [];
 	const guidelinesSet = new Set<string>();
 	const addGuideline = (guideline: string): void => {
@@ -157,7 +146,7 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 		}
 	}
 
-	// 始终包含的通用指南
+	// 步骤 4：追加无论工具组合如何都应该存在的通用准则。
 	addGuideline("Be concise in your responses");
 	addGuideline("Show file paths clearly when working with files");
 
@@ -186,7 +175,7 @@ Pi documentation (read only when the user asks about pi itself, its SDK, extensi
 		prompt += appendSection;
 	}
 
-	// 追加项目上下文文件（如 AGENTS.md、CONTEXT.md 等）
+	// 步骤 5：把项目上下文文件和技能说明追加到默认提示后部。
 	if (contextFiles.length > 0) {
 		prompt += "\n\n<project_context>\n\n";
 		prompt += "Project-specific instructions and guidelines:\n\n";
@@ -201,7 +190,7 @@ Pi documentation (read only when the user asks about pi itself, its SDK, extensi
 		prompt += formatSkillsForPrompt(skills);
 	}
 
-	// 末尾追加当前日期和工作目录
+	// 步骤 6：统一补上运行时日期和 cwd，给模型提供时空上下文。
 	prompt += `\nCurrent date: ${date}`;
 	prompt += `\nCurrent working directory: ${promptCwd}`;
 

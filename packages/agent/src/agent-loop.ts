@@ -327,10 +327,10 @@ async function runLoop(
 			// - Agent 用它来透传用户传入的 prepareNextTurn 回调
 			// 返回 undefined 表示不做任何修改，继续用当前配置。
 			const nextTurnContext = {
-				message,                    // 本轮的助手回复
-				toolResults,                // 本轮的工具执行结果
-				context: currentContext,     // 当前上下文（已追加本轮消息）
-				newMessages,                // 本次 runAgentLoop 累计的新消息
+				message, // 本轮的助手回复
+				toolResults, // 本轮的工具执行结果
+				context: currentContext, // 当前上下文（已追加本轮消息）
+				newMessages, // 本次 runAgentLoop 累计的新消息
 			};
 			const nextTurnSnapshot = await config.prepareNextTurn?.(nextTurnContext);
 			if (nextTurnSnapshot) {
@@ -581,9 +581,9 @@ async function executeToolCallsSequential(
 		// 这是运行时事件，不进入上下文，仅用于 UI 消费
 		await emit({
 			type: "tool_execution_start",
-			toolCallId: toolCall.id,   // LLM 生成的工具调用唯一 ID（如 "call_abc123"）
-			toolName: toolCall.name,   // 工具名称（如 "read_file"、"bash"）
-			args: toolCall.arguments,  // 工具参数，已经是解析后的对象（非 JSON 字符串）
+			toolCallId: toolCall.id, // LLM 生成的工具调用唯一 ID（如 "call_abc123"）
+			toolName: toolCall.name, // 工具名称（如 "read_file"、"bash"）
+			args: toolCall.arguments, // 工具参数，已经是解析后的对象（非 JSON 字符串）
 		});
 
 		// 【步骤 2】准备阶段：查找工具定义、参数预处理、schema 校验、执行 before hook、检查 abort
@@ -596,8 +596,8 @@ async function executeToolCallsSequential(
 			// 【步骤 2a】immediate 分支——跳过 execute，直接组装最终结果
 			// 典型场景：工具名在上下文中找不到、参数不合法、before hook 返回了阻断值
 			finalized = {
-				toolCall,                    // 保留原始 toolCall 信息（id、name、arguments）
-				result: preparation.result,  // 准备阶段生成的结果（通常是错误提示文本）
+				toolCall, // 保留原始 toolCall 信息（id、name、arguments）
+				result: preparation.result, // 准备阶段生成的结果（通常是错误提示文本）
 				isError: preparation.isError, // 标记为错误结果
 			};
 		} else {
@@ -626,8 +626,8 @@ async function executeToolCallsSequential(
 		await emitToolResultMessage(toolResultMessage, emit);
 
 		// 【步骤 6】将结果推入两个收集器
-		finalizedCalls.push(finalized);    // 用于 shouldTerminateToolBatch 判断是否终止
-		messages.push(toolResultMessage);  // 用于返回给上层添加到 context
+		finalizedCalls.push(finalized); // 用于 shouldTerminateToolBatch 判断是否终止
+		messages.push(toolResultMessage); // 用于返回给上层添加到 context
 
 		// 【步骤 7】检查 abort 信号——用户取消时立即跳出循环，不再执行后续工具
 		// signal?.aborted 使用可选链：signal 可能是 undefined（未传入），安全访问

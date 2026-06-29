@@ -221,200 +221,6 @@ await session.prompt("帮我阅读当前项目的入口并解释启动流程");
 
 * vitest.config.ts - Vitest 测试框架的配置文件，设置测试环境、超时时间、依赖处理和路径别名。路径别名让测试可以直接引用源代码，便于调试和开发。手写。
 
-## 主调用链
-
-从 `pi` 命令启动到进入交互模式，主调用链路本质上是在**启动一个可切换、可恢复、可扩展的 session runtime**，然后再给这个 runtime 套上 interactive / print / rpc 三种外壳：
-
-`cli.ts -> main.ts -> runtime -> services -> session -> modes`
-
-```ts
-cli.ts // coding-agent 的 CLI 入口文件（shebang 脚本）
-
-main.ts
-  -> 1、定义 createRuntime 工厂函数
-  -> 2、createAgentSessionRuntime(createRuntime, initialOptions) // 把工厂和初始结果装进 runtime
-  	-> （1）先调用 createRuntime(initialOptions) 工厂
-  	  -> createAgentSessionServices(...) // 先造 services
-  	    -> 返回 AgentSessionServices
-  	  -> createAgentSessionFromServices(...) // 再基于 services 造 AgentSession
-  	    -> 内部委托给 sdk.ts:createAgentSession(...)，得到 AgentSession(...)
-  	    -> 返回 { session, extensionsResult, modelFallbackMessage }
-  	  -> 工厂返回 { session, services, diagnostics, modelFallbackMessage }
- 	-> （2）再 new AgentSessionRuntime(session, services, createRuntime, diagnostics, modelFallbackMessage) // AgentSessionRuntime 持有 session: AgentSession、services: AgentSessionServices，也持有“如何重新创建它们”的 createRuntime 工厂函数
-       
-interactive / print / rpc 三个 mode 共用同一个会话核心
-InteractiveMode runPrintMode runRpcMode
-  -> AgentSessionRuntime.session
-      -> AgentSession.prompt()
-      -> AgentSession.compact()
-      -> AgentSession.bindExtensions()
-      -> AgentSession.navigateTree()
-而 `AgentSession` 内部又会继续调用：
-- `sessionManager`
-- `settingsManager`
-- `resourceLoader`
-- `modelRegistry`
-- 底层 `agent`
-
-根据参数选择运行模式（interactive / print / rpc）
-```
-
-1. 设置进程元数据（标题、环境变量）
-1. 配置全局 HTTP 调度器
-1. 将控制权交给 `main()` 启动应用
-
-package.json 里的 bin 字段设置
-
-```json
-{
-  "name": "pi-coding-agent",
-  "bin": {
-    "pi": "./dist/cli.js"
-  }
-}
-```
-
-npm 读到这个配置后，在 npm install -g 时会自动在全局 bin/ 目录（比如 /usr/local/bin/ ）创建一个符号链接 pi 指向 ./dist/cli.js。当用户敲 pi 时，系统沿着符号链接找到 cli.js ，看到它的 shebang #!/usr/bin/env node，就用 node 来执行它。
-
-
-
-
-
-```ts
-// ── import ──────────────────────────────────────────────────────────
-// 应用名称常量，用于设置进程标题和窗口标识
-import { APP_NAME } from "./config.ts";
-// 配置 undici 全局 HTTP 调度器，统一管理所有出站 HTTP 请求的行为（超时、重试等）
-import { configureHttpDispatcher } from "./core/http-dispatcher.ts";
-// 应用主函数，负责解析参数并启动对应的运行模式
-import { main } from "./main.ts";
-
-// ── 进程设置 ────────────────────────────────────────────────────────
-// 设置进程标题，使其在 `ps` / `top` 等工具中显示为应用名称而非 "node"
-process.title = APP_NAME;
-// process.env 就像一张"进程信息贴纸"
-// 启动时 Shell 已经贴了一些（PATH、HOME、API_KEY...）
-// 代码运行时可以再往上贴自己的标签，这里标记当前进程为 coding-agent
-process.env.PI_CODING_AGENT = "true";
-// 禁用 Node.js 的 process.emitWarning，避免在运行过程中输出无关的警告信息干扰用户
-process.emitWarning = (() => {}) as typeof process.emitWarning;
-
-// ── 配置 HTTP 调度器 ────────────────────────────────────────────────
-// 在任何 provider SDK 发起请求之前，配置 undici 的全局 HTTP 调度器。
-// 运行时的详细设置（如代理、超时）会在 SettingsManager 加载全局/项目配置后应用。
-configureHttpDispatcher();
-
-// ── 启动应用 ────────────────────────────────────────────────────────
-// 将命令行参数（去掉前两个元素：node 和脚本路径）传入 main 函数，
-// 由 main.ts 根据参数决定进入哪种运行模式（交互模式 / 打印模式 / RPC 模式）。
-main(process.argv.slice(2));
-```
-
-> process 是 Node.js 的**全局对象**，代表当前运行的进程。
-
-四个对象分层：
-
-```
-runtime 宿主
-  ↓ 持有
-services 基础设施
-  ↓ 输入给
-session 工厂
-  ↓ 产出
-AgentSession 业务核心
-```
-
-核心是  `services -> sdk -> session` 三层：
-
-- `core/agent-session-services.ts` **与 cwd 绑定的环境基础设施集合**
-  - 解决的是 **cwd 环境问题**，关心“这轮对话是站在哪个目录里跑”，包含 `createAgentSessionServices()` 函数，以这个目录为中心，向外推导出当前 session 可见的配置、资源、上下文规则和相对路径语义，具体包括：
-    - 项目配置环境
-      - 这个目录下有没有 .pi/settings.json
-    - 上下文规则环境
-      - 从这个目录向上找哪些 AGENTS.md / CLAUDE.md
-    - 资源发现环境
-      - 这个项目下有哪些本地 extensions / skills / prompts / themes
-    - 路径解析环境
-      - 用户说“读 src/index.ts ”时， src/index.ts 相对谁解析
-    - session 归属环境
-      - 这个 session 属于哪个项目/子目录视角
-  - 负责创建 `authStorage`、`settingsManager`、`modelRegistry`、`resourceLoader` 等
-- `core/sdk.ts` **会话装配逻辑**
-  - 解决的是**会话装配问题**，包含 `createAgentSession()` 函数，真正把 `pi-ai + pi-agent-core + tools + prompt + session context` 组装成会话的工厂
-- `core/agent-session.ts` **产品层真正的核心对象**
-  - 解决的是**运行问题**，关心“这轮对话怎么跑”
-  - 真正负责 prompt、持久化消息、tool hooks、extension 扩展绑定、compaction、bash、tree navigation
-
-在此基础之上，又包了一层 `core/agent-session-runtime.ts` **当前激活 session 的宿主对象**
-
-- 它不负责“具体一轮 prompt 怎么跑”，而负责“当前宿主现在挂着哪个 session，以及如何切换到另一个 session”
-
-> **如果只有 `sdk.ts -> AgentSession`，其实已经能跑了，那为什么还需要 `AgentSessionRuntime`？**
->
-> * `AgentSession` 只负责“这个 session 怎么活”
-> * 产品层还要支持：`newSession()`、`switchSession()`、`fork()`、`importFromJsonl()`
->
-> * 这些都不是“当前会话内部行为”，而是“当前宿主切到另一个会话”的行为。
-
-例如 `switchSession()` 的流程是：
-
-1. 打开目标 `SessionManager`
-2. teardown 当前 session
-3. 用同一个 `createRuntime` 工厂重新创建一套新的 `services + session`
-4. `apply()` 到 runtime
-5. `rebindSession()` 让 UI 或外部宿主重新绑定新 session
-
-`newSession()`、`fork()`、`importFromJsonl()` 也都是同样套路：
-
-- 先准备新的 `SessionManager`
-- 再重建一整套 runtime 结果
-- 最后替换当前 `session/services`
-
-## 为什么 runtime / services / session 三层拆得这么细
-
-这一点是整层架构最值得强调的设计。
-
-如果不拆，会出现两种坏结果：
-
-### 坏结果 1：一个类承担两种生命周期
-
-- 会话内生命周期
-  - prompt
-  - tool calls
-  - retry
-  - compaction
-- 宿主生命周期
-  - new session
-  - resume
-  - fork
-  - import
-  - UI rebind
-
-这两类生命周期天然不同，不该由同一对象同时负责。
-
-### 坏结果 2：cwd 绑定的环境状态和会话状态缠在一起
-
-例如切 session 时，哪些东西要变？
-
-- `cwd`
-- `settingsManager`
-- `resourceLoader`
-- `modelRegistry`
-- `systemPrompt`
-- 可能的 extension runtime
-
-这些都是环境层的变化，不该和“当前 turn 队列里有哪些消息”放在同一个对象里处理。
-
-所以最终拆成：
-
-```text
-宿主层：AgentSessionRuntime
-环境层：AgentSessionServices
-业务层：AgentSession
-```
-
-这是整个启动架构最核心的设计判断。
-
 ## 源码地图
 
 ### 顶层文件
@@ -539,7 +345,537 @@ AgentSession 业务核心
 
 它们的特点是：**不决定产品策略，但为上层策略提供机械支撑。**
 
+## 主调用链
+
+从 `pi` 命令启动到进入交互模式，主调用链路本质上是在**启动一个可切换、可恢复、可扩展的 session runtime**，然后再给这个 runtime 套上 interactive / print / rpc 三种外壳：
+
+`cli.ts -> main.ts -> runtime -> services -> session -> modes`
+
+### `cli.ts` CLI 入口文件（shebang 脚本）
+
+```
+1、设置进程元数据（标题、环境变量）
+2、配置全局 HTTP 调度器（core/http-dispatcher.ts 中的 `configureHttpDispatcher`）
+3、启动应用（main.ts 中的 main(argv)）
+```
+
+```ts
+// ── import ──────────────────────────────────────────────────────────
+// 应用名称常量，用于设置进程标题和窗口标识
+import { APP_NAME } from "./config.ts";
+// 配置 undici 全局 HTTP 调度器，统一管理所有出站 HTTP 请求的行为（超时、重试等）
+import { configureHttpDispatcher } from "./core/http-dispatcher.ts";
+// 应用主函数，负责解析参数并启动对应的运行模式
+import { main } from "./main.ts";
+
+// ── 进程设置 ──
+// 设置进程标题，使其在 `ps` / `top` 等工具中显示为应用名称而非 "node"
+process.title = APP_NAME;
+// 这里标记当前进程为 coding-agent
+process.env.PI_CODING_AGENT = "true";
+// 禁用 Node.js 的 process.emitWarning，避免在运行过程中输出无关的警告信息干扰用户
+process.emitWarning = (() => {}) as typeof process.emitWarning;
+
+// ── 创建支持代理的 undici 全局 HTTP 调度器 ───
+// 1、后续程序发起的 fetch() 请求都走这个配置。这样就不用每个请求都单独设置代理和超时了
+// 2、main() 启动后， SettingsManager 会读取用户的配置文件：~/.pi/agent/settings.json （全局设置）.pi/settings.json （项目设置），如果用户在这里设置了自定义超时或代理， SettingsManager 会再次调用 该函数用新值覆盖默认值
+configureHttpDispatcher();
+
+// ── 启动应用 ──
+// 将命令行参数（去掉前两个元素：node 和脚本路径）传入 main 函数，
+// 由 main.ts 根据参数决定进入哪种运行模式（交互模式 / 打印模式 / RPC 模式）。
+main(process.argv.slice(2));
+```
+
+> 1、process 是 Node.js 的**全局对象**，代表当前运行的进程。
+>
+> * process.env 就像一张"进程信息贴纸"，启动时 Shell 已经贴了一些（PATH、HOME、API_KEY...），代码运行时可以再往上贴自己的标签
+>
+> * process.argv 是 Node.js 用来获取**命令行参数**的全局数组
+>
+>   示例：
+>
+>   ```sh
+>   pi --mode rpc -p "hello"
+>   ```
+>
+>   此时 process.argv 为：
+>
+>   ```ts
+>   [
+>     "/usr/local/bin/node",         // argv[0] - Node 路径
+>     "/path/to/dist/cli.js",        // argv[1] - 脚本路径
+>     "--mode",                      // argv[2] - 第一个实参
+>     "rpc",                         // argv[3]
+>     "-p",                          // argv[4]
+>     "hello"                        // argv[5]
+>   ]
+>   ```
+>
+> 2、package.json 里的 bin 字段设置
+>
+> ```json
+> {
+>   "name": "pi-coding-agent",
+>   "bin": {
+>     "pi": "./dist/cli.js"
+>   }
+> }
+> ```
+>
+> npm 读到这个配置后，在 npm install -g 时会自动在全局 bin/ 目录（比如 /usr/local/bin/ ）创建一个符号链接 pi 指向 ./dist/cli.js。当用户敲 pi 时，系统沿着符号链接找到 cli.js ，看到它的 shebang #!/usr/bin/env node，就用 node 来执行它。
+>
+> 3、undici 是 Node.js 官方的 HTTP 客户端库。
+>
+> ```ts
+> fetch(url)          ← 你写的代码，对外接口
+>    ▼
+> undici              ← 真正的 HTTP 收发引擎
+>    ├─ dispatcher    ← 可替换的"零件": 控制怎么建连接、走不走代理
+>    └─ 其他底层组件   ← DNS 解析、TLS 握手、连接池...
+> ```
+
+### `main.ts` 产品启动编排器
+
+```ts
+main.ts 
+参数：args: 命令行参数数组（不含 node 和脚本路径），options: 可选配置（如扩展工厂）
+  -> 阶段 1 - 初始化和预处理：
+      1、重置计时器（core/timings.ts 中的 `resetTimings`）
+      2、检测离线模式（--offline 或 PI_OFFLINE 环境变量），跳过联网更新
+      3、Windows 平台清理自更新隔离文件（utils/windows-self-update.ts 中的 `cleanupWindowsSelfUpdateQuarantine`） 
+      
+  -> 阶段 2 - 包管理命令处理：
+	  1、调用 `handlePackageCommand` 处理包管理命令 install、remove、list、update
+ 	  2、调用 `handleConfigCommand` 处理配置命令 config
+      
+  -> 阶段 3 - 参数解析和模式决策：
+	  1、解析 CLI 参数（cli/args.ts 中的 `parseArgs`），报告诊断信息，计时 time("parseArgs");
+	  2、调用 `resolveAppMode` 确定应用运行模式：interactive 默认 / print / json / rpc
+	  3、非交互模式下接管 stdout（core/output-guard.ts 中的 `takeOverStdout`）以保护输出，将 process.stdout.write 重定向到 stderr
+      
+  -> 阶段 4 - 快速退出路径：
+	  1、--version: 输出版本号后退出 console.log(VERSION);
+	  2、--export: 导出会话为 HTML 后退出（core/export-html/index.ts 中的 `exportFromFile`）
+	  3、RPC 模式下禁止 @file 参数 console.error(chalk.red("Error...");
+      
+  -> 阶段 5 - 会话管理器创建：
+	  1、调用 `validateForkFlags` 验证 --fork 标志冲突
+	  2、执行数据迁移（migration.ts 中的 `runMigrations`），计时 time("runMigrations");
+	  3、创建启动阶段的 SettingsManager，仅用于会话目录查找（core/settings-manager.ts 中的 `SettingsManager.create`），调用 `reportDiagnostics` 将诊断信息输出到 stderr
+	  4、解析会话目录（core/settings-manager.ts 中的 `startupSettingsManager.getSessionDir`）
+	  5、调用 `createSessionManager` 创建会话管理器，根据 --no-session/--fork/--session/--resume/--continue 决策
+	  6、检查会话的 cwd 是否存在问题（session-cwd.ts 中的 `getMissingSessionCwdIssue`），调用 `promptForMissingSessionCwd` 处理会话 cwd 缺失问题
+      计时 time("createSessionManager");
+
+  -> 阶段 6 - 运行时服务初始化：
+	  1、调用 `resolveCliPaths` 解析 CLI 路径参数（extensions、skills、promptTemplates、themes）
+	  2、创建 AuthStorage（auth-storage.ts 中的 AuthStorage.create）
+	  3、定义 createRuntime 工厂函数，内部：
+		a. 创建会话服务（agent-session-services.ts 中的 `createAgentSessionServices`）
+		b. 解析模型作用域（model-resolver.ts 中的 `resolveModelScope`）
+		c. 调用 `buildSessionOptions` 构建会话选项
+		d. 处理 --api-key 参数（auth-storage.ts 中的 `authStorage.setRuntimeApiKey`）
+		e. 创建会话（core/agent-session-services.ts 中的 `createAgentSessionFromServices`），然后设置思考级别（core/agent-session.ts 中的 `setThinkingLevel`）
+        计时 time("createRuntime");
+	  4、执行运行时创建（core/agent-session-runtime.ts 中的 `createAgentSessionRuntime`）
+        a. 断言会话工作目录存在（core/session-cwd.ts 中的 `assertSessionCwdExists`）
+        b. 调用 `createRuntime`
+      5、配置 HTTP 请求分发器的空闲超时时间（http-dispatcher.ts 中的 `configureHttpDispatcher`）
+
+  -> 阶段 7 - 后处理和模式启动：
+	  1、--help: 显示帮助信息后退出（cli/args.ts 中的 `printHelp`）
+	  2、--list-models: 列出可用模型后退出（cli/list-models.ts 中的 `listModels`）
+	  3、调用 `readPipedStdin` 读取管道 stdin 输入（RPC 模式跳过，因为 stdin 用于 JSON-RPC 通信），计时 time("readPipedStdin");
+	  4、调用 `prepareInitialMessage` 准备会话初始消息，计时 time("prepareInitialMessage");
+	  5、初始化主题（modes/interactive/theme 中的 `initTheme` ），计时 time("initTheme");
+  	  6、显示迁移弃用警告（migration.ts 中的 `showDeprecationWarnings`），计时 time("resolveModelScope");
+	  7、调用 `reportDiagnostics` 报告诊断信息，如有错误则退出，计时 time("createAgentSession");
+	  8、根据应用模式启动运行：
+        a. 每种情况都会先将所有计时记录输出到 stderr（core/timing.ts 中的 `printTimings`）
+		b. rpc: runRpcMode(runtime) / interactive: InteractiveMode.run(runtime) / print/json: runPrintMode(runtime)
+```
+
+### 为什么 `main.ts` 要自己定义 `createRuntime`
+
+这是 `main.ts` 最关键的一个点。
+
+它不会直接写死：
+
+```typescript
+const runtime = await createAgentSessionRuntime(...)
+```
+
+而是先定义一个 `createRuntime` 闭包，再交给 `createAgentSessionRuntime()` 使用。
+
+这么做的原因是：
+
+- session 切换时，cwd 可能变化
+- cwd 变化时，`settingsManager` / `resourceLoader` / `modelRegistry` 这些服务都必须随 cwd 重建
+- 所以 runtime 需要一个**“如何重新创建自己”**的工厂，而不是一次性建好的死对象
+
+于是形成了这个分层：
+
+```text
+main.ts
+  提供“如何创建一个 cwd 绑定 runtime”的工厂
+    ↓
+AgentSessionRuntime
+  在 new / resume / fork / import 时反复调用这个工厂
+```
+
 ---
+
+## 
+
+## 会话运行时层
+
+
+
+```
+main.ts
+  -> 1、定义 createRuntime 工厂函数
+  -> 2、createAgentSessionRuntime(createRuntime, initialOptions) // 把工厂和初始结果装进 runtime
+  	-> （1）先调用 createRuntime(initialOptions) 工厂
+  	  -> createAgentSessionServices(...) // 先造 services
+  	    -> 返回 AgentSessionServices
+  	  -> createAgentSessionFromServices(...) // 再基于 services 造 AgentSession
+  	    -> 内部委托给 sdk.ts:createAgentSession(...)，得到 AgentSession(...)
+  	    -> 返回 { session, extensionsResult, modelFallbackMessage }
+  	  -> 工厂返回 { session, services, diagnostics, modelFallbackMessage }
+ 	-> （2）再 new AgentSessionRuntime(session, services, createRuntime, diagnostics, modelFallbackMessage)
+```
+
+三层对象：
+
+```ts
+宿主层：AgentSessionRuntime
+环境层：AgentSessionServices
+业务层：AgentSession
+```
+
+- `core/agent-session-services.ts` **与 cwd 绑定的环境基础设施集合**
+  - 解决的是 **cwd 环境问题**，关心“这轮对话是站在哪个目录里跑”，包含 `createAgentSessionServices()` 函数，以这个目录为中心，向外推导出当前 session 可见的配置、资源、上下文规则和相对路径语义，具体包括：
+    - 项目配置环境
+      - 这个目录下有没有 .pi/settings.json
+    - 上下文规则环境
+      - 从这个目录向上找哪些 AGENTS.md / CLAUDE.md
+    - 资源发现环境
+      - 这个项目下有哪些本地 extensions / skills / prompts / themes
+    - 路径解析环境
+      - 用户说“读 src/index.ts ”时， src/index.ts 相对谁解析
+    - session 归属环境
+      - 这个 session 属于哪个项目/子目录视角
+  - 负责创建 `authStorage`、`settingsManager`、`modelRegistry`、`resourceLoader` 等
+- `core/sdk.ts` **会话装配逻辑**
+  - 解决的是**会话装配问题**，包含 `createAgentSession()` 函数，真正把 `pi-ai + pi-agent-core + tools + prompt + session context` 组装成会话的工厂
+- `core/agent-session.ts` **产品层真正的核心对象**
+  - 解决的是**运行问题**，关心“这轮对话怎么跑”
+  - 真正负责 prompt、持久化消息、tool hooks、extension 扩展绑定、compaction、bash、tree navigation
+
+* `core/agent-session-runtime.ts` **当前激活 session 的宿主对象**
+  - AgentSessionRuntime 持有 AgentSession、AgentSessionServices，也持有“如何重新创建它们”的 createRuntime 工厂函数
+  - 它不负责“具体一轮 prompt 怎么跑”，而负责“当前宿主现在挂着哪个 session，以及如何切换到另一个 session”
+
+
+> **为什么要分三层？**
+>
+> 1、两类生命周期天然不同，不该由同一对象同时负责
+>
+> * `AgentSession` 只负责“这个 session 怎么活”，承担**会话生命周期**
+> * 产品层还要支持：`newSession()`、`switchSession()`、`fork()`、`importFromJsonl()`，承担**宿主生命周期**
+>
+> 2、cwd 绑定的环境状态和会话状态应该分开
+
+让 CLI 层可以在真正创建 session 之前，先把下面这些事做完：
+
+- 解析模型范围
+- 决定 active tools
+- 装载 extensions
+- 收集 diagnostics
+- 处理 CLI 传入的 API key / flags
+
+
+
+例如 `switchSession()` 的流程是：
+
+1. 打开目标 `SessionManager`
+2. teardown 当前 session
+3. 用同一个 `createRuntime` 工厂重新创建一套新的 `services + session`
+4. `apply()` 到 runtime
+5. `rebindSession()` 让 UI 或外部宿主重新绑定新 session
+
+`newSession()`、`fork()`、`importFromJsonl()` 也都是同样套路：
+
+- 先准备新的 `SessionManager`
+- 再重建一整套 runtime 结果
+- 最后替换当前 `session/services`
+
+
+
+
+
+## 资源系统、Extension、工具
+
+怎样把 settings、packages、extensions、skills、prompts、themes、tools 装进一个统一运行时。
+
+**把原本会散落在不同地方的外部能力，统一收口到 `ResourceLoader -> AgentSession -> system prompt + active tools` 这条链上。**
+
+这条链背后有三层含义：
+
+1. **发现层**
+   - 这些资源从哪来
+2. **装配层**
+   - 它们以什么顺序被合并
+3. **消费层**
+   - 最终由谁真正使用
+
+```mermaid
+flowchart TD
+    A["settings.json / CLI flags"] --> B["PackageManager"]
+    B --> C["ResourceLoader.reload()"]
+    C --> D["extensions"]
+    C --> E["skills"]
+    C --> F["prompt templates"]
+    C --> G["themes"]
+    C --> H["AGENTS.md / SYSTEM.md"]
+    D --> I["AgentSession.bindExtensions()"]
+    E --> J["buildSystemPrompt()"]
+    F --> I
+    G --> K["InteractiveMode / theme system"]
+    H --> J
+    L["tools/index.ts"] --> J
+    I --> J
+    J --> M["Agent.state.systemPrompt"]
+    D --> N["tool registry / command registry / UI bindings"]
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+## 运行模式层 `mode/`
+
+核心的模式解析逻辑位于 `resolveAppMode()` 函数中，该函数评估三个信号：显式指定的 `--mode` 标志、`--print` 标志，以及 stdin/stdout 的 TTY 状态：
+
+<img src="img/image-20260628135337736.png" alt="image-20260628135337736" style="zoom:50%;" />
+
+当指定 `--mode json` 时，应用模式设为 `"json"`，但底层执行仍流经 `runPrintMode`，并输出 `mode: "json"`。当原本交互式的上下文中 stdin 通过管道传输（非 TTY）时，模式会自动降级为打印模式——这使得 `echo "fix the bug" | pi` 无需显式指定标志即可无缝运行。
+
+模式解析完成后，非交互模式会调用 core/output-guard.ts 中的 `takeOverStdout()`，把普通日志先改送到 stderr，真正要给外界消费的内容再单独直写 stdout，保护 stdout 不被污染，防止 Agent 输出与诊断日志交错。
+| 维度            | 交互模式                 | 打印模式 (text)            | 打印模式 (json)          | RPC 模式             |
+| --------------- | ------------------------ | -------------------------- | ------------------------ | -------------------- |
+| **触发方式**    | TTY stdin/stdout，无标志 | `--print` 或管道输入 stdin | `--mode json`            | `--mode rpc`         |
+| **生命周期**    | 持久化 REPL 循环         | 单次执行，完成即退出       | 单次执行，流式传输事件   | 长驻进程，命令驱动   |
+| **输出**        | 完整 TUI（颜色、组件）   | 仅最终的助手文本           | JSON 事件流 (NDJSON)     | JSON 响应 + 事件     |
+| **输入**        | 键盘、剪贴板、文件附件   | CLI 参数、管道输入 stdin   | CLI 参数、管道输入 stdin | stdin 上的 JSON 命令 |
+| **扩展绑定**    | `"interactive"` 模式     | `"print"` 模式             | `"json"` 模式            | `"rpc"` 模式         |
+| **UI 上下文**   | 完整 TUI 组件            | 无                         | 无                       | RPC 桥接（无 TUI）   |
+| **会话持久化**  | 是，支持分支             | 是，单次执行               | 是，单次执行             | 是，多轮交互         |
+| **Stdout 控制** | TUI 渲染器               | 原始 stdout 防护           | 原始 stdout 防护         | 原始 stdout 防护     |
+
+
+
+### 打印模式：单次执行
+
+打印模式是最简单的集成路径。它接收初始提示词（来自 CLI 参数、管道输入 stdin 或 `@file` 附件），将其发送给 Agent 会话，并在输出完成后退出。该模式有两种输出变体，由 `PrintModeOptions.mode` 字段控制。
+
+#### 文本模式
+
+在文本模式下（`pi -p "explain this function"`），函数会按顺序发送初始消息及任何附加消息，随后仅提取最终助手消息的文本内容并将其写入原始 stdout。如果助手响应以错误结束或被中止，退出码将设为 1，且错误信息会输出到 stderr——从而保持 stdout 干净，便于管道传输。
+
+#### JSON 模式
+
+在 JSON 模式下（`pi --mode json "refactor this"`），每个 `AgentSessionEvent` 都会被序列化为换行符分隔的 JSON 对象，并实时写入 stdout。会话头会最先发出，在事件开始流式传输前提供有关会话的元数据。当你需要对工具调用、思考过程块和流式增量数据进行全面透视时，应使用此模式。
+
+
+
+### RPC 模式：无头 JSON 协议
+
+RPC 模式将编码 Agent 转化为一个长驻的、由命令驱动的进程，通过 stdin/stdout 上的 JSON-lines 进行通信。这是供 IDE 插件、Web 前端以及任何无需终端即可获取完整 Agent 能力的应用程序使用的集成层。
+
+#### 协议架构
+
+该协议定义了流经管道的三类消息：
+
+| 方向               | 消息类型                 | 用途                                         |
+| ------------------ | ------------------------ | -------------------------------------------- |
+| **stdin → agent**  | `RpcCommand`             | 客户端请求（提示词、引导、set_model 等）     |
+| **stdin → agent**  | `RpcExtensionUIResponse` | 客户端对扩展 UI 请求的响应                   |
+| **agent → stdout** | `RpcResponse`            | 包含 `success`、`data` 或 `error` 的命令结果 |
+| **agent → stdout** | `AgentSessionEvent`      | 流式事件（工具调用、思考过程、文本增量）     |
+| **agent → stdout** | `RpcExtensionUIRequest`  | 扩展发起的 UI 请求（对话框、通知等）         |
+
+所有消息均为换行符分隔的 JSON (JSONL)。[jsonl.ts](https://zread.ai/badlogic/pi-mono/packages/coding-agent/src/modes/rpc/jsonl.ts) 中的 `attachJsonlLineReader` 负责解析传入的行，而 `serializeJsonLine` 则确保输出的一致序列化。
+
+#### 命令接口
+
+[rpc-types.ts](https://zread.ai/badlogic/pi-mono/packages/coding-agent/src/modes/rpc/rpc-types.ts#L19-L69) 中的 `RpcCommand` 联合类型定义了完整的命令词汇表，按功能分组如下：
+
+| 分组         | 命令                                                         | 描述                                   |
+| ------------ | ------------------------------------------------------------ | -------------------------------------- |
+| **提示词**   | `prompt`, `steer`, `follow_up`, `abort`, `new_session`       | 发送消息、注入引导、中止、创建会话     |
+| **状态**     | `get_state`                                                  | 查询模型、思考级别、流式状态、会话信息 |
+| **模型**     | `set_model`, `cycle_model`, `get_available_models`           | 切换或枚举模型                         |
+| **思考**     | `set_thinking_level`, `cycle_thinking_level`                 | 控制推理深度                           |
+| **队列模式** | `set_steering_mode`, `set_follow_up_mode`                    | 配置引导/后续行为                      |
+| **压缩**     | `compact`, `set_auto_compaction`                             | 触发或配置上下文压缩                   |
+| **Bash**     | `bash`, `abort_bash`                                         | 直接执行 Shell 及中止                  |
+| **会话**     | `get_session_stats`, `export_html`, `switch_session`, `fork`, `clone`, `get_messages` | 会话生命周期与检查                     |
+
+`prompt` 命令是异步的：Agent 仅在预检验成功后才发出成功响应，随后随着 Agent 处理提示词的过程流式传输事件。这种设计意味着客户端可以发送 `prompt`命令，立即接收成功/失败响应，然后消费事件流，而无需阻塞等待单一响应。
+
+#### 扩展 UI 桥接
+
+RPC 模式中的一个关键挑战在于，扩展期望的是一个丰富的 `ExtensionUIContext`，包含用于对话框、通知和组件渲染的方法——而所有这些都没有 TUI 支撑。[rpc-mode.ts](https://zread.ai/badlogic/pi-mono/packages/coding-agent/src/modes/rpc/rpc-mode.ts#L135-L310) 中的 `createExtensionUIContext()` 函数解决了这个问题，它将每个 UI 方法转化为在 stdout 上发出的 `RpcExtensionUIRequest`：
+
+- **对话框**（`select`、`confirm`、`input`、`editor`）创建存储在 `pendingExtensionRequests` 映射中的 Promise，以 UUID 作为键。客户端必须响应匹配的 `RpcExtensionUIResponse` 才能解析该 Promise。
+- **即发即弃**方法（`notify`、`setStatus`、`setWidget`、`setTitle`）发出请求后无需等待响应。
+- **仅限 TUI** 的方法（`setWorkingMessage`、`setFooter`、`setHeader`、`setEditorComponent`）在 RPC 模式下为空操作（no-ops），内联注释中说明了其 TUI 依赖性。
+
+
+
+
+
+扩展 UI 桥接为对话框 Promise 使用了 `AbortSignal` 和超时支持——如果客户端未及时响应，传递了 `opts.signal` 或 `opts.timeout` 的扩展将接收到默认值，从而防止在无头环境中发生死锁。
+
+
+
+#### 会话重绑定与背压
+
+RPC 模式通过 `runtimeHost.setRebindSession()` 处理会话重绑定，该操作会重新订阅新会话的事件并重新绑定扩展。Agent 还通过 `session.agent.subscribe()` 订阅了背压回调，该回调会调用 `waitForRawStdoutBackpressure()`，防止 Agent 以快于客户端消费的速度淹没 stdout——确保在大量输出时流式传输的稳定性。
+
+来源：[rpc-mode.ts](https://zread.ai/badlogic/pi-mono/packages/coding-agent/src/modes/rpc/rpc-mode.ts#L1-L360), [rpc-mode.ts](https://zread.ai/badlogic/pi-mono/packages/coding-agent/src/modes/rpc/rpc-mode.ts#L380-L600), [rpc-types.ts](https://zread.ai/badlogic/pi-mono/packages/coding-agent/src/modes/rpc/rpc-types.ts#L1-L265)
+
+### RPC 客户端：编程式访问
+
+[rpc-client.ts](https://zread.ai/badlogic/pi-mono/packages/coding-agent/src/modes/rpc/rpc-client.ts#L54-L576) 中的 `RpcClient` 类提供了一个强类型的 TypeScript API，它将 Agent 作为子进程以 RPC 模式启动，并将 JSON-lines 协议封装为方法调用。这是 Node.js 应用推荐的集成路径。
+
+#### 生命周期管理
+
+
+
+```
+const client = new RpcClient({  cwd: "/path/to/project",  provider: "anthropic",  model: "claude-sonnet-4-20250514",});await client.start();      // Spawns `node dist/cli.js --mode rpc`await client.prompt("Fix the failing test in auth.ts");// ... consume events via client.onEvent() ...await client.stop();       // SIGTERM → wait → SIGKILL fallback
+```
+
+客户端使用 `stdio: ["pipe", "pipe", "pipe"]` 生成 Agent 进程，将 JSONL 读取器附加到 stdout，并收集 stderr 以供调试。进程退出、错误和 stdin 失败均会通过 `rejectPendingRequests()` 机制拒绝待处理的请求。
+
+#### 请求关联
+
+通过客户端发送的每个命令都会获得一个唯一的 `id`（递增整数）。`handleLine()` 方法负责路由传入的消息：`RpcResponse` 对象根据 ID 与 `pendingRequests` 进行匹配并执行解析/拒绝，而 `AgentSessionEvent` 对象则通过 `onEvent()` 转发给所有已注册的事件监听器。
+
+#### 可用方法
+
+| 方法                          | 底层命令               | 返回值                            |
+| ----------------------------- | ---------------------- | --------------------------------- |
+| `prompt(message, images?)`    | `prompt`               | `void`（通过 `onEvent` 获取事件） |
+| `steer(message, images?)`     | `steer`                | `void`                            |
+| `followUp(message, images?)`  | `follow_up`            | `void`                            |
+| `abort()`                     | `abort`                | `void`                            |
+| `getState()`                  | `get_state`            | `RpcSessionState`                 |
+| `setModel(provider, modelId)` | `set_model`            | `Model`                           |
+| `cycleModel()`                | `cycle_model`          | `Model + ThinkingLevel` 或 `null` |
+| `getAvailableModels()`        | `get_available_models` | `Model[]`                         |
+| `compact(instructions?)`      | `compact`              | `CompactionResult`                |
+| `executeBash(command)`        | `bash`                 | `BashResult`                      |
+| `getMessages()`               | `get_messages`         | `AgentMessage[]`                  |
+| `fork(entryId)`               | `fork`                 | `{ text, cancelled }`             |
+
+来源：[rpc-client.ts](https://zread.ai/badlogic/pi-mono/packages/coding-agent/src/modes/rpc/rpc-client.ts#L54-L200), [rpc-client.ts](https://zread.ai/badlogic/pi-mono/packages/coding-agent/src/modes/rpc/rpc-client.ts#L1-L200)
+
+### 交互模式：完整 TUI 体验
+
+交互模式是在终端运行 `pi` 时的默认体验。它实现为 [interactive-mode.ts](https://zread.ai/badlogic/pi-mono/packages/coding-agent/src/modes/interactive/interactive-mode.ts#L1-L200) 中的 `InteractiveMode` 类，这是一个超过 5,700 行的编排器，将 Agent 会话、丰富的组件系统、键盘处理、主题管理、扩展 UI 集成以及会话导航整合在一起。
+
+#### 组件架构
+
+交互模式使用 `@earendil-works/pi-tui` 库构建 TUI 树，组合了 [components/](https://zread.ai/badlogic/pi-mono/packages/coding-agent/src/modes/interactive/components/)目录下数十个专用组件：
+
+| 组件                                | 用途                                            |
+| ----------------------------------- | ----------------------------------------------- |
+| `AssistantMessageComponent`         | 渲染带有 Markdown、差异对比、工具调用的助手响应 |
+| `UserMessageComponent`              | 显示带有图片附件的用户输入                      |
+| `BashExecutionComponent`            | 显示实时的 bash 命令执行及输出                  |
+| `ToolExecutionComponent`            | 渲染工具调用/结果，支持展开/折叠                |
+| `FooterComponent`                   | 包含模型信息、Token 计数、快捷键的状态栏        |
+| `SessionSelectorComponent`          | 支持搜索的交互式会话选择器                      |
+| `ModelSelectorComponent`            | 支持模糊搜索的模型切换器                        |
+| `ExtensionEditorComponent`          | 用于扩展输入的多行编辑器                        |
+| `CompactionSummaryMessageComponent` | 总结压缩后的上下文                              |
+| `BranchSummaryMessageComponent`     | 显示会话分支点                                  |
+
+#### 扩展 UI 上下文
+
+与 RPC 模式的空操作桥接不同，交互模式提供了由真实 TUI 浮层支撑的完整 `ExtensionUIContext` 实现。扩展可以创建 `select`/`confirm`/`input` 对话框作为模态浮层，设置自定义页脚工厂，注册自动补全提供者，并将编辑器组件直接组合到消息流中。扩展绑定模式为 `"interactive"`，启用所有 UI 能力。
+
+#### 会话导航
+
+交互模式通过 `Ctrl+R`（树选择器）、`/fork` 斜杠命令和 `navigateTree` 动作公开会话分支功能。`TreeSelectorComponent` 渲染会话分支的可视化树，允许用户在不同的分叉对话路径之间跳转。这些操作通过 `runtimeHost.fork()`、`runtimeHost.switchSession()` 和 `session.navigateTree()` 执行，所有这些都会触发 `rebindSession()` 以重新订阅事件并重新绑定扩展。
+
+来源：[interactive-mode.ts](https://zread.ai/badlogic/pi-mono/packages/coding-agent/src/modes/interactive/interactive-mode.ts#L1-L200), [main.ts](https://zread.ai/badlogic/pi-mono/packages/coding-agent/src/main.ts#L795-L838)
+
+### 共享运行时：AgentSessionRuntime
+
+三种模式均共享同一个 `AgentSessionRuntime` 抽象，该抽象由 [agent-session-runtime.ts](https://zread.ai/badlogic/pi-mono/packages/coding-agent/src/core/agent-session-runtime.ts) 中的 `createAgentSessionRuntime()` 创建。该运行时提供：
+
+- **会话访问**：通过 `runtime.session`（`AgentSession` 实例）
+- **会话生命周期**：通过 `newSession()`、`fork()`、`switchSession()`、`reload()`
+- **扩展重绑定**：通过 `setRebindSession()` 回调
+- **销毁**：通过 `dispose()` 实现彻底关闭
+
+每种模式在启动时都会调用 `rebindSession()`，以使用其特定于模式的配置绑定扩展。传递给 `session.bindExtensions()` 的 `commandContextActions` 对象在所有模式中提供相同的会话操作原语集（`newSession`、`fork`、`navigateTree`、`switchSession`、`reload`），但具备与模式相适应的行为：
+
+
+
+来源：[main.ts](https://zread.ai/badlogic/pi-mono/packages/coding-agent/src/main.ts#L599-L730), [print-mode.ts](https://zread.ai/badlogic/pi-mono/packages/coding-agent/src/modes/print-mode.ts#L67-L109), [rpc-mode.ts](https://zread.ai/badlogic/pi-mono/packages/coding-agent/src/modes/rpc/rpc-mode.ts#L312-L360)
+
+#### 用于模式控制的 CLI 标志
+
+| 标志                   | 效果                       | 适用模式        |
+| ---------------------- | -------------------------- | --------------- |
+| `--mode rpc`           | 强制 RPC 模式              | 仅 RPC          |
+| `--mode json`          | 强制 JSON 打印模式         | 打印模式 (json) |
+| `--print` / `-p`       | 强制打印模式（文本）       | 打印模式 (text) |
+| `--offline`            | 跳过版本检查，禁用网络功能 | 所有            |
+| `--no-session`         | 内存会话，不进行持久化     | 所有            |
+| `--session <id/path>`  | 打开特定会话               | 所有            |
+| `--fork <id/path>`     | 从现有会话派生             | 所有            |
+| `--continue` / `-c`    | 继续最近的会话             | 所有            |
+| `--resume` / `-r`      | 交互式会话选择器           | 首选交互模式    |
+| `--session-id <id>`    | 使用自定义 ID 创建会话     | 所有            |
+| `--session-dir <path>` | 覆盖会话存储目录           | 所有            |
+
+通过管道输入 stdin（`echo "prompt" | pi`）会隐式激活打印模式，覆盖基于 TTY 的检测。在 RPC 模式下，用于文件附件的 `@file` 语法会被禁用，因为 stdin 专供 JSON 协议使用。
+
+来源：[args.ts](https://zread.ai/badlogic/pi-mono/packages/coding-agent/src/cli/args.ts#L63-L200), [main.ts](https://zread.ai/badlogic/pi-mono/packages/coding-agent/src/main.ts#L529-L532), [main.ts](https://zread.ai/badlogic/pi-mono/packages/coding-agent/src/main.ts#L750-L757)
+
+### 选择合适的模式
+
+不同模式的选择取决于你的集成场景：
+
+- **终端前的人类开发者** → 交互模式。完整的 TUI、键盘快捷键、会话分支、可视化工具执行。当 stdin/stdout 为 TTY 时无需任何标志。
+- **CI/CD 流水线或 Shell 脚本** → 打印模式（`-p` 或 `--mode json`）。干净的退出码、结构化输出、无 TUI 依赖。当需要全面透视事件以进行日志记录时，使用 `--mode json`。
+- **IDE 插件、Web 前端或自定义应用** → RPC 模式（`--mode rpc`）。长驻进程、完整命令接口、双向通信。Node.js 集成请使用 `RpcClient` 类，其他语言请直接实现 JSON-lines 协议。
+- **在 Node.js 进程内进行编程式嵌入** → 建议改用 [SDK 嵌入](https://zread.ai/badlogic/pi-mono/21-sdk-embedding) 方案，该方案完全避免了进程生成。
+
+
 
 ## 最关键的三个中枢
 

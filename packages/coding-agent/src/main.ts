@@ -764,8 +764,8 @@ export async function main(args: string[], options?: MainOptions) {
 	resetTimings();
 	const offlineMode = args.includes("--offline") || isTruthyEnvFlag(process.env.PI_OFFLINE);
 	if (offlineMode) {
-		process.env.PI_OFFLINE = "1";
-		process.env.PI_SKIP_VERSION_CHECK = "1";
+		process.env.PI_OFFLINE = "1"; //   统一设成 "1"（后续模块都读这个）
+		process.env.PI_SKIP_VERSION_CHECK = "1"; //   同时跳过版本更新检查
 	}
 
 	// Windows 平台：清理自更新产生的隔离文件

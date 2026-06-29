@@ -80,6 +80,10 @@ export interface BashResult {
  * 4. 如果输出被截断，确保临时文件已创建并包含完整内容
  * 5. 返回结果对象，包含（截断后的）输出、退出码、是否取消、完整输出路径
  *
+ * 定位：流式 bash 执行场景的共享实现。
+ * 作用：统一输出清洗、截断、临时日志落盘和取消态返回格式。
+ * 调用关系：由 `AgentSession.executeBash()` 以及复用 `BashOperations` 的执行入口调用。
+ *
  * @param command 要执行的 bash 命令
  * @param cwd 工作目录
  * @param operations 抽象的 bash 操作接口（本地或远程实现）
@@ -152,6 +156,7 @@ export async function executeBashWithOperations(
 	};
 
 	try {
+		// 真正的命令执行交给底层 operations，这里只负责标准化输出收集与结果封装。
 		const result = await operations.exec(command, cwd, {
 			onData,
 			signal: options?.signal,
@@ -176,7 +181,7 @@ export async function executeBashWithOperations(
 			fullOutputPath: tempFilePath,
 		};
 	} catch (err) {
-		// 检查是否为中止导致的错误
+		// 中止场景要尽量返回已收集的输出，供 UI 和会话历史展示。
 		if (options?.signal?.aborted) {
 			const fullOutput = outputChunks.join("");
 			const truncationResult = truncateTail(fullOutput);

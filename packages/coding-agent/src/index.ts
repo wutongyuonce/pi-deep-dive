@@ -8,7 +8,7 @@
  * 谁会 import 我：
  * - 外部 npm 使用者通过包名 `@earendil-works/pi-coding-agent` 导入这里，创建 `AgentSession` / `AgentSessionRuntime`
  * - 扩展开发者从这里拿工具定义、扩展类型、UI 组件、运行模式等能力
- * 
+ *
  * 我在整个体系中的作用：
  * - 把 `coding-agent` 自己的三大能力聚合在一个入口：
  *   1. session/runtime/sdk
@@ -21,6 +21,9 @@
  * - 想理解实际 CLI：看 `main.ts`
  */
 // 会话管理核心
+
+// 配置路径
+export { getAgentDir, VERSION } from "./config.ts";
 export {
 	AgentSession,
 	type AgentSessionConfig,
@@ -32,9 +35,6 @@ export {
 	parseSkillBlock,
 	type SessionStats,
 } from "./core/agent-session.ts";
-
-// 配置路径
-export { getAgentDir, VERSION } from "./config.ts";
 
 // 认证与模型注册
 export {

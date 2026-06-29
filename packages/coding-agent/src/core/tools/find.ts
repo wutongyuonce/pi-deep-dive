@@ -6,7 +6,7 @@
  * 提供的能力：
  *   - 使用 fd 命令（或自定义 glob 操作）搜索匹配 glob 模式的文件
  *   - 尊重 .gitignore 规则，使用 --no-require-git 语义
- *   - 支持路径包含的模式（如 "src/**/*.spec.ts"），自动启用 --full-path
+ *   - 支持路径包含的模式（如 `src/features/example.spec.ts`），自动启用 --full-path
  *   - 输出截断：结果数限制（默认 1000）+ 字节限制（默认 50KB）
  *   - 结果路径相对于搜索目录显示
  *   - TUI 渲染：折叠/展开模式显示搜索结果

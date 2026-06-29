@@ -18,14 +18,14 @@
       // URL PARAMETER HANDLING
       // ============================================================
 
-      // Parse URL parameters for deep linking: leafId and targetId
-      // Check for injected params (when loaded in iframe via srcdoc) or use window.location
+      // 解析深链参数：leafId 决定展示哪条分支，targetId 决定滚动到哪条消息。
+      // iframe/srcdoc 场景优先读取注入参数，否则回退到当前页面 URL。
       const injectedParams = document.querySelector('meta[name="pi-url-params"]');
       const searchString = injectedParams ? injectedParams.content : window.location.search.substring(1);
       const urlParams = new URLSearchParams(searchString);
       const urlLeafId = urlParams.get('leafId');
       const urlTargetId = urlParams.get('targetId');
-      // Use URL leafId if provided, otherwise fall back to session default
+      // URL 显式指定 leafId 时优先生效，否则使用会话默认叶子节点。
       const leafId = urlLeafId || defaultLeafId;
 
       // ============================================================
@@ -74,7 +74,7 @@
         const nodeMap = new Map();
         const roots = [];
 
-        // Create nodes
+        // 第一步：先为每条 entry 建立节点壳，后面再统一补 parent/children 关系。
         for (const entry of entries) {
           nodeMap.set(entry.id, {
             entry,
@@ -83,7 +83,7 @@
           });
         }
 
-        // Build parent-child relationships
+        // 第二步：根据 parentId 串出树结构；缺失父节点的条目降级为根节点。
         for (const entry of entries) {
           const node = nodeMap.get(entry.id);
           if (entry.parentId === null || entry.parentId === undefined || entry.parentId === entry.id) {
@@ -98,7 +98,7 @@
           }
         }
 
-        // Sort children by timestamp
+        // 第三步：对子节点按时间排序，保证树展示与会话时间线一致。
         function sortChildren(node) {
           node.children.sort((a, b) =>
             new Date(a.entry.timestamp).getTime() - new Date(b.entry.timestamp).getTime()
@@ -118,7 +118,7 @@
         let current = byId.get(targetId);
         while (current) {
           ids.add(current.id);
-          // Stop if no parent or self-referencing (root)
+          // 没有父节点或父节点指回自己时，说明已经回溯到根。
           if (!current.parentId || current.parentId === current.id) {
             break;
           }
@@ -135,7 +135,7 @@
         let current = byId.get(targetId);
         while (current) {
           path.unshift(current);
-          // Stop if no parent or self-referencing (root)
+          // 走到根节点就停止，最终得到 root -> target 的路径。
           if (!current.parentId || current.parentId === current.id) {
             break;
           }
@@ -153,7 +153,7 @@
        * Children are sorted by timestamp, so the newest is always last.
        */
       function findNewestLeaf(nodeId) {
-        // Build tree node map lazily
+        // 延迟构建 nodeId -> treeNode 索引，只在第一次点击导航时付出成本。
         if (!treeNodeMap) {
           treeNodeMap = new Map();
           const tree = buildTree();
@@ -167,7 +167,7 @@
         const node = treeNodeMap.get(nodeId);
         if (!node) return nodeId;
 
-        // Follow the newest (last) child at each level
+        // 子节点已按时间排序，因此一路取最后一个即可命中新叶子。
         let current = node;
         while (current.children.length > 0) {
           current = current.children[current.children.length - 1];
@@ -184,7 +184,7 @@
         const result = [];
         const multipleRoots = roots.length > 1;
 
-        // Mark which subtrees contain the active leaf
+        // 先标记“哪棵子树包含当前激活分支”，后面渲染时把它排到前面。
         const containsActive = new Map();
         function markActive(node) {
           let has = activePathIds.has(node.entry.id);
@@ -199,7 +199,7 @@
         // Stack: [node, indent, justBranched, showConnector, isLast, gutters, isVirtualRootChild]
         const stack = [];
 
-        // Add roots (prioritize branch containing active leaf)
+        // 根节点也按“是否包含当前分支”排序，让正在查看的分支尽量靠前。
         const orderedRoots = [...roots].sort((a, b) =>
           Number(containsActive.get(b)) - Number(containsActive.get(a))
         );
@@ -216,12 +216,12 @@
           const children = node.children;
           const multipleChildren = children.length > 1;
 
-          // Order children (active branch first)
+          // 同层子节点同样把当前分支优先展示。
           const orderedChildren = [...children].sort((a, b) =>
             Number(containsActive.get(b)) - Number(containsActive.get(a))
           );
 
-          // Calculate child indent (matches tree-selector.ts)
+          // 缩进规则保持与 TUI tree-selector 完全一致，避免导出视图和终端表现不一致。
           let childIndent;
           if (multipleChildren) {
             // Parent branches: children get +1
@@ -234,7 +234,7 @@
             childIndent = indent;
           }
 
-          // Build gutters for children
+          // 计算纵向连线信息，后续由 buildTreePrefix() 转成 ASCII 前缀。
           const connectorDisplayed = showConnector && !isVirtualRootChild;
           const currentDisplayIndent = multipleRoots ? Math.max(0, indent - 1) : indent;
           const connectorPosition = Math.max(0, currentDisplayIndent - 1);
@@ -242,7 +242,7 @@
             ? [...gutters, { position: connectorPosition, show: !isLast }]
             : gutters;
 
-          // Add children in reverse order for stack
+          // 借助栈逆序压入，出栈时即可恢复正向展示顺序。
           for (let i = orderedChildren.length - 1; i >= 0; i--) {
             const childIsLast = i === orderedChildren.length - 1;
             stack.push([orderedChildren[i], childIndent, multipleChildren, multipleChildren, childIsLast, childGutters, false]);
@@ -373,10 +373,10 @@
           const label = flatNode.node.label;
           const isCurrentLeaf = entry.id === currentLeafId;
 
-          // Always show current leaf
+          // 当前叶子始终保留，避免过滤后用户“丢失当前位置”。
           if (isCurrentLeaf) return true;
 
-          // Hide assistant messages with only tool calls (no text) unless error/aborted
+          // 默认隐藏只有 toolCall 没有正文的 assistant 消息，异常/中止消息除外。
           if (entry.type === 'message' && entry.message.role === 'assistant') {
             const msg = entry.message;
             const hasText = hasTextContent(msg.content);
@@ -384,7 +384,7 @@
             if (!hasText && !isErrorOrAborted) return false;
           }
 
-          // Apply filter mode
+          // 先应用列表过滤模式，再决定是否进入搜索匹配。
           const isSettingsEntry = ['label', 'custom', 'model_change', 'thinking_level_change'].includes(entry.type);
           let passesFilter = true;
 
@@ -408,7 +408,7 @@
 
           if (!passesFilter) return false;
 
-          // Apply search filter
+          // 搜索要求所有 token 都命中，行为等同简单 AND 查询。
           if (searchTokens.length > 0) {
             const nodeText = getSearchableText(entry, label);
             if (!searchTokens.every(t => nodeText.includes(t))) return false;
@@ -417,7 +417,7 @@
           return true;
         });
 
-        // Recalculate visual structure based on visible tree
+        // 过滤会打断原树结构，需要基于“可见节点”重算缩进和连线。
         recalculateVisualStructure(filtered, flatNodes);
 
         return filtered;
@@ -434,13 +434,13 @@
 
         const visibleIds = new Set(filteredNodes.map(n => n.node.entry.id));
 
-        // Build entry map for parent lookup (using full tree)
+        // 先保留完整树索引，后面向上找“最近可见祖先”时要用到。
         const entryMap = new Map();
         for (const flatNode of allFlatNodes) {
           entryMap.set(flatNode.node.entry.id, flatNode);
         }
 
-        // Find nearest visible ancestor for a node
+        // 某些中间节点可能被过滤掉，因此需要跳过不可见祖先继续向上找。
         function findVisibleAncestor(nodeId) {
           let currentId = entryMap.get(nodeId)?.node.entry.parentId;
           while (currentId != null) {
@@ -452,7 +452,7 @@
           return null;
         }
 
-        // Build visible tree structure
+        // 基于最近可见祖先重建一棵“过滤后仍连通”的可见树。
         const visibleParent = new Map();
         const visibleChildren = new Map();
         visibleChildren.set(null, []); // root-level nodes
@@ -468,21 +468,20 @@
           visibleChildren.get(ancestorId).push(nodeId);
         }
 
-        // Update multipleRoots based on visible roots
+        // 多根判定也要按可见树重算，否则前缀线条会错位。
         const visibleRootIds = visibleChildren.get(null);
         const multipleRoots = visibleRootIds.length > 1;
 
-        // Build a map for quick lookup: nodeId → FlatNode
+        // 建一个扁平节点索引，方便 DFS 时就地回写视觉属性。
         const filteredNodeMap = new Map();
         for (const flatNode of filteredNodes) {
           filteredNodeMap.set(flatNode.node.entry.id, flatNode);
         }
 
-        // DFS traversal of visible tree, applying same indentation rules as flattenTree()
-        // Stack items: [nodeId, indent, justBranched, showConnector, isLast, gutters, isVirtualRootChild]
+        // 用 DFS 套用与 flattenTree() 相同的缩进规则，保证过滤前后视觉语义一致。
         const stack = [];
 
-        // Add visible roots in reverse order (to process in forward order via stack)
+        // 根节点逆序入栈，保证真正遍历时仍是正序。
         for (let i = visibleRootIds.length - 1; i >= 0; i--) {
           const isLast = i === visibleRootIds.length - 1;
           stack.push([
@@ -502,7 +501,7 @@
           const flatNode = filteredNodeMap.get(nodeId);
           if (!flatNode) continue;
 
-          // Update this node's visual properties
+          // 把重新计算出的视觉属性直接写回当前扁平节点。
           flatNode.indent = indent;
           flatNode.showConnector = showConnector;
           flatNode.isLast = isLast;
@@ -510,14 +509,11 @@
           flatNode.isVirtualRootChild = isVirtualRootChild;
           flatNode.multipleRoots = multipleRoots;
 
-          // Get visible children of this node
+          // 只根据可见树继续向下递归。
           const children = visibleChildren.get(nodeId) || [];
           const multipleChildren = children.length > 1;
 
-          // Calculate child indent using same rules as flattenTree():
-          // - Parent branches (multiple children): children get +1
-          // - Just branched and indent > 0: children get +1 for visual grouping
-          // - Single-child chain: stay flat
+          // 子节点缩进完全复用 flattenTree() 的规则，避免过滤后层级漂移。
           let childIndent;
           if (multipleChildren) {
             childIndent = indent + 1;
@@ -527,7 +523,7 @@
             childIndent = indent;
           }
 
-          // Build gutters for children (same logic as flattenTree)
+          // 连线 gutter 也同步重算，否则竖线会断裂或多出。
           const connectorDisplayed = showConnector && !isVirtualRootChild;
           const currentDisplayIndent = multipleRoots ? Math.max(0, indent - 1) : indent;
           const connectorPosition = Math.max(0, currentDisplayIndent - 1);
@@ -535,7 +531,7 @@
             ? [...gutters, { position: connectorPosition, show: !isLast }]
             : gutters;
 
-          // Add children in reverse order (to process in forward order via stack)
+          // 子节点同样逆序压栈，确保最终显示顺序稳定。
           for (let i = children.length - 1; i >= 0; i--) {
             const childIsLast = i === children.length - 1;
             stack.push([
@@ -1010,10 +1006,10 @@
             break;
           }
           default: {
-            // Check for pre-rendered custom tool HTML
+            // 自定义工具优先使用预渲染 HTML，尽量保留 TUI 下的视觉效果。
             const rendered = renderedTools?.[call.id];
             if (rendered?.callHtml || rendered?.resultHtmlCollapsed || rendered?.resultHtmlExpanded) {
-              // Custom tool with pre-rendered HTML from TUI renderer
+              // 自定义工具调用头优先沿用 TUI 渲染器的输出。
               if (rendered.callHtml) {
                 html += `<div class="tool-header ansi-rendered">${rendered.callHtml}</div>`;
               } else {
@@ -1021,21 +1017,21 @@
               }
 
               if (rendered.resultHtmlCollapsed && rendered.resultHtmlExpanded && rendered.resultHtmlCollapsed !== rendered.resultHtmlExpanded) {
-                // Both collapsed and expanded differ - render expandable section
+                // 折叠态和展开态不同才渲染可折叠容器。
                 html += `<div class="tool-output expandable ansi-rendered" onclick="if(window.getSelection().toString())return;this.classList.toggle('expanded')">
                   <div class="output-preview">${rendered.resultHtmlCollapsed}</div>
                   <div class="output-full">${rendered.resultHtmlExpanded}</div>
                 </div>`;
               } else if (rendered.resultHtmlExpanded) {
-                // Only expanded exists (or collapsed is identical) - show directly
+                // 只有展开态时直接展示，不额外包一层交互外壳。
                 html += `<div class="tool-output ansi-rendered">${rendered.resultHtmlExpanded}</div>`;
               } else if (result) {
-                // No pre-rendered result HTML - fallback to JSON
+                // 结果预渲染缺失时回退到通用文本展示。
                 const output = getResultText();
                 if (output) html += formatExpandableOutput(output, 10);
               }
             } else {
-              // Fallback to JSON display (existing behavior)
+              // 没有自定义渲染器时回退到原有 JSON 展示逻辑。
               html += `<div class="tool-header"><span class="tool-name">${escapeHtml(name)}</span></div>`;
               html += `<div class="tool-output"><pre>${escapeHtml(JSON.stringify(args, null, 2))}</pre></div>`;
               if (result) {
@@ -1055,7 +1051,7 @@
        * Reconstructs the original format: header line + entry lines.
        */
       window.downloadSessionJson = function() {
-        // Build JSONL content: header first, then all entries
+        // 按原始会话文件格式重建 JSONL：header 第一行，后面依次是 entry。
         const lines = [];
         if (header) {
           lines.push(JSON.stringify({ type: 'header', ...header }));
@@ -1065,7 +1061,7 @@
         }
         const jsonlContent = lines.join('\n');
 
-        // Create download
+        // 用 Blob + 临时链接触发浏览器下载。
         const blob = new Blob([jsonlContent], { type: 'application/x-ndjson' });
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
@@ -1082,25 +1078,25 @@
        * URL format: base?gistId&leafId=<leafId>&targetId=<entryId>
        */
       function buildShareUrl(entryId) {
-        // Check for injected base URL (used when loaded in iframe via srcdoc)
+        // iframe/srcdoc 场景会注入基础 URL，优先使用它生成可分享链接。
         const baseUrlMeta = document.querySelector('meta[name="pi-share-base-url"]');
         const baseUrl = baseUrlMeta ? baseUrlMeta.content : window.location.href.split('?')[0];
 
         const url = new URL(window.location.href);
-        // Find the gist ID (first query param without value, e.g., ?abc123)
+        // gist 分享页会把 gistId 放在“无值参数”里，这里把它保留下来。
         const gistId = Array.from(url.searchParams.keys()).find(k => !url.searchParams.get(k));
 
-        // Build the share URL
+        // 只携带 leafId 和 targetId，分享出去即可直接定位到同一分支和消息。
         const params = new URLSearchParams();
         params.set('leafId', currentLeafId);
         params.set('targetId', entryId);
 
-        // If we have an injected base URL (iframe context), use it directly
+        // iframe 场景不能依赖当前 location，直接拼接注入的基础地址。
         if (baseUrlMeta) {
           return `${baseUrl}&${params.toString()}`;
         }
 
-        // Otherwise build from current location (direct file access)
+        // 本地打开 HTML 文件时则基于当前地址重写 query 参数。
         url.search = gistId ? `?${gistId}&${params.toString()}` : `?${params.toString()}`;
         return url.toString();
       }
@@ -1112,15 +1108,16 @@
       async function copyToClipboard(text, button) {
         let success = false;
         try {
+          // 优先使用现代 Clipboard API。
           if (navigator.clipboard && navigator.clipboard.writeText) {
             await navigator.clipboard.writeText(text);
             success = true;
           }
         } catch (err) {
-          // Clipboard API failed, try fallback
+          // Clipboard API 失败时再退回旧方案。
         }
 
-        // Fallback for HTTP or when Clipboard API is unavailable
+        // HTTP 环境或低权限环境下，退回到隐藏 textarea + execCommand。
         if (!success) {
           try {
             const textarea = document.createElement('textarea');
@@ -1137,6 +1134,7 @@
         }
 
         if (success && button) {
+          // 复制成功后给按钮一个短暂的完成态反馈。
           const originalHtml = button.innerHTML;
           button.innerHTML = '✓';
           button.classList.add('copied');
@@ -1490,7 +1488,7 @@
         document.getElementById('header-container').innerHTML = renderHeader();
         attachHeaderHandlers();
 
-        // Build messages using cached DOM nodes
+        // 消息区尽量复用缓存节点，减少切换分支时的大量重复渲染。
         const messagesEl = document.getElementById('messages');
         const fragment = document.createDocumentFragment();
 
@@ -1504,7 +1502,7 @@
         messagesEl.innerHTML = '';
         messagesEl.appendChild(fragment);
 
-        // Attach click handlers for copy-link buttons
+        // 渲染完成后补挂复制链接按钮事件。
         messagesEl.querySelectorAll('.copy-link-btn').forEach(btn => {
           btn.addEventListener('click', (e) => {
             e.stopPropagation();
@@ -1514,21 +1512,19 @@
           });
         });
 
-        // Use setTimeout(0) to ensure DOM is fully laid out before scrolling
+        // 等浏览器完成布局后再滚动，避免目标元素尺寸尚未稳定。
         setTimeout(() => {
           const content = document.getElementById('content');
           if (scrollMode === 'bottom') {
             content.scrollTop = content.scrollHeight;
           } else if (scrollMode === 'target') {
-            // If scrollToEntryId is provided, scroll to that specific entry.
-            // Tool result entries are rendered inside their assistant tool-call block,
-            // so route them to the visible tool-call element instead.
+            // 指定 target 时优先滚到该消息；toolResult 则改滚到可见的 tool-call 容器。
             const scrollTargetId = scrollToEntryId || targetId;
             const targetEl = document.getElementById(getScrollTargetElementId(scrollTargetId)) ||
               document.getElementById(`entry-${scrollTargetId}`);
             if (targetEl) {
               targetEl.scrollIntoView({ block: 'center' });
-              // Briefly highlight the target message
+              // 深链跳转时给目标元素一个短暂高亮，帮助用户定位。
               if (scrollToEntryId) {
                 targetEl.classList.add('highlight');
                 setTimeout(() => targetEl.classList.remove('highlight'), 2000);
@@ -1542,15 +1538,14 @@
       // INITIALIZATION
       // ============================================================
 
-      // Configure marked with syntax highlighting and TUI-compatible HTML handling
+      // 配置 marked：开启语法高亮，并尽量贴近 TUI 的 Markdown 行为。
       const strictStrikethroughRegex = /^(~~)(?=[^\s~])((?:\\.|[^\\])*?(?:\\.|[^\s~\\]))\1(?=[^~]|$)/;
 
       marked.use({
         breaks: true,
         gfm: true,
         tokenizer: {
-          // Treat HTML-like input as plain text so tags are shown verbatim,
-          // matching the TUI markdown renderer.
+          // 把 HTML-like 片段当普通文本处理，和 TUI 中“原样显示标签”的行为保持一致。
           html() {
             return undefined;
           },
@@ -1569,7 +1564,7 @@
           }
         },
         renderer: {
-          // Sanitize link URLs to prevent javascript:/vbscript:/data: XSS
+          // 链接协议做最小白名单过滤，阻止危险协议注入。
           link(token) {
             const href = (token.href || '').trim();
             if (/^\s*(javascript|vbscript|data):/i.test(href)) {
@@ -1582,7 +1577,7 @@
             out += '>' + this.parser.parseInline(token.tokens) + '</a>';
             return out;
           },
-          // Sanitize image src URLs
+          // 图片同样过滤危险协议，避免导出页被注入恶意内容。
           image(token) {
             const href = (token.href || '').trim();
             if (/^\s*(javascript|vbscript|data):/i.test(href)) {
@@ -1595,7 +1590,7 @@
             out += '>';
             return out;
           },
-          // Code blocks: syntax highlight, no HTML escaping
+          // 代码块交给 highlight.js，高亮失败时再回退到纯转义文本。
           code(token) {
             const code = token.text;
             const lang = token.lang;
@@ -1607,7 +1602,7 @@
                 highlighted = escapeHtml(code);
               }
             } else {
-              // Auto-detect language if not specified
+              // 未指定语言时尝试自动检测，提高导出页的可读性。
               try {
                 highlighted = hljs.highlightAuto(code).value;
               } catch {
@@ -1616,14 +1611,14 @@
             }
             return `<pre><code class="hljs">${highlighted}</code></pre>`;
           },
-          // Inline code: escape HTML
+          // 行内代码只做 HTML 转义，不参与块级高亮。
           codespan(token) {
             return `<code>${escapeHtml(token.text)}</code>`;
           }
         }
       });
 
-      // Simple marked parse (escaping handled in renderers)
+      // marked 输出前的安全处理已经在自定义 renderer 中完成，这里直接 parse。
       function safeMarkedParse(text) {
         return marked.parse(text);
       }
@@ -1772,12 +1767,13 @@
       overlay.addEventListener('click', closeSidebar);
       document.getElementById('sidebar-close').addEventListener('click', closeSidebar);
 
-      // Toggle states
+      // 这两个状态只影响前端展示，不会回写会话数据。
       let thinkingExpanded = true;
       let toolOutputsExpanded = false;
 
       const toggleThinking = () => {
         thinkingExpanded = !thinkingExpanded;
+        // 通过批量切换 display 实现全局展开/收起思考块。
         document.querySelectorAll('.thinking-text').forEach(el => {
           el.style.display = thinkingExpanded ? '' : 'none';
         });
@@ -1788,6 +1784,7 @@
 
       const toggleToolOutputs = () => {
         toolOutputsExpanded = !toolOutputsExpanded;
+        // 工具输出、压缩块、skill 块共用同一展开状态，方便统一浏览。
         document.querySelectorAll('.tool-output.expandable').forEach(el => {
           el.classList.toggle('expanded', toolOutputsExpanded);
         });

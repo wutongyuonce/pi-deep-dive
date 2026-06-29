@@ -45,6 +45,10 @@ export interface EventBusController extends EventBus {
  * 2. 返回包含 emit/on/clear 方法的对象
  * 3. on() 方法会将 handler 包裹为 async 安全版本，捕获异常并打印错误
  *
+ * 定位：简单场景下的进程内事件通道工厂。
+ * 作用：为调用方提供一个可随 runtime 生命周期创建和销毁的轻量消息总线。
+ * 调用关系：被扩展运行时和其他需要跨模块广播事件的模块创建并持有。
+ *
  * @returns EventBusController 实例，可发布、订阅、清空事件
  */
 export function createEventBus(): EventBusController {

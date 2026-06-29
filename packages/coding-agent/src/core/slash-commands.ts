@@ -13,7 +13,9 @@ export type SlashCommandSource = "extension" | "prompt" | "skill";
 
 /**
  * 斜杠命令信息
- * 描述一个可用的斜杠命令，包括其名称、描述、来源和来源详情。
+ * 定位：统一描述运行时可注册命令的数据结构。
+ * 作用：把命令名称、来源和来源详情封装成自动补全与命令面板共用的对象。
+ * 调用关系：由扩展、提示模板、技能和内置命令收集流程共同产出并消费。
  */
 export interface SlashCommandInfo {
 	/** 命令名称（不含前导斜杠） */
@@ -28,6 +30,9 @@ export interface SlashCommandInfo {
 
 /**
  * 内置斜杠命令定义
+ * 定位：描述静态内置命令的轻量结构。
+ * 作用：为命令表和自动补全提供最小必要展示信息。
+ * 调用关系：仅由 `BUILTIN_SLASH_COMMANDS` 使用。
  */
 export interface BuiltinSlashCommand {
 	/** 命令名称 */
@@ -36,7 +41,7 @@ export interface BuiltinSlashCommand {
 	description: string;
 }
 
-/** 内置斜杠命令列表 */
+/** 内置斜杠命令列表。按 TUI 常用操作分组维护，供启动时直接注册。 */
 export const BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
 	{ name: "settings", description: "Open settings menu" },
 	{ name: "model", description: "Select model (opens selector UI)" },

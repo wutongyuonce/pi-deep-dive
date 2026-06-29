@@ -1,9 +1,17 @@
 /**
- * 底部数据提供者模块
+ * footer-data-provider.ts - 底栏状态数据聚合器
  *
- * 为 TUI 底部状态栏提供数据源，包括当前 git 分支名称和扩展状态文本。
- * 通过监视 .git/HEAD 文件变更实时感知分支切换，并支持 reftable 格式的
- * git 仓库。提供只读接口供扩展获取数据，内部管理文件监视器的生命周期。
+ * 定位：interactive 模式底部状态栏的数据源实现，处于 UI 展示层和 git/扩展状态之间。
+ *
+ * 作用：
+ * - 提供当前 git 分支名
+ * - 提供扩展自定义状态文本
+ * - 提供可用模型 provider 数量等 UI 统计值
+ *
+ * 调用关系：
+ * - 被 interactive 模式的 footer 视图持有
+ * - 被扩展 UI 上下文写入状态文案
+ * - 内部通过文件监视器感知 git 元数据变化
  */
 
 import { type ExecFileException, execFile, spawnSync } from "child_process";
@@ -247,6 +255,13 @@ export class FooterDataProvider {
 		}, FooterDataProvider.WATCH_DEBOUNCE_MS);
 	}
 
+	/**
+	 * 异步刷新缓存中的分支名。
+	 *
+	 * 定位：文件监视触发后的实际刷新执行器。
+	 * 作用：串行化异步刷新，避免并发读取，并在分支变更时通知订阅者。
+	 * 调用关系：由 `scheduleRefresh()` 触发。
+	 */
 	private async refreshGitBranchAsync(): Promise<void> {
 		if (this.disposed) return;
 		if (this.refreshInFlight) {
@@ -273,6 +288,13 @@ export class FooterDataProvider {
 		}
 	}
 
+	/**
+	 * 同步解析当前分支名。
+	 *
+	 * 定位：首次渲染和同步读取路径的解析入口。
+	 * 作用：优先直接解析 `HEAD`，在 reftable 的特殊占位场景下回退到 git 命令。
+	 * 调用关系：被 `getGitBranch()` 调用。
+	 */
 	private resolveGitBranchSync(): string | null {
 		try {
 			if (!this.gitPaths) return null;
@@ -287,6 +309,13 @@ export class FooterDataProvider {
 		}
 	}
 
+	/**
+	 * 异步解析当前分支名。
+	 *
+	 * 定位：监视器驱动刷新时的分支解析入口。
+	 * 作用：与同步版本保持同样的判定规则，但通过异步 git 调用避免阻塞刷新链路。
+	 * 调用关系：被 `refreshGitBranchAsync()` 调用。
+	 */
 	private async resolveGitBranchAsync(): Promise<string | null> {
 		try {
 			if (!this.gitPaths) return null;
@@ -336,6 +365,13 @@ export class FooterDataProvider {
 		this.scheduleGitWatcherRetry();
 	}
 
+	/**
+	 * 建立 git 元数据监视器。
+	 *
+	 * 定位：git 状态感知链路的初始化入口。
+	 * 作用：监视 `HEAD` 所在目录以及 reftable 相关文件，在变更时触发防抖刷新。
+	 * 调用关系：构造函数、`setCwd()` 和 watcher 重试逻辑都会调用它。
+	 */
 	private setupGitWatcher(): void {
 		this.clearGitWatchers();
 		if (!this.gitPaths) return;

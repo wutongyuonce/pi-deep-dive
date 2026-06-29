@@ -221,14 +221,14 @@ function createSkillSourceInfo(filePath: string, baseDir: string, source: string
 }
 
 /**
- * 从目录加载技能
+ * 定位：单目录技能发现的对外入口。
+ * 作用：按 Agent Skills 目录约定扫描一个目录并返回技能与诊断结果。
+ * 调用关系：由 `loadSkills()` 和测试直接调用；内部委托给 `loadSkillsFromDirInternal()`。
  *
  * 发现规则：
  * - 如果目录包含 SKILL.md，将其作为技能根目录，不再递归
  * - 否则加载根目录下的直接子 .md 文件
  * - 递归进入子目录查找 SKILL.md
- *
- * 被 loadSkills() 调用，是技能发现的核心入口
  */
 export function loadSkillsFromDir(options: LoadSkillsFromDirOptions): LoadSkillsResult {
 	const { dir, source } = options;
@@ -265,6 +265,7 @@ function loadSkillsFromDirInternal(
 		const entries = readdirSync(dir, { withFileTypes: true });
 
 		for (const entry of entries) {
+			// 步骤 1：如果当前目录本身就是技能根目录，优先直接加载它并停止下钻。
 			if (entry.name !== "SKILL.md") {
 				continue;
 			}
@@ -294,6 +295,7 @@ function loadSkillsFromDirInternal(
 		}
 
 		for (const entry of entries) {
+			// 步骤 2：否则继续扫描子目录，并在根目录模式下接收散落的 .md 技能文件。
 			if (entry.name.startsWith(".")) {
 				continue;
 			}
@@ -348,9 +350,9 @@ function loadSkillsFromDirInternal(
 }
 
 /**
- * 从单个 SKILL.md 文件加载技能
- * 解析 frontmatter 元数据，校验名称和描述，构建 Skill 对象。
- * 即使有校验警告仍会加载（除非描述完全缺失）。
+ * 定位：单个技能文件的解析器。
+ * 作用：读取 `SKILL.md`、校验 frontmatter，并产出运行时 `Skill` 对象。
+ * 调用关系：由目录扫描逻辑和显式技能文件加载流程调用。
  *
  * @param filePath SKILL.md 文件路径
  * @param source 来源标识
@@ -363,6 +365,7 @@ function loadSkillFromFile(
 	const diagnostics: ResourceDiagnostic[] = [];
 
 	try {
+		// 步骤 1：先解析 frontmatter，再推导技能名和基础目录。
 		const rawContent = readFileSync(filePath, "utf-8");
 		const { frontmatter } = parseFrontmatter<SkillFrontmatter>(rawContent);
 		const skillDir = dirname(filePath);
@@ -383,7 +386,7 @@ function loadSkillFromFile(
 			diagnostics.push({ type: "warning", message: error, path: filePath });
 		}
 
-		// Still load the skill even with warnings (unless description is completely missing)
+		// 步骤 2：描述完全缺失时视为无效技能；其余 warning 仅进入诊断，不阻断加载。
 		if (!frontmatter.description || frontmatter.description.trim() === "") {
 			return { skill: null, diagnostics };
 		}
@@ -466,10 +469,9 @@ export interface LoadSkillsOptions {
 }
 
 /**
- * 从所有配置位置加载技能
- * 合并用户级、项目级和显式路径的技能，处理去重和冲突诊断。
- *
- * 被 resource-loader.ts 的 DefaultResourceLoader.reload() 调用。
+ * 定位：技能资源的总加载入口。
+ * 作用：合并用户级、项目级和显式路径的技能，并统一处理去重与冲突诊断。
+ * 调用关系：由 `resource-loader.ts` 的重载流程调用，结果再进入系统提示和命令注册链路。
  *
  * @returns 技能列表和诊断信息
  */
@@ -518,6 +520,7 @@ export function loadSkills(options: LoadSkillsOptions): LoadSkillsResult {
 	}
 
 	if (includeDefaults) {
+		// 步骤 1：先装载默认目录，保证用户级和项目级技能拥有稳定优先顺序。
 		addSkills(loadSkillsFromDirInternal(join(resolvedAgentDir, "skills"), "user", true));
 		addSkills(loadSkillsFromDirInternal(resolve(resolvedCwd, CONFIG_DIR_NAME, "skills"), "project", true));
 	}
@@ -543,6 +546,7 @@ export function loadSkills(options: LoadSkillsOptions): LoadSkillsResult {
 	};
 
 	for (const rawPath of skillPaths) {
+		// 步骤 2：再处理显式路径，并把路径问题转成诊断而不是直接抛错。
 		const resolvedPath = resolvePath(rawPath, resolvedCwd, { trim: true });
 		if (!existsSync(resolvedPath)) {
 			allDiagnostics.push({ type: "warning", message: "skill path does not exist", path: resolvedPath });

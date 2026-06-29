@@ -144,9 +144,15 @@ export {
 // 辅助函数
 
 function getDefaultAgentDir(): string {
+	// 统一从配置模块读取默认 agent 目录，避免各调用点分散拼接路径。
 	return getAgentDir();
 }
 
+/**
+ * 定位：provider 请求附加头的集中构造器。
+ * 作用：根据模型和设置决定是否补充安装归因等 provider 专用请求头。
+ * 调用关系：仅由 `createAgentSession()` 内部的 `streamFn` 调用。
+ */
 function getAttributionHeaders(
 	model: Model<any>,
 	settingsManager: SettingsManager,
@@ -154,10 +160,12 @@ function getAttributionHeaders(
 ): Record<string, string> | undefined {
 	void sessionId;
 
+	// 未启用安装遥测时不注入任何归因头。
 	if (!isInstallTelemetryEnabled(settingsManager)) {
 		return undefined;
 	}
 
+	// 仅对 OpenRouter 系列请求补归因头，其他 provider 保持原样。
 	if (model.provider === "openrouter" || model.baseUrl.includes("openrouter.ai")) {
 		return {
 			"HTTP-Referer": "https://pi.dev",
@@ -170,7 +178,9 @@ function getAttributionHeaders(
 }
 
 /**
- * 使用指定选项创建 AgentSession。
+ * 定位：core 层创建 `AgentSession` 的总工厂函数。
+ * 作用：组装认证、模型、设置、资源、工具与扩展运行时，并返回可直接运行的会话对象。
+ * 调用关系：被 SDK 消费方和运行时工厂调用，是会话构建链路的最后收口点。
  *
  * @example
  * ```typescript
@@ -205,11 +215,12 @@ function getAttributionHeaders(
  * ```
  */
 export async function createAgentSession(options: CreateAgentSessionOptions = {}): Promise<CreateAgentSessionResult> {
+	// 步骤 1：先确定 cwd、agentDir 和基础服务实例，保证后续组件共享同一组路径语义。
 	const cwd = resolvePath(options.cwd ?? options.sessionManager?.getCwd() ?? process.cwd());
 	const agentDir = options.agentDir ? resolvePath(options.agentDir) : getDefaultAgentDir();
 	let resourceLoader = options.resourceLoader;
 
-	// 使用提供的或创建 AuthStorage 和 ModelRegistry
+	// 步骤 2：初始化认证、模型、设置和会话管理器。
 	const authPath = options.agentDir ? join(agentDir, "auth.json") : undefined;
 	const modelsPath = options.agentDir ? join(agentDir, "models.json") : undefined;
 	const authStorage = options.authStorage ?? AuthStorage.create(authPath);
@@ -219,12 +230,13 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	const sessionManager = options.sessionManager ?? SessionManager.create(cwd, getDefaultSessionDir(cwd, agentDir));
 
 	if (!resourceLoader) {
+		// 步骤 3：未注入资源加载器时，按默认配置加载扩展/技能/提示模板等资源。
 		resourceLoader = new DefaultResourceLoader({ cwd, agentDir, settingsManager });
 		await resourceLoader.reload();
 		time("resourceLoader.reload");
 	}
 
-	// 检查会话是否有现有数据需要恢复
+	// 步骤 4：读取已有会话上下文，决定是否恢复模型与思考级别。
 	const existingSession = sessionManager.buildSessionContext();
 	const hasExistingSession = existingSession.messages.length > 0;
 	const hasThinkingEntry = sessionManager.getBranch().some((entry) => entry.type === "thinking_level_change");
@@ -243,7 +255,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		}
 	}
 
-	// 如果仍然没有模型，使用 findInitialModel（检查设置默认值，然后是提供方默认值）
+	// 步骤 5：没有恢复出的模型时，从设置和 provider 默认值里挑一个初始模型。
 	if (!model) {
 		const result = await findInitialModel({
 			scopedModels: [],
@@ -270,7 +282,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			: (settingsManager.getDefaultThinkingLevel() ?? DEFAULT_THINKING_LEVEL);
 	}
 
-	// 回退到设置默认值
+	// 步骤 6：补齐思考级别并对齐模型能力边界。
 	if (thinkingLevel === undefined) {
 		thinkingLevel = settingsManager.getDefaultThinkingLevel() ?? DEFAULT_THINKING_LEVEL;
 	}
@@ -331,6 +343,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 
 	const extensionRunnerRef: { current?: ExtensionRunner } = {};
 
+	// 步骤 7：创建底层 Agent，把 provider 调用、扩展 hook 和上下文转换都接上。
 	agent = new Agent({
 		initialState: {
 			systemPrompt: "",
@@ -389,7 +402,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		maxRetryDelayMs: settingsManager.getProviderRetrySettings().maxRetryDelayMs,
 	});
 
-	// 如果会话有现有数据则恢复消息
+	// 步骤 8：把已有消息或新会话的初始模型/思考级别状态写入会话存储。
 	if (hasExistingSession) {
 		agent.state.messages = existingSession.messages;
 		if (!hasThinkingEntry) {
@@ -403,6 +416,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		sessionManager.appendThinkingLevelChange(thinkingLevel);
 	}
 
+	// 步骤 9：构造最终的 AgentSession，并把资源加载结果一并返回给上层 UI。
 	const session = new AgentSession({
 		agent,
 		sessionManager,

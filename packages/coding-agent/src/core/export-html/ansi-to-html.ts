@@ -45,6 +45,7 @@ function color256ToHex(index: number): string {
 
 	// 色立方体（16-231）：6x6x6 = 216 色
 	if (index < 232) {
+		// 先把索引拆成 RGB 三个 0-5 档位，再映射到终端 256 色调色板。
 		const cubeIndex = index - 16;
 		const r = Math.floor(cubeIndex / 36);
 		const g = Math.floor((cubeIndex % 36) / 6);
@@ -84,6 +85,7 @@ interface TextStyle {
 }
 
 function createEmptyStyle(): TextStyle {
+	// 每次转换都从“无前景、无背景、无文本样式”的干净状态开始。
 	return {
 		fg: null,
 		bg: null,
@@ -96,6 +98,7 @@ function createEmptyStyle(): TextStyle {
 
 function styleToInlineCSS(style: TextStyle): string {
 	const parts: string[] = [];
+	// 只输出当前生效的样式，避免给 span 写入多余的空属性。
 	if (style.fg) parts.push(`color:${style.fg}`);
 	if (style.bg) parts.push(`background-color:${style.bg}`);
 	if (style.bold) parts.push("font-weight:bold");
@@ -121,7 +124,7 @@ function applySgrCode(params: number[], style: TextStyle): void {
 		const code = params[i];
 
 		if (code === 0) {
-			// 重置所有样式
+			// 0 码表示恢复默认样式，直接清空全部状态字段。
 			style.fg = null;
 			style.bg = null;
 			style.bold = false;
@@ -148,7 +151,7 @@ function applySgrCode(params: number[], style: TextStyle): void {
 			// 标准前景色
 			style.fg = ANSI_COLORS[code - 30];
 		} else if (code === 38) {
-			// 扩展前景色
+			// 38 既可能是 256 色，也可能是真彩色，按后续参数继续解析。
 			if (params[i + 1] === 5 && params.length > i + 2) {
 				// 256 色：38;5;N
 				style.fg = color256ToHex(params[i + 2]);
@@ -168,7 +171,7 @@ function applySgrCode(params: number[], style: TextStyle): void {
 			// 标准背景色
 			style.bg = ANSI_COLORS[code - 40];
 		} else if (code === 48) {
-			// 扩展背景色
+			// 48 与 38 对称，用来解析扩展背景色。
 			if (params[i + 1] === 5 && params.length > i + 2) {
 				// 256 色：48;5;N
 				style.bg = color256ToHex(params[i + 2]);
@@ -217,31 +220,31 @@ export function ansiToHtml(text: string): string {
 	let lastIndex = 0;
 	let inSpan = false;
 
-	// 重置正则状态
+	// 全局正则会复用 lastIndex，进入新文本前先重置状态。
 	ANSI_REGEX.lastIndex = 0;
 
 	let match = ANSI_REGEX.exec(text);
 	while (match !== null) {
-		// 添加此转义序列之前的文本
+		// 先输出转义序列之前的普通文本。
 		const beforeText = text.slice(lastIndex, match.index);
 		if (beforeText) {
 			result += escapeHtml(beforeText);
 		}
 
-		// 解析 SGR 参数
+		// 把 "31;1" 这类参数串转成数字数组，空参数等价于 reset。
 		const paramStr = match[1];
 		const params = paramStr ? paramStr.split(";").map((p) => parseInt(p, 10) || 0) : [0];
 
-		// 如果已有 span 则关闭
+		// 样式切换前先闭合旧 span，避免前后样式串色。
 		if (inSpan) {
 			result += "</span>";
 			inSpan = false;
 		}
 
-		// Apply the codes
+		// 应用当前 SGR 指令，更新样式状态机。
 		applySgrCode(params, style);
 
-		// Open new span if we have any styling
+		// 如果新状态非空，则为后续文本开启新的 styled span。
 		if (hasStyle(style)) {
 			result += `<span style="${styleToInlineCSS(style)}">`;
 			inSpan = true;
@@ -251,13 +254,13 @@ export function ansiToHtml(text: string): string {
 		match = ANSI_REGEX.exec(text);
 	}
 
-	// Add remaining text
+	// 尾部剩余文本不带新的转义序列，直接按当前样式输出。
 	const remainingText = text.slice(lastIndex);
 	if (remainingText) {
 		result += escapeHtml(remainingText);
 	}
 
-	// Close any open span
+	// 文本结束时补齐未关闭的 span。
 	if (inSpan) {
 		result += "</span>";
 	}
@@ -272,5 +275,6 @@ export function ansiToHtml(text: string): string {
  * 被谁调用：tool-renderer.ts 的 createToolHtmlRenderer()
  */
 export function ansiLinesToHtml(lines: string[]): string {
+	// 每一行单独包成块级元素，既保留换行结构，也方便 CSS 控制行高。
 	return lines.map((line) => `<div class="ansi-line">${ansiToHtml(line) || "&nbsp;"}</div>`).join("");
 }

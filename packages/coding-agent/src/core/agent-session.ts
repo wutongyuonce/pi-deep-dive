@@ -363,6 +363,7 @@ export class AgentSession {
 		apiKey: string;
 		headers?: Record<string, string>;
 	}> {
+		// 先从模型注册表解析请求认证；缺失时转成面向用户的可执行提示文案。
 		const result = await this._modelRegistry.getApiKeyAndHeaders(model);
 		if (!result.ok) {
 			if (result.error.startsWith("No API key found")) {
@@ -389,6 +390,7 @@ export class AgentSession {
 		apiKey?: string;
 		headers?: Record<string, string>;
 	}> {
+		// streamSimple 模式必须具备真实认证；其他流函数允许返回空认证并交给上层兼容处理。
 		if (this.agent.streamFn === streamSimple) {
 			return this._getRequiredRequestAuth(model);
 		}
@@ -945,6 +947,13 @@ export class AgentSession {
 		}
 	}
 
+	/**
+	 * 处理一次 agent 运行结束后的尾部决策。
+	 *
+	 * 定位：`_runAgentPrompt()` 和 `continue()` 循环之间的收口逻辑。
+	 * 作用：串联“自动重试”和“自动压缩”两条后处理路径，决定是否需要继续下一次 LLM 调用。
+	 * 调用关系：仅被本类内部的 prompt 运行循环调用。
+	 */
 	private async _handlePostAgentRun(): Promise<boolean> {
 		const msg = this._lastAssistantMessage;
 		this._lastAssistantMessage = undefined;
@@ -952,6 +961,7 @@ export class AgentSession {
 			return false;
 		}
 
+		// 先处理可重试错误，若准备好重试则直接继续下一轮。
 		if (this._isRetryableError(msg) && (await this._prepareRetry(msg))) {
 			return true;
 		}
@@ -966,6 +976,7 @@ export class AgentSession {
 			this._retryAttempt = 0;
 		}
 
+		// 重试未接管时，再判断是否需要自动压缩。
 		return await this._checkCompaction(msg);
 	}
 
@@ -2059,6 +2070,13 @@ export class AgentSession {
 		return this.settingsManager.getCompactionEnabled();
 	}
 
+	/**
+	 * 绑定宿主侧扩展上下文。
+	 *
+	 * 定位：会话创建后接入 UI/命令上下文的入口。
+	 * 作用：记录宿主提供的绑定对象，应用到当前 `ExtensionRunner`，再触发 startup/reload 资源扩展流程。
+	 * 调用关系：被 interactive 模式、RPC 模式等宿主在会话创建后调用。
+	 */
 	async bindExtensions(bindings: ExtensionBindings): Promise<void> {
 		if (bindings.uiContext !== undefined) {
 			this._extensionUIContext = bindings.uiContext;
@@ -2076,11 +2094,19 @@ export class AgentSession {
 			this._extensionErrorListener = bindings.onError;
 		}
 
+		// 先把宿主提供的上下文能力绑定到当前 runner，再对扩展发出启动事件。
 		this._applyExtensionBindings(this._extensionRunner);
 		await this._extensionRunner.emit(this._sessionStartEvent);
 		await this.extendResourcesFromExtensions(this._sessionStartEvent.reason === "reload" ? "reload" : "startup");
 	}
 
+	/**
+	 * 让扩展在启动或重载时向资源系统追加技能、提示词和主题。
+	 *
+	 * 定位：扩展资源发现和注入的收口函数。
+	 * 作用：收集扩展上报的资源路径，扩展 `ResourceLoader`，并重建系统提示词。
+	 * 调用关系：被 `bindExtensions()` 和 `reload()` 调用。
+	 */
 	private async extendResourcesFromExtensions(reason: "startup" | "reload"): Promise<void> {
 		if (!this._extensionRunner.hasHandlers("resources_discover")) {
 			return;
@@ -2271,6 +2297,13 @@ export class AgentSession {
 		);
 	}
 
+	/**
+	 * 刷新当前会话的工具注册表与提示词片段。
+	 *
+	 * 定位：工具系统和扩展系统的汇总入口。
+	 * 作用：重新合并内置工具、扩展工具和 SDK 自定义工具，并同步当前激活工具集。
+	 * 调用关系：被 `_buildRuntime()`、扩展重载和工具刷新逻辑调用。
+	 */
 	private _refreshToolRegistry(options?: { activeToolNames?: string[]; includeAllExtensionTools?: boolean }): void {
 		const previousRegistryNames = new Set(this._toolRegistry.keys());
 		const previousActiveToolNames = this.getActiveToolNames();
@@ -2362,6 +2395,13 @@ export class AgentSession {
 		this.setActiveToolsByName([...new Set(nextActiveToolNames)]);
 	}
 
+	/**
+	 * 基于当前配置重建扩展运行时和工具系统。
+	 *
+	 * 定位：`AgentSession` 初始化与 reload 的核心装配步骤。
+	 * 作用：创建基础工具定义、实例化 `ExtensionRunner`、绑定上下文，并恢复激活工具。
+	 * 调用关系：构造函数和 `reload()` 会调用它。
+	 */
 	private _buildRuntime(options: {
 		activeToolNames?: string[];
 		flagValues?: Map<string, boolean | string>;
@@ -2416,6 +2456,13 @@ export class AgentSession {
 		});
 	}
 
+	/**
+	 * 重载设置、资源和扩展运行时。
+	 *
+	 * 定位：会话级热重载入口。
+	 * 作用：关闭旧扩展上下文，重新读取设置与资源，再以当前工具状态重建运行时。
+	 * 调用关系：被 `/reload` 之类的重载流程调用。
+	 */
 	async reload(): Promise<void> {
 		const previousFlagValues = this._extensionRunner.getFlagValues();
 		await emitSessionShutdownEvent(this._extensionRunner, { type: "session_shutdown", reason: "reload" });

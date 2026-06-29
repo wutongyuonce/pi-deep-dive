@@ -62,7 +62,7 @@ function extractFileOperations(
 ): FileOperations {
 	const fileOps = createFileOps();
 
-	// 从前一次压缩的详情中收集（如果由 pi 生成）
+	// 先继承前一次压缩已经记录下来的文件轨迹，保证多轮压缩可持续累积。
 	if (prevCompactionIndex >= 0) {
 		const prevCompaction = entries[prevCompactionIndex] as CompactionEntry;
 		if (!prevCompaction.fromHook && prevCompaction.details) {
@@ -77,7 +77,7 @@ function extractFileOperations(
 		}
 	}
 
-	// 从消息中的工具调用提取文件操作
+	// 再扫描本轮待压缩消息里的工具调用，补齐最新的文件读写信息。
 	for (const msg of messages) {
 		extractFileOpsFromMessage(msg, fileOps);
 	}
@@ -219,6 +219,7 @@ export function estimateContextTokens(messages: AgentMessage[]): ContextUsageEst
 	const usageInfo = getLastAssistantUsageInfo(messages);
 
 	if (!usageInfo) {
+		// 没有 usage 时只能逐条启发式估算整段上下文大小。
 		let estimated = 0;
 		for (const message of messages) {
 			estimated += estimateTokens(message);
@@ -231,6 +232,7 @@ export function estimateContextTokens(messages: AgentMessage[]): ContextUsageEst
 		};
 	}
 
+	// 命中最近一次真实 usage 后，只需要补算其后的尾部消息。
 	const usageTokens = calculateContextTokens(usageInfo.usage);
 	let trailingTokens = 0;
 	for (let i = usageInfo.index + 1; i < messages.length; i++) {
@@ -373,7 +375,7 @@ function findValidCutPoints(entries: SessionEntry[], startIndex: number, endInde
 				break;
 		}
 
-		// branch_summary and custom_message are user-role messages, valid cut points
+		// branch_summary 与 custom_message 会被视为“用户侧输入”，因此也能作为切割点。
 		if (entry.type === "branch_summary" || entry.type === "custom_message") {
 			cutPoints.push(i);
 		}
@@ -392,7 +394,7 @@ function findValidCutPoints(entries: SessionEntry[], startIndex: number, endInde
 export function findTurnStartIndex(entries: SessionEntry[], entryIndex: number, startIndex: number): number {
 	for (let i = entryIndex; i >= startIndex; i--) {
 		const entry = entries[i];
-		// branch_summary and custom_message are user-role messages, can start a turn
+		// branch_summary 与 custom_message 都能作为一轮上下文的起点。
 		if (entry.type === "branch_summary" || entry.type === "custom_message") {
 			return i;
 		}
@@ -437,13 +439,14 @@ export function findCutPoint(
 	endIndex: number,
 	keepRecentTokens: number,
 ): CutPointResult {
+	// 先枚举候选切割点，后续只在这些安全位置上落刀。
 	const cutPoints = findValidCutPoints(entries, startIndex, endIndex);
 
 	if (cutPoints.length === 0) {
 		return { firstKeptEntryIndex: startIndex, turnStartIndex: -1, isSplitTurn: false };
 	}
 
-	// 从最新消息向后遍历，累加估算的消息大小
+	// 从尾部向前累积最近消息，直到达到“保留最近内容”的预算。
 	let accumulatedTokens = 0;
 	let cutIndex = cutPoints[0]; // 默认：从第一条消息开始保留（不含头部）
 
@@ -451,13 +454,12 @@ export function findCutPoint(
 		const entry = entries[i];
 		if (entry.type !== "message") continue;
 
-		// 估算此消息的大小
+		// 逐条估算消息体积，逼近 keepRecentTokens 阈值。
 		const messageTokens = estimateTokens(entry.message);
 		accumulatedTokens += messageTokens;
 
-		// 检查是否超出预算
+		// 一旦达到预算，就把切割点移动到当前位置之后最近的合法边界。
 		if (accumulatedTokens >= keepRecentTokens) {
-			// 查找此条目处或之后最近的有效切割点
 			for (let c = 0; c < cutPoints.length; c++) {
 				if (cutPoints[c] >= i) {
 					cutIndex = cutPoints[c];
@@ -468,22 +470,22 @@ export function findCutPoint(
 		}
 	}
 
-	// 从 cutIndex 向前扫描，包含任何非消息条目（bash、设置变更等）
+	// 切点前如果紧贴着非消息条目，也一并保留下来，避免元信息悬空。
 	while (cutIndex > startIndex) {
 		const prevEntry = entries[cutIndex - 1];
-		// 在会话头部或压缩边界处停止
+		// 遇到压缩边界就停，不能跨过上一段压缩。
 		if (prevEntry.type === "compaction") {
 			break;
 		}
 		if (prevEntry.type === "message") {
-			// 遇到任何消息则停止
+			// 消息边界本身就是自然分隔点，不再继续向前扩张。
 			break;
 		}
-		// 包含此非消息条目（bash、设置变更等）
+		// 将与切点紧邻的元数据条目一起纳入保留区。
 		cutIndex--;
 	}
 
-	// 判断是否为轮次中间切割
+	// 如果切到的不是用户起点，则进一步判断是否需要补“轮次前缀摘要”。
 	const cutEntry = entries[cutIndex];
 	const isUserMessage = cutEntry.type === "message" && cutEntry.message.role === "user";
 	const turnStartIndex = isUserMessage ? -1 : findTurnStartIndex(entries, cutIndex, startIndex);
@@ -581,6 +583,7 @@ function createSummarizationOptions(
 ): SimpleStreamOptions {
 	const options: SimpleStreamOptions = { maxTokens, signal, apiKey, headers };
 	if (model.reasoning && thinkingLevel && thinkingLevel !== "off") {
+		// 仅在模型和当前设置都支持时才透传 reasoning 级别。
 		options.reasoning = thinkingLevel;
 	}
 	return options;
@@ -593,8 +596,10 @@ async function completeSummarization(
 	streamFn?: StreamFn,
 ): Promise<AssistantMessage> {
 	if (!streamFn) {
+		// 无流式钩子时直接走简单完成接口。
 		return completeSimple(model, context, options);
 	}
+	// 有流式钩子时委托外部流处理，再汇总最终结果。
 	const stream = await streamFn(model, context, options);
 	return stream.result();
 }
@@ -632,18 +637,17 @@ export async function generateSummary(
 		model.maxTokens > 0 ? model.maxTokens : Number.POSITIVE_INFINITY,
 	);
 
-	// 如果有先前摘要则使用更新提示词，否则使用初始提示词
+	// 先决定本次是“首轮摘要”还是“增量更新已有摘要”。
 	let basePrompt = previousSummary ? UPDATE_SUMMARIZATION_PROMPT : SUMMARIZATION_PROMPT;
 	if (customInstructions) {
 		basePrompt = `${basePrompt}\n\nAdditional focus: ${customInstructions}`;
 	}
 
-	// 将对话序列化为文本，防止模型将其视为需要继续的对话
-	// 先转换为 LLM 消息（处理 bashExecution、custom 等自定义类型）
+	// 先把自定义消息转成 LLM 兼容格式，再序列化成纯文本输入给摘要模型。
 	const llmMessages = convertToLlm(currentMessages);
 	const conversationText = serializeConversation(llmMessages);
 
-	// Build the prompt with conversation wrapped in tags
+	// 用标签包住会话和旧摘要，给模型稳定的结构边界。
 	let promptText = `<conversation>\n${conversationText}\n</conversation>\n\n`;
 	if (previousSummary) {
 		promptText += `<previous-summary>\n${previousSummary}\n</previous-summary>\n\n`;
@@ -739,6 +743,7 @@ export function prepareCompaction(
 	let previousSummary: string | undefined;
 	let boundaryStart = 0;
 	if (prevCompactionIndex >= 0) {
+		// 找到上一段压缩后，从它保留的第一条记录开始重新计算边界。
 		const prevCompaction = pathEntries[prevCompactionIndex] as CompactionEntry;
 		previousSummary = prevCompaction.summary;
 		const firstKeptEntryIndex = pathEntries.findIndex((entry) => entry.id === prevCompaction.firstKeptEntryId);
@@ -746,11 +751,12 @@ export function prepareCompaction(
 	}
 	const boundaryEnd = pathEntries.length;
 
+	// 基于当前完整上下文估算 token，再决定本次压缩应从哪里截断。
 	const tokensBefore = estimateContextTokens(buildSessionContext(pathEntries).messages).tokens;
 
 	const cutPoint = findCutPoint(pathEntries, boundaryStart, boundaryEnd, settings.keepRecentTokens);
 
-	// Get UUID of first kept entry
+	// firstKeptEntryId 会写入压缩条目，供后续恢复边界和增量压缩复用。
 	const firstKeptEntry = pathEntries[cutPoint.firstKeptEntryIndex];
 	if (!firstKeptEntry?.id) {
 		return undefined; // Session needs migration
@@ -759,14 +765,14 @@ export function prepareCompaction(
 
 	const historyEnd = cutPoint.isSplitTurn ? cutPoint.turnStartIndex : cutPoint.firstKeptEntryIndex;
 
-	// Messages to summarize (will be discarded after summary)
+	// 边界前的历史消息会被摘要后丢弃。
 	const messagesToSummarize: AgentMessage[] = [];
 	for (let i = boundaryStart; i < historyEnd; i++) {
 		const msg = getMessageFromEntryForCompaction(pathEntries[i]);
 		if (msg) messagesToSummarize.push(msg);
 	}
 
-	// Messages for turn prefix summary (if splitting a turn)
+	// 如果切在一轮对话中间，还要额外保留这轮前缀用于补充说明。
 	const turnPrefixMessages: AgentMessage[] = [];
 	if (cutPoint.isSplitTurn) {
 		for (let i = cutPoint.turnStartIndex; i < cutPoint.firstKeptEntryIndex; i++) {
@@ -775,10 +781,10 @@ export function prepareCompaction(
 		}
 	}
 
-	// Extract file operations from messages and previous compaction
+	// 提前收集文件轨迹，后续摘要生成阶段只负责拼接结果。
 	const fileOps = extractFileOperations(messagesToSummarize, pathEntries, prevCompactionIndex);
 
-	// Also extract file ops from turn prefix if splitting
+	// 分裂轮次时，前缀消息里的工具调用也要计入文件轨迹。
 	if (cutPoint.isSplitTurn) {
 		for (const msg of turnPrefixMessages) {
 			extractFileOpsFromMessage(msg, fileOps);
@@ -851,11 +857,11 @@ export async function compact(
 		settings,
 	} = preparation;
 
-	// 生成摘要（如果需要两者可并行）并合并为一个
+	// 根据是否切开一轮对话，决定只生成历史摘要还是并行补一份前缀摘要。
 	let summary: string;
 
 	if (isSplitTurn && turnPrefixMessages.length > 0) {
-		// 并行生成两个摘要
+		// 历史摘要和轮次前缀摘要彼此独立，可以并行缩短总耗时。
 		const [historyResult, turnPrefixResult] = await Promise.all([
 			messagesToSummarize.length > 0
 				? generateSummary(
@@ -882,10 +888,10 @@ export async function compact(
 				streamFn,
 			),
 		]);
-		// 合并为单一摘要
+		// 将两段摘要拼成统一的压缩内容，供后续作为单条 compaction 记录使用。
 		summary = `${historyResult}\n\n---\n\n**Turn Context (split turn):**\n\n${turnPrefixResult}`;
 	} else {
-		// Just generate history summary
+		// 未切开轮次时，只需要生成常规历史摘要。
 		summary = await generateSummary(
 			messagesToSummarize,
 			model,
@@ -900,7 +906,7 @@ export async function compact(
 		);
 	}
 
-	// Compute file lists and append to summary
+	// 统一在摘要末尾补上文件读写列表，便于后续恢复工作上下文。
 	const { readFiles, modifiedFiles } = computeFileLists(fileOps);
 	summary += formatFileOperations(readFiles, modifiedFiles);
 
@@ -936,6 +942,7 @@ async function generateTurnPrefixSummary(
 		Math.floor(0.5 * reserveTokens),
 		model.maxTokens > 0 ? model.maxTokens : Number.POSITIVE_INFINITY,
 	); // Smaller budget for turn prefix
+	// 轮次前缀只承担“解释保留后缀”的作用，因此采用更小的 token 预算。
 	const llmMessages = convertToLlm(messages);
 	const conversationText = serializeConversation(llmMessages);
 	const promptText = `<conversation>\n${conversationText}\n</conversation>\n\n${TURN_PREFIX_SUMMARIZATION_PROMPT}`;

@@ -26,6 +26,7 @@ export interface FileOperations {
 }
 
 export function createFileOps(): FileOperations {
+	// 为三类文件操作分别初始化独立集合，后续统一累积并去重。
 	return {
 		read: new Set(),
 		written: new Set(),
@@ -43,6 +44,7 @@ export function extractFileOpsFromMessage(message: AgentMessage, fileOps: FileOp
 	if (message.role !== "assistant") return;
 	if (!("content" in message) || !Array.isArray(message.content)) return;
 
+	// 逐块扫描助手消息，只处理结构化 toolCall 块。
 	for (const block of message.content) {
 		if (typeof block !== "object" || block === null) continue;
 		if (!("type" in block) || block.type !== "toolCall") continue;
@@ -54,6 +56,7 @@ export function extractFileOpsFromMessage(message: AgentMessage, fileOps: FileOp
 		const path = typeof args.path === "string" ? args.path : undefined;
 		if (!path) continue;
 
+		// 按工具名把路径归入对应集合，供后续摘要统一输出。
 		switch (block.name) {
 			case "read":
 				fileOps.read.add(path);
@@ -77,6 +80,7 @@ export function extractFileOpsFromMessage(message: AgentMessage, fileOps: FileOp
  * 被谁调用：compaction.ts 的 compact()、branch-summarization.ts 的 generateBranchSummary()
  */
 export function computeFileLists(fileOps: FileOperations): { readFiles: string[]; modifiedFiles: string[] } {
+	// 先合并所有修改类操作，再把纯读取文件从中剔除，避免重复出现在两个列表里。
 	const modified = new Set([...fileOps.edited, ...fileOps.written]);
 	const readOnly = [...fileOps.read].filter((f) => !modified.has(f)).sort();
 	const modifiedFiles = [...modified].sort();
@@ -92,6 +96,7 @@ export function computeFileLists(fileOps: FileOperations): { readFiles: string[]
 export function formatFileOperations(readFiles: string[], modifiedFiles: string[]): string {
 	const sections: string[] = [];
 	if (readFiles.length > 0) {
+		// 读取文件单独输出，方便后续模型区分“看过”与“改过”。
 		sections.push(`<read-files>\n${readFiles.join("\n")}\n</read-files>`);
 	}
 	if (modifiedFiles.length > 0) {
@@ -114,6 +119,7 @@ const TOOL_RESULT_MAX_CHARS = 2000;
  */
 function truncateForSummary(text: string, maxChars: number): string {
 	if (text.length <= maxChars) return text;
+	// 超出预算时仅保留前缀，并显式标注被裁掉的字符数。
 	const truncatedChars = text.length - maxChars;
 	return `${text.slice(0, maxChars)}\n\n[... ${truncatedChars} more characters truncated]`;
 }
@@ -139,6 +145,7 @@ export function serializeConversation(messages: Message[]): string {
 
 	for (const msg of messages) {
 		if (msg.role === "user") {
+			// 用户消息统一折叠为纯文本，避免把结构化块原样交给摘要模型。
 			const content =
 				typeof msg.content === "string"
 					? msg.content
@@ -152,6 +159,7 @@ export function serializeConversation(messages: Message[]): string {
 			const thinkingParts: string[] = [];
 			const toolCalls: string[] = [];
 
+			// 按文本、思考、工具调用三类拆分助手输出，便于摘要模型理解结构。
 			for (const block of msg.content) {
 				if (block.type === "text") {
 					textParts.push(block.text);
@@ -176,6 +184,7 @@ export function serializeConversation(messages: Message[]): string {
 				parts.push(`[Assistant tool calls]: ${toolCalls.join("; ")}`);
 			}
 		} else if (msg.role === "toolResult") {
+			// 工具结果可能很长，写入摘要前先裁剪到预算内。
 			const content = msg.content
 				.filter((c): c is { type: "text"; text: string } => c.type === "text")
 				.map((c) => c.text)

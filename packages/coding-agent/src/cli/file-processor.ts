@@ -114,7 +114,7 @@ export async function processFileArguments(fileArgs: string[], options?: Process
 				attachment = {
 					type: "image",
 					mimeType: resized.mimeType,
-					data: resized.data,  // 已经是 base64 编码的缩放后图片数据
+					data: resized.data, // 已经是 base64 编码的缩放后图片数据
 				};
 			} else {
 				// 不缩放，直接将原始图片转为 base64

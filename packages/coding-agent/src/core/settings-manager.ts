@@ -145,7 +145,11 @@ export interface Settings {
 	httpIdleTimeoutMs?: number; // HTTP 头/体空闲超时时间（毫秒），0 表示禁用
 }
 
-/** 深度合并设置：项目/覆盖设置优先，嵌套对象递归合并 */
+/**
+ * 定位：设置对象的基础合并器。
+ * 作用：以全局设置为底，把项目级或临时覆盖递归叠加上去。
+ * 调用关系：由构造、重载、覆盖应用和保存前刷新多个路径共用。
+ */
 function deepMergeSettings(base: Settings, overrides: Settings): Settings {
 	const result: Settings = { ...base };
 
@@ -157,7 +161,7 @@ function deepMergeSettings(base: Settings, overrides: Settings): Settings {
 			continue;
 		}
 
-		// 对嵌套对象进行递归合并
+		// 对嵌套对象按字段浅合并，保留未覆盖的默认项。
 		if (
 			typeof overrideValue === "object" &&
 			overrideValue !== null &&
@@ -168,7 +172,7 @@ function deepMergeSettings(base: Settings, overrides: Settings): Settings {
 		) {
 			(result as Record<string, unknown>)[key] = { ...baseValue, ...overrideValue };
 		} else {
-			// 对原始类型和数组，覆盖值直接替换
+			// 对原始类型和数组，覆盖值直接替换。
 			(result as Record<string, unknown>)[key] = overrideValue;
 		}
 	}
@@ -388,7 +392,11 @@ export class SettingsManager {
 		}
 	}
 
-	/** 执行旧格式到新格式的自动迁移 */
+	/**
+	 * 定位：设置文件的兼容迁移入口。
+	 * 作用：把旧版字段形态转换成当前结构，降低升级期间的手工修复成本。
+	 * 调用关系：由存储加载流程调用，确保内存中的设置始终符合当前接口。
+	 */
 	private static migrateSettings(settings: Record<string, unknown>): Settings {
 		// 迁移 queueMode -> steeringMode
 		if ("queueMode" in settings && !("steeringMode" in settings)) {
@@ -459,6 +467,7 @@ export class SettingsManager {
 	}
 
 	async reload(): Promise<void> {
+		// 步骤 1：先等待排队写入完成，避免读到自己尚未落盘的旧快照。
 		await this.writeQueue;
 		const globalLoad = SettingsManager.tryLoadFromStorage(this.storage, "global");
 		if (!globalLoad.error) {
@@ -469,6 +478,7 @@ export class SettingsManager {
 			this.recordError("global", globalLoad.error);
 		}
 
+		// 步骤 2：重置修改追踪，再重新加载全局与项目配置。
 		this.modifiedFields.clear();
 		this.modifiedNestedFields.clear();
 		this.modifiedProjectFields.clear();
@@ -532,6 +542,7 @@ export class SettingsManager {
 	private enqueueWrite(scope: SettingsScope, task: () => void): void {
 		this.writeQueue = this.writeQueue
 			.then(() => {
+				// 让同一作用域的持久化任务严格串行执行，避免锁竞争和乱序覆盖。
 				task();
 				this.clearModifiedScope(scope);
 			})
@@ -555,6 +566,7 @@ export class SettingsManager {
 		modifiedNestedFields: Map<keyof Settings, Set<string>>,
 	): void {
 		this.storage.withLock(scope, (current) => {
+			// 先读取磁盘当前内容，再只把本次改动字段合并回去，避免覆盖其他未改字段。
 			const currentFileSettings = current
 				? SettingsManager.migrateSettings(JSON.parse(current) as Record<string, unknown>)
 				: {};
@@ -582,6 +594,7 @@ export class SettingsManager {
 	private save(): void {
 		this.settings = deepMergeSettings(this.globalSettings, this.projectSettings);
 
+		// 全局设置文件本身不可读时，不继续覆盖写入，避免吞掉用户手工修复机会。
 		if (this.globalSettingsLoadError) {
 			return;
 		}
@@ -599,6 +612,7 @@ export class SettingsManager {
 		this.projectSettings = structuredClone(settings);
 		this.settings = deepMergeSettings(this.globalSettings, this.projectSettings);
 
+		// 项目级配置有解析错误时停止持久化，等待用户修复原文件。
 		if (this.projectSettingsLoadError) {
 			return;
 		}

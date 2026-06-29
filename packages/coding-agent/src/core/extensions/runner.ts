@@ -120,8 +120,7 @@ const buildBuiltinKeybindings = (resolvedKeybindings: KeybindingsConfig): BuiltI
 		const restrictOverride = (RESERVED_KEYBINDINGS_FOR_EXTENSION_CONFLICTS as readonly string[]).includes(keybinding);
 		for (const key of keyList) {
 			const normalizedKey = key.toLowerCase() as KeyId;
-			// 当多个动作绑定同一按键时，保留 reserved 优先的动作，确保扩展快捷键
-			// 始终被保留的内置快捷键阻止，不受遍历顺序影响。
+			// 同一按键发生冲突时，优先锁住保留快捷键，避免扩展抢占核心操作。
 			const existing = builtinKeybindings[normalizedKey];
 			if (existing?.restrictOverride && !restrictOverride) continue;
 			builtinKeybindings[normalizedKey] = {
@@ -220,6 +219,7 @@ export async function emitSessionShutdownEvent(
 	event: SessionShutdownEvent,
 ): Promise<boolean> {
 	if (extensionRunner.hasHandlers("session_shutdown")) {
+		// 只有存在监听器时才真正发事件，避免无意义的上下文创建和遍历。
 		await extensionRunner.emit(event);
 		return true;
 	}
@@ -335,7 +335,7 @@ export class ExtensionRunner {
 			unregisterProvider?: (name: string) => void;
 		},
 	): void {
-		// Copy actions into the shared runtime (all extension APIs reference this)
+		// 第一步：把宿主动作挂到共享 runtime，所有扩展 API 都会读这里的最新实现。
 		this.runtime.sendMessage = actions.sendMessage;
 		this.runtime.sendUserMessage = actions.sendUserMessage;
 		this.runtime.appendEntry = actions.appendEntry;
@@ -351,7 +351,7 @@ export class ExtensionRunner {
 		this.runtime.getThinkingLevel = actions.getThinkingLevel;
 		this.runtime.setThinkingLevel = actions.setThinkingLevel;
 
-		// Context actions (required)
+		// 第二步：绑定 ctx.* 所需的动态能力。
 		this.getModel = contextActions.getModel;
 		this.isIdleFn = contextActions.isIdle;
 		this.getSignalFn = contextActions.getSignal;
@@ -362,7 +362,7 @@ export class ExtensionRunner {
 		this.compactFn = contextActions.compact;
 		this.getSystemPromptFn = contextActions.getSystemPrompt;
 
-		// Flush provider registrations queued during extension loading
+		// 第三步：冲刷扩展加载阶段积压的 provider 注册请求。
 		for (const { name, config, extensionPath } of this.runtime.pendingProviderRegistrations) {
 			try {
 				if (providerActions?.registerProvider) {
@@ -381,8 +381,7 @@ export class ExtensionRunner {
 		}
 		this.runtime.pendingProviderRegistrations = [];
 
-		// From this point on, provider registration/unregistration takes effect immediately
-		// without requiring a /reload.
+		// 第四步：切换到“即时生效”模式，后续 register/unregister 直接操作模型注册中心。
 		this.runtime.registerProvider = (name, config) => {
 			if (providerActions?.registerProvider) {
 				providerActions.registerProvider(name, config);
@@ -406,6 +405,7 @@ export class ExtensionRunner {
 	 */
 	bindCommandContext(actions?: ExtensionCommandContextActions): void {
 		if (actions) {
+			// 交互模式下挂上真实的命令上下文动作。
 			this.waitForIdleFn = actions.waitForIdle;
 			this.newSessionHandler = actions.newSession;
 			this.forkHandler = actions.fork;
@@ -415,6 +415,7 @@ export class ExtensionRunner {
 			return;
 		}
 
+		// 非交互模式回退到安全桩实现，避免命令型能力被误用。
 		this.waitForIdleFn = async () => {};
 		this.newSessionHandler = async () => ({ cancelled: false });
 		this.forkHandler = async () => ({ cancelled: false });
@@ -448,6 +449,7 @@ export class ExtensionRunner {
 		const toolsByName = new Map<string, RegisteredTool>();
 		for (const ext of this.extensions) {
 			for (const tool of ext.tools.values()) {
+				// 同名工具采用先注册者优先，保持宿主看到的工具集合稳定。
 				if (!toolsByName.has(tool.definition.name)) {
 					toolsByName.set(tool.definition.name, tool);
 				}
@@ -471,6 +473,7 @@ export class ExtensionRunner {
 		const allFlags = new Map<string, ExtensionFlag>();
 		for (const ext of this.extensions) {
 			for (const [name, flag] of ext.flags) {
+				// flag 也遵循先注册者优先，避免后加载扩展悄悄覆盖同名配置。
 				if (!allFlags.has(name)) {
 					allFlags.set(name, flag);
 				}
@@ -505,6 +508,7 @@ export class ExtensionRunner {
 
 				const builtInKeybinding = builtinKeybindings[normalizedKey];
 				if (builtInKeybinding?.restrictOverride === true) {
+					// 命中强保留快捷键时直接拒绝扩展注册，并留下诊断。
 					addDiagnostic(
 						`Extension shortcut '${key}' from ${shortcut.extensionPath} conflicts with built-in shortcut. Skipping.`,
 						shortcut.extensionPath,
@@ -513,6 +517,7 @@ export class ExtensionRunner {
 				}
 
 				if (builtInKeybinding?.restrictOverride === false) {
+					// 非强保留冲突允许扩展覆盖，但仍保留可见诊断方便排查。
 					addDiagnostic(
 						`Extension shortcut conflict: '${key}' is built-in shortcut for ${builtInKeybinding.keybinding} and ${shortcut.extensionPath}. Using ${shortcut.extensionPath}.`,
 						shortcut.extensionPath,
@@ -521,6 +526,7 @@ export class ExtensionRunner {
 
 				const existingExtensionShortcut = extensionShortcuts.get(normalizedKey);
 				if (existingExtensionShortcut) {
+					// 两个扩展抢同一按键时，采用后者并显式告警。
 					addDiagnostic(
 						`Extension shortcut conflict: '${key}' registered by both ${existingExtensionShortcut.extensionPath} and ${shortcut.extensionPath}. Using ${shortcut.extensionPath}.`,
 						shortcut.extensionPath,
@@ -540,6 +546,7 @@ export class ExtensionRunner {
 		message = "This extension ctx is stale after session replacement or reload. Do not use a captured pi or command ctx after ctx.newSession(), ctx.fork(), ctx.switchSession(), or ctx.reload(). For newSession, fork, and switchSession, move post-replacement work into withSession and use the ctx passed to withSession. For reload, do not use the old ctx after await ctx.reload().",
 	): void {
 		if (!this.staleMessage) {
+			// 只记录第一次失效原因，保证后续错误信息稳定可诊断。
 			this.staleMessage = message;
 			this.runtime.invalidate(message);
 		}
@@ -669,6 +676,7 @@ export class ExtensionRunner {
 			},
 			get model() {
 				runner.assertActive();
+				// model 通过闭包动态读取，确保扩展总能拿到当前活跃模型。
 				return getModel();
 			},
 			isIdle: () => {
@@ -707,9 +715,7 @@ export class ExtensionRunner {
 	}
 
 	createCommandContext(): ExtensionCommandContext {
-		// Use property descriptors instead of object spread so the guarded getters from
-		// createContext() stay lazy. A spread would eagerly read them once and freeze the
-		// old values into the returned object, bypassing stale-instance checks.
+		// 用属性描述符复制 getter，保持 createContext() 的懒求值和过期检查不被破坏。
 		const context = Object.defineProperties(
 			{},
 			Object.getOwnPropertyDescriptors(this.createContext()),
@@ -760,10 +766,12 @@ export class ExtensionRunner {
 
 			for (const handler of handlers) {
 				try {
+					// 按扩展注册顺序串行执行，保证副作用和取消语义可预测。
 					const handlerResult = await handler(event, ctx);
 
 					if (this.isSessionBeforeEvent(event) && handlerResult) {
 						result = handlerResult as SessionBeforeEventResult;
+						// session_before_* 事件一旦返回 cancel，立刻短路整个链路。
 						if (result.cancel) {
 							return result as RunnerEmitResult<TEvent>;
 						}
@@ -795,10 +803,12 @@ export class ExtensionRunner {
 
 			for (const handler of handlers) {
 				try {
+					// 每个处理器都基于前一个处理器修改后的消息继续加工。
 					const currentEvent: MessageEndEvent = { ...event, message: currentMessage };
 					const handlerResult = (await handler(currentEvent, ctx)) as MessageEndEventResult | undefined;
 					if (!handlerResult?.message) continue;
 
+					// message_end 只允许改内容，不允许偷偷变更消息角色。
 					if (handlerResult.message.role !== currentMessage.role) {
 						this.emitError({
 							extensionPath: ext.path,
@@ -837,6 +847,7 @@ export class ExtensionRunner {
 
 			for (const handler of handlers) {
 				try {
+					// tool_result 允许链式改写 content/details/isError，后一个处理器读取前一个结果。
 					const handlerResult = (await handler(currentEvent, ctx)) as ToolResultEventResult | undefined;
 					if (!handlerResult) continue;
 
@@ -885,6 +896,7 @@ export class ExtensionRunner {
 			if (!handlers || handlers.length === 0) continue;
 
 			for (const handler of handlers) {
+				// tool_call 可以短路执行，因此一旦 block 立即返回给宿主。
 				const handlerResult = await handler(event, ctx);
 
 				if (handlerResult) {
@@ -938,6 +950,7 @@ export class ExtensionRunner {
 
 			for (const handler of handlers) {
 				try {
+					// 为每个处理器提供当前消息快照，允许按顺序叠加上下文改写。
 					const event: ContextEvent = { type: "context", messages: currentMessages };
 					const handlerResult = await handler(event, ctx);
 
@@ -970,6 +983,7 @@ export class ExtensionRunner {
 
 			for (const handler of handlers) {
 				try {
+					// 请求体按处理器顺序逐层变换，最后一个结果作为真正发往 provider 的 payload。
 					const event: BeforeProviderRequestEvent = {
 						type: "before_provider_request",
 						payload: currentPayload,
@@ -1018,6 +1032,7 @@ export class ExtensionRunner {
 
 			for (const handler of handlers) {
 				try {
+					// 每个处理器都看到前一个处理器更新后的 systemPrompt，实现链式增强。
 					const event: BeforeAgentStartEvent = {
 						type: "before_agent_start",
 						prompt,
@@ -1079,6 +1094,7 @@ export class ExtensionRunner {
 
 			for (const handler of handlers) {
 				try {
+					// 各扩展上报的资源路径按来源保留，后续可用于诊断“是谁提供的”。
 					const event: ResourcesDiscoverEvent = { type: "resources_discover", cwd, reason };
 					const handlerResult = await handler(event, ctx);
 					const result = handlerResult as ResourcesDiscoverResult | undefined;
@@ -1117,6 +1133,7 @@ export class ExtensionRunner {
 		for (const ext of this.extensions) {
 			for (const handler of ext.handlers.get("input") ?? []) {
 				try {
+					// 输入事件支持链式 transform；遇到 handled 时直接短路，不再继续传播。
 					const event: InputEvent = { type: "input", text: currentText, images: currentImages, source };
 					const result = (await handler(event, ctx)) as InputEventResult | undefined;
 					if (result?.action === "handled") return result;

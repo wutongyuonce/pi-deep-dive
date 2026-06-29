@@ -83,11 +83,11 @@ export function spawnProcessSync(
 export function waitForChildProcess(child: ChildProcess): Promise<number | null> {
 	return new Promise((resolve, reject) => {
 		// 状态追踪标志
-		let settled = false;   // 是否已最终确定结果
-		let exited = false;    // 是否已收到 exit 事件
+		let settled = false; // 是否已最终确定结果
+		let exited = false; // 是否已收到 exit 事件
 		let exitCode: number | null = null;
 		let postExitTimer: NodeJS.Timeout | undefined;
-		let stdoutEnded = child.stdout === null;  // 如果 stdout 为 null 则视为已结束
+		let stdoutEnded = child.stdout === null; // 如果 stdout 为 null 则视为已结束
 		let stderrEnded = child.stderr === null;
 
 		/** 清理所有事件监听器和定时器 */

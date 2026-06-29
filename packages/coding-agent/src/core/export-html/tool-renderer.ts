@@ -62,12 +62,14 @@ export interface ToolHtmlRenderer {
 const ANSI_ESCAPE_REGEX = /\x1b\[[\d;]*m/g;
 
 function isBlankRenderedLine(line: string): boolean {
+	// 先剥掉 ANSI 颜色码，再判断这一行是否只剩空白字符。
 	return line.replace(ANSI_ESCAPE_REGEX, "").trim().length === 0;
 }
 
 function trimRenderedResultLines(lines: string[]): string[] {
 	let start = 0;
 	let end = lines.length;
+	// 裁掉首尾纯空白行，避免导出的工具结果平白多出上下留白。
 	while (start < end && isBlankRenderedLine(lines[start])) start++;
 	while (end > start && isBlankRenderedLine(lines[end - 1])) end--;
 	return lines.slice(start, end);
@@ -84,6 +86,7 @@ export function createToolHtmlRenderer(deps: ToolHtmlRendererDeps): ToolHtmlRend
 	const getState = (toolCallId: string): any => {
 		let state = renderedStates.get(toolCallId);
 		if (!state) {
+			// 同一 toolCall 的调用和结果渲染共享状态对象，便于增量渲染复用。
 			state = {};
 			renderedStates.set(toolCallId, state);
 		}
@@ -97,6 +100,7 @@ export function createToolHtmlRenderer(deps: ToolHtmlRendererDeps): ToolHtmlRend
 		isPartial: boolean,
 		isError: boolean,
 	): ToolRenderContext => {
+		// HTML 导出复用 TUI 渲染器时，需要手工补出一份最小 render context。
 		return {
 			args: renderedArgs.get(toolCallId),
 			toolCallId,
@@ -122,6 +126,7 @@ export function createToolHtmlRenderer(deps: ToolHtmlRendererDeps): ToolHtmlRend
 					return undefined;
 				}
 
+				// 先让工具生成 TUI 组件，再把组件渲染出的 ANSI 行转换成 HTML。
 				const component = toolDef.renderCall(
 					args,
 					theme,
@@ -131,7 +136,7 @@ export function createToolHtmlRenderer(deps: ToolHtmlRendererDeps): ToolHtmlRend
 				const lines = component.render(width);
 				return ansiLinesToHtml(lines);
 			} catch {
-				// On error, return undefined so HTML export can fall back to structured result rendering
+				// 自定义渲染失败时回退到结构化默认渲染，避免整个导出中断。
 				return undefined;
 			}
 		},
@@ -149,15 +154,14 @@ export function createToolHtmlRenderer(deps: ToolHtmlRendererDeps): ToolHtmlRend
 					return undefined;
 				}
 
-				// Build AgentToolResult from content array
-				// Cast content since session storage uses generic object types
+				// 先把会话里通用的 result 结构还原成工具渲染器期望的 AgentToolResult。
 				const agentToolResult = {
 					content: result as (TextContent | ImageContent)[],
 					details,
 					isError,
 				};
 
-				// Render collapsed
+				// 先渲染折叠态，作为默认展示内容。
 				const collapsedComponent = toolDef.renderResult(
 					agentToolResult,
 					{ expanded: false, isPartial: false },
@@ -167,7 +171,7 @@ export function createToolHtmlRenderer(deps: ToolHtmlRendererDeps): ToolHtmlRend
 				renderedResultComponents.set(toolCallId, collapsedComponent);
 				const collapsed = ansiLinesToHtml(trimRenderedResultLines(collapsedComponent.render(width)));
 
-				// Render expanded
+				// 再渲染展开态；两者不同才输出可展开结构。
 				const expandedComponent = toolDef.renderResult(
 					agentToolResult,
 					{ expanded: true, isPartial: false },
@@ -182,7 +186,7 @@ export function createToolHtmlRenderer(deps: ToolHtmlRendererDeps): ToolHtmlRend
 					expanded,
 				};
 			} catch {
-				// On error, return undefined so HTML export can fall back to structured result rendering
+				// 自定义结果渲染失败时继续回退，保持 HTML 导出健壮。
 				return undefined;
 			}
 		},

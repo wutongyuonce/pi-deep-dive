@@ -33,13 +33,16 @@ export interface SourceInfo {
 }
 
 /**
- * 从包管理器的路径元数据创建来源信息。
+ * 定位：将包管理器阶段产生的路径元数据转换为统一的来源信息对象。
+ * 作用：把资源路径与 `PathMetadata` 拼成后续 UI、命令面板和诊断统一消费的 `SourceInfo`。
+ * 调用关系：由资源加载链路在拿到包解析结果后调用，再把结果传给技能、提示模板、扩展等展示层。
  *
  * @param path - 资源文件的绝对路径
  * @param metadata - 包管理器提供的路径元数据
  * @returns SourceInfo 来源信息对象
  */
 export function createSourceInfo(path: string, metadata: PathMetadata): SourceInfo {
+	// 直接保留包管理阶段已经确定的来源字段，避免下游重复推断。
 	return {
 		path,
 		source: metadata.source,
@@ -50,8 +53,9 @@ export function createSourceInfo(path: string, metadata: PathMetadata): SourceIn
 }
 
 /**
- * 手动合成来源信息（不依赖包管理器的元数据）。
- * 用于本地加载的资源文件（如从文件系统直接读取的技能、提示模板等）。
+ * 定位：为不经过包管理器的资源补齐来源元数据。
+ * 作用：给直接从文件系统读取的技能、提示模板等对象生成可追溯的 `SourceInfo`。
+ * 调用关系：由本地扫描型加载逻辑调用，返回值继续传给斜杠命令、资源诊断和界面展示层。
  *
  * @param path - 资源文件的绝对路径
  * @param options - 来源配置选项
@@ -70,6 +74,7 @@ export function createSyntheticSourceInfo(
 		baseDir?: string;
 	},
 ): SourceInfo {
+	// 对未显式指定的字段补默认值，保证下游始终拿到结构完整的来源信息。
 	return {
 		path,
 		source: options.source,

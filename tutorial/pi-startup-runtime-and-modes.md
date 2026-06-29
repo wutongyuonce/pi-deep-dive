@@ -1,3 +1,12 @@
+
+而 `AgentSession` 内部又会继续调用：
+
+- `sessionManager`
+- `settingsManager`
+- `resourceLoader`
+- `modelRegistry`
+- 底层 `agent`
+
 # pi-coding-agent：启动、运行时与三种 Mode
 
 ## 总启动图
@@ -21,91 +30,9 @@ flowchart TD
     M -->|rpc| P["runRpcMode()"]
 ```
 
-这条链最值得注意的地方是：**runtime 创建和 session 创建是分离的。**
-
-也就是说：
-
-- `createAgentSessionServices()`
-  - 先创建 cwd 绑定的基础设施
-- `createAgentSessionFromServices()`
-  - 再基于这些基础设施创建真正的 `AgentSession`
-
-这不是多余抽象，而是让 CLI 层可以在真正创建 session 之前，先把下面这些事做完：
-
-- 解析模型范围
-- 决定 active tools
-- 装载 extensions
-- 收集 diagnostics
-- 处理 CLI 传入的 API key / flags
-
 ---
 
-## 第一层：`cli.ts` 是极薄入口
 
-`src/cli.ts` 很薄，它的职责基本只有三件事：
-
-1. 初始化进程级环境
-2. 配置 HTTP dispatcher
-3. 调 `main(process.argv.slice(2))`
-
-这个薄入口说明一个很重要的设计判断：
-
-> `coding-agent` 的复杂性不在 shell 入口，而在运行时装配。
-
-也因此，真正值得读的是 `main.ts` 而不是 `cli.ts`。
-
----
-
-## 第二层：`main.ts` 是产品启动编排器
-
-### `main.ts` 在做什么
-
-如果把 `main.ts` 的职责压缩成一个表：
-
-| 阶段 | 负责什么 | 关键文件/函数 |
-| --- | --- | --- |
-| 1 | 解析 CLI 参数 | `cli/args.ts` |
-| 2 | 读 stdin 与 `@file` 参数 | `readPipedStdin()`、`prepareInitialMessage()` |
-| 3 | 决定运行模式 | `resolveAppMode()` |
-| 4 | 选择/创建 session | `SessionManager`、`session-picker.ts` |
-| 5 | 定义 `createRuntime` 工厂 | `main.ts` 内部闭包 |
-| 6 | 创建 runtime | `createAgentSessionRuntime()` |
-| 7 | 启动具体 mode | `InteractiveMode` / `runPrintMode()` / `runRpcMode()` |
-
-它是典型的**产品壳层**代码：
-
-- 不实现具体产品机制
-- 但负责决定何时创建、按什么顺序创建、把哪些参数传给谁
-
-### 为什么 `main.ts` 要自己定义 `createRuntime`
-
-这是 `main.ts` 最关键的一个点。
-
-它不会直接写死：
-
-```typescript
-const runtime = await createAgentSessionRuntime(...)
-```
-
-而是先定义一个 `createRuntime` 闭包，再交给 `createAgentSessionRuntime()` 使用。
-
-这么做的原因是：
-
-- session 切换时，cwd 可能变化
-- cwd 变化时，`settingsManager` / `resourceLoader` / `modelRegistry` 这些服务都必须随 cwd 重建
-- 所以 runtime 需要一个**“如何重新创建自己”**的工厂，而不是一次性建好的死对象
-
-于是形成了这个分层：
-
-```text
-main.ts
-  提供“如何创建一个 cwd 绑定 runtime”的工厂
-    ↓
-AgentSessionRuntime
-  在 new / resume / fork / import 时反复调用这个工厂
-```
-
----
 
 ## 第三层：`AgentSessionServices` 是 cwd 绑定基础设施层
 
@@ -336,6 +263,13 @@ sdk.ts 决定如何创建
 ---
 
 ## 三种 Mode 为什么能共用一套核心
+
+InteractiveMode runPrintMode runRpcMode
+  -> AgentSessionRuntime.session
+      -> AgentSession.prompt()
+      -> AgentSession.compact()
+      -> AgentSession.bindExtensions()
+      -> AgentSession.navigateTree()
 
 ### `interactive`
 

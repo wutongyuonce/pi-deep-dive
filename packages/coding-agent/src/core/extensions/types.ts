@@ -492,6 +492,7 @@ type AnyToolDefinition = ToolDefinition<any, any, any>;
 export function defineTool<TParams extends TSchema, TDetails = unknown, TState = any>(
 	tool: ToolDefinition<TParams, TDetails, TState>,
 ): ToolDefinition<TParams, TDetails, TState> & AnyToolDefinition {
+	// 运行时直接原样返回，重点是把泛型信息稳定保留给 TypeScript 推断。
 	return tool as ToolDefinition<TParams, TDetails, TState> & AnyToolDefinition;
 }
 
@@ -898,6 +899,7 @@ export type ToolResultEvent =
 
 // ToolResultEvent 的类型守卫
 export function isBashToolResult(e: ToolResultEvent): e is BashToolResultEvent {
+	// 通过 toolName 做最小运行时判断，交给 TS 完成类型收窄。
 	return e.toolName === "bash";
 }
 export function isReadToolResult(e: ToolResultEvent): e is ReadToolResultEvent {
@@ -951,6 +953,7 @@ export function isToolCallEventType<TName extends string, TInput extends Record<
 	event: ToolCallEvent,
 ): event is ToolCallEvent & { toolName: TName; input: TInput };
 export function isToolCallEventType(toolName: string, event: ToolCallEvent): boolean {
+	// 自定义工具的区分键只有 toolName，因此这里保持最直接的字符串比较。
 	return event.toolName === toolName;
 }
 

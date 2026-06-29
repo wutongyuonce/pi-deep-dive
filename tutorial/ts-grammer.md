@@ -853,3 +853,22 @@ const arr = ['a', 'b'];
 const result = arr.map((letter, idx) => `${idx}:${letter}`);
 // ['0:a', '1:b']
 ```
+
+### chalk
+
+一个 npm 包，用于**在终端输出彩色文字**。
+
+基本用法：
+
+```ts
+import chalk from "chalk";
+
+console.log(chalk.red("错误信息"));           // 红色文
+字
+console.log(chalk.green("成功"));             // 绿色
+文字
+console.log(chalk.bold("加粗的文字"));        // 加粗
+console.log(chalk.dim("灰色/暗淡的文字"));    // 暗淡
+console.log(chalk.blue.bold("蓝色加粗"));     // 链式组
+合
+```

@@ -807,19 +807,21 @@ export class InteractiveMode {
 	private getBuiltInCommandConflictDiagnostics(extensionRunner: ExtensionRunner): ResourceDiagnostic[] {
 		// 构建内置命令名称集合
 		const builtinNames = new Set(BUILTIN_SLASH_COMMANDS.map((command) => command.name));
-		return extensionRunner
-			.getRegisteredCommands()
-			// 过滤出与内置命令同名的扩展命令
-			.filter((command) => builtinNames.has(command.name))
-			.map((command) => ({
-				type: "warning" as const,
-				// 根据调用名是否与原名相同，生成不同的警告信息
-				message:
-					command.invocationName === command.name
-						? `Extension command '/${command.name}' conflicts with built-in interactive command. Skipping in autocomplete.`
-						: `Extension command '/${command.name}' conflicts with built-in interactive command. Available as '/${command.invocationName}'.`,
-				path: command.sourceInfo.path,
-			}));
+		return (
+			extensionRunner
+				.getRegisteredCommands()
+				// 过滤出与内置命令同名的扩展命令
+				.filter((command) => builtinNames.has(command.name))
+				.map((command) => ({
+					type: "warning" as const,
+					// 根据调用名是否与原名相同，生成不同的警告信息
+					message:
+						command.invocationName === command.name
+							? `Extension command '/${command.name}' conflicts with built-in interactive command. Skipping in autocomplete.`
+							: `Extension command '/${command.name}' conflicts with built-in interactive command. Available as '/${command.invocationName}'.`,
+					path: command.sourceInfo.path,
+				}))
+		);
 	}
 
 	/**
@@ -1635,11 +1637,13 @@ export class InteractiveMode {
 	 * 调用了谁: formatDisplayPath()
 	 */
 	private getCompactDisplayPathSegments(resourcePath: string): string[] {
-		return this.formatDisplayPath(resourcePath)
-			.replace(/\\/g, "/")
-			.split("/")
-			// 过滤掉空字符串段和 ~ 符号
-			.filter((segment) => segment.length > 0 && segment !== "~");
+		return (
+			this.formatDisplayPath(resourcePath)
+				.replace(/\\/g, "/")
+				.split("/")
+				// 过滤掉空字符串段和 ~ 符号
+				.filter((segment) => segment.length > 0 && segment !== "~")
+		);
 	}
 
 	/**
@@ -2549,7 +2553,7 @@ export class InteractiveMode {
 		return new Loader(
 			this.ui,
 			(spinner) => theme.fg("accent", spinner), // 使用主题强调色绘制旋转动画
-			(text) => theme.fg("muted", text),         // 使用主题弱化色绘制消息文本
+			(text) => theme.fg("muted", text), // 使用主题弱化色绘制消息文本
 			this.getWorkingLoaderMessage(),
 			this.workingIndicatorOptions,
 		);
@@ -3952,8 +3956,8 @@ export class InteractiveMode {
 	/**
 	 * 处理所有 agent 会话事件。这是事件分发的核心方法。
 	 *
-	 * 作用：根据事件类型（agent_start/message_start/message_update/message_end/tool_execution_*/agent_end/
-	 * compaction_*/auto_retry_* 等）执行对应的 UI 更新逻辑，包括渲染消息流、工具执行组件、
+	 * 作用：根据事件类型（如 `agent_start`、`message_end`、`tool_execution_*`、
+	 * `compaction_*`、`auto_retry_*` 等）执行对应的 UI 更新逻辑，包括渲染消息流、工具执行组件、
 	 * 压缩进度、重试倒计时等。
 	 *
 	 * 调用者：subscribeToAgent()（通过 session.subscribe 回调）

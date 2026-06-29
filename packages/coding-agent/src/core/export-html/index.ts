@@ -64,6 +64,7 @@ export interface ExportOptions {
  * 被谁调用：getLuminance()、adjustBrightness()、deriveExportColors()
  */
 function parseColor(color: string): { r: number; g: number; b: number } | undefined {
+	// 先尝试解析十六进制格式，命中后直接返回 RGB 三元组。
 	const hexMatch = color.match(/^#([0-9a-fA-F]{2})([0-9a-fA-F]{2})([0-9a-fA-F]{2})$/);
 	if (hexMatch) {
 		return {
@@ -72,6 +73,7 @@ function parseColor(color: string): { r: number; g: number; b: number } | undefi
 			b: Number.parseInt(hexMatch[3], 16),
 		};
 	}
+	// 再兼容 rgb(r,g,b) 形式，方便复用主题系统已经输出的颜色值。
 	const rgbMatch = color.match(/^rgb\s*\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\)$/);
 	if (rgbMatch) {
 		return {
@@ -105,6 +107,7 @@ function getLuminance(r: number, g: number, b: number): number {
 function adjustBrightness(color: string, factor: number): string {
 	const parsed = parseColor(color);
 	if (!parsed) return color;
+	// 逐通道缩放亮度，并把结果钳制在合法的 0-255 范围内。
 	const adjust = (c: number) => Math.min(255, Math.max(0, Math.round(c * factor)));
 	return `rgb(${adjust(parsed.r)}, ${adjust(parsed.g)}, ${adjust(parsed.b)})`;
 }
@@ -118,6 +121,7 @@ function adjustBrightness(color: string, factor: number): string {
 function deriveExportColors(baseColor: string): { pageBg: string; cardBg: string; infoBg: string } {
 	const parsed = parseColor(baseColor);
 	if (!parsed) {
+		// 无法解析主题色时回退到一组稳定的暗色导出配色。
 		return {
 			pageBg: "rgb(24, 24, 30)",
 			cardBg: "rgb(30, 30, 36)",
@@ -129,12 +133,14 @@ function deriveExportColors(baseColor: string): { pageBg: string; cardBg: string
 	const isLight = luminance > 0.5;
 
 	if (isLight) {
+		// 浅色主题只做轻微压暗，避免导出页过亮导致阅读疲劳。
 		return {
 			pageBg: adjustBrightness(baseColor, 0.96),
 			cardBg: baseColor,
 			infoBg: `rgb(${Math.min(255, parsed.r + 10)}, ${Math.min(255, parsed.g + 5)}, ${Math.max(0, parsed.b - 20)})`,
 		};
 	}
+	// 深色主题则进一步拉开页面、卡片、信息块的明度层级。
 	return {
 		pageBg: adjustBrightness(baseColor, 0.7),
 		cardBg: adjustBrightness(baseColor, 0.85),
@@ -152,6 +158,7 @@ function generateThemeVars(themeName?: string): string {
 	const colors = getResolvedThemeColors(themeName);
 	const lines: string[] = [];
 	for (const [key, value] of Object.entries(colors)) {
+		// 把主题对象逐项展开成 CSS 变量，交给模板直接消费。
 		lines.push(`--${key}: ${value};`);
 	}
 
@@ -191,6 +198,7 @@ interface SessionData {
  */
 function generateHtml(sessionData: SessionData, themeName?: string): string {
 	const templateDir = getExportTemplateDir();
+	// 先把模板和第三方依赖完整读入，后续统一做字符串替换。
 	const template = readFileSync(join(templateDir, "template.html"), "utf-8");
 	const templateCss = readFileSync(join(templateDir, "template.css"), "utf-8");
 	const templateJs = readFileSync(join(templateDir, "template.js"), "utf-8");
@@ -205,10 +213,10 @@ function generateHtml(sessionData: SessionData, themeName?: string): string {
 	const containerBg = themeExport.cardBg ?? derivedExportColors.cardBg;
 	const infoBg = themeExport.infoBg ?? derivedExportColors.infoBg;
 
-	// 将会话数据 Base64 编码以避免转义问题
+	// 会话 JSON 先转 Base64，避免直接塞进 HTML 时被引号和换行破坏结构。
 	const sessionDataBase64 = Buffer.from(JSON.stringify(sessionData)).toString("base64");
 
-	// 构建注入了主题变量的 CSS
+	// 把主题变量和导出背景色补进 CSS 模板。
 	const css = templateCss
 		.replace("{{THEME_VARS}}", themeVars)
 		.replace("{{BODY_BG}}", bodyBg)
@@ -248,7 +256,7 @@ function preRenderCustomTools(
 		if (entry.type !== "message") continue;
 		const msg = entry.message;
 
-		// 在助手消息中查找工具调用
+		// 先从 assistant 消息里抓取需要自定义 HTML 的工具调用。
 		if (msg.role === "assistant" && Array.isArray(msg.content)) {
 			for (const block of msg.content) {
 				if (block.type === "toolCall" && !TEMPLATE_RENDERED_TOOLS.has(block.name)) {
@@ -260,10 +268,10 @@ function preRenderCustomTools(
 			}
 		}
 
-		// 查找工具结果
+		// 再把对应的工具结果补齐到同一个 toolCallId 记录里。
 		if (msg.role === "toolResult" && msg.toolCallId) {
 			const toolName = msg.toolName || "";
-			// 仅在有预渲染的调用或非模板渲染工具时才渲染
+			// 只有自定义工具或已经渲染过调用头的工具，才继续生成结果 HTML。
 			const existing = renderedTools[msg.toolCallId];
 			if (existing || !TEMPLATE_RENDERED_TOOLS.has(toolName)) {
 				const rendered = toolRenderer.renderResult(
@@ -318,11 +326,11 @@ export async function exportSessionToHtml(
 
 	const entries = sm.getEntries();
 
-	// 如果提供了工具渲染器则预渲染自定义工具
+	// 预渲染扩展工具，把 TUI 视图提前固化成 HTML，减少模板侧判断复杂度。
 	let renderedTools: Record<string, RenderedToolHtml> | undefined;
 	if (opts.toolRenderer) {
 		renderedTools = preRenderCustomTools(entries, opts.toolRenderer);
-		// 仅在实际渲染了内容时才包含
+		// 没有任何自定义渲染结果时，直接省掉这个字段以减小嵌入数据体积。
 		if (Object.keys(renderedTools).length === 0) {
 			renderedTools = undefined;
 		}
@@ -341,6 +349,7 @@ export async function exportSessionToHtml(
 
 	let outputPath = opts.outputPath ? normalizePath(opts.outputPath) : undefined;
 	if (!outputPath) {
+		// 默认输出名跟随会话文件名，方便从多个导出文件中快速定位来源。
 		const sessionBasename = basename(sessionFile, ".jsonl");
 		outputPath = `${APP_NAME}-session-${sessionBasename}.html`;
 	}
@@ -373,6 +382,7 @@ export async function exportFromFile(inputPath: string, options?: ExportOptions 
 
 	const sm = SessionManager.open(resolvedInputPath);
 
+	// 离线导出场景拿不到运行时状态，因此只嵌入会话基础数据。
 	const sessionData: SessionData = {
 		header: sm.getHeader(),
 		entries: sm.getEntries(),
@@ -385,6 +395,7 @@ export async function exportFromFile(inputPath: string, options?: ExportOptions 
 
 	let outputPath = opts.outputPath ? normalizePath(opts.outputPath) : undefined;
 	if (!outputPath) {
+		// 默认文件名沿用输入会话名，避免导出结果互相覆盖。
 		const inputBasename = basename(resolvedInputPath, ".jsonl");
 		outputPath = `${APP_NAME}-session-${inputBasename}.html`;
 	}
