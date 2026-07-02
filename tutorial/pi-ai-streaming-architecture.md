@@ -182,7 +182,9 @@ with httpx.Client() as client:
 
 **两者关系**：`fetch().body` 返回 `ReadableStream`，`httpx.stream()` 返回 `iter_bytes()`——做的事一模一样，都是让你在数据还没到齐的时候就能开始处理。
 
-## pi-ai 流式架构详解
+## pi-ai 事件流底座详解
+
+![svgviewer-output](img/svgviewer-output.svg)
 
 pi-ai 最重要的一段注释在 `types.ts` 的 `StreamFunction` 类型定义上：
 

@@ -1,9 +1,39 @@
-## Typescript 语法
+# Javascript、Typescript 相关知识（语法、项目）
 
-TypeScript 是 JavaScript 的"加强版"，它在 JavaScript 基础上加了**类型标注**。
-写代码时声明变量是什么类型（字符串、数字、对象等），编译器会在运行前帮你检查错误。
+## JS 生态技术栈
 
-举个例子：
+- **层一：运行时（操作系统）** - Node.js（后端引擎） / 浏览器（前端引擎）
+- **层二：语言** - TypeScript / JavaScript
+- **层三：开发工具链（Node.js 生态包）**
+  - **包管理**：NPM / Yarn / pnpm
+  - **代码质量**：ESLint（检查）、Prettier（格式化）
+  - **构建/编译**：**Vite（新一代）** ← 替代 → Webpack + Babel（老一代）
+- **层四：UI 框架（运行在浏览器）** - React / Vue
+- **层五：全栈增强（运行在 Node.js + 浏览器）** - Next.js（React 生态） / Nuxt.js（Vue 生态）
+- **层六：纯后端框架（运行在 Node.js）** - Express / NestJS
+
+## JS&TS 语法
+
+JavaScript 生态从**基础语言**到**类型增强**再到**UI描述**的层层扩展：
+
+*   **`.js` (JavaScript)**：最基础的**通用脚本语言**。所有 JavaScript 环境（浏览器、Node.js）都能直接运行。
+*   **`.ts` (TypeScript)**：`.js` 的**类型增强版**。它是 JavaScript 的**超集**，增加了**静态类型系统**。写代码时声明变量是什么类型（字符串、数字、对象等），编译器会在运行前帮你检查错误。`.ts` 不能直接在浏览器运行，需要编译成 `.js`。
+*   **`.jsx` (JavaScript XML)**：`.js` 的 **React UI 扩展版**。它允许你在 JavaScript 中直接编写类似 HTML 的标签结构（`<div>Hello</div>`）。`.jsx` 同样需要 Babel 等工具编译后才能运行。
+*   **`.tsx` (TypeScript XML)**：`.ts` 的 **React UI 扩展版**。它是 TypeScript 和 JSX 的结合体，让你在享受 TypeScript 类型安全的同时，也能使用 JSX 语法编写 UI。
+
+简单来说：
+
+*   **`.js` 是基础**，浏览器和 Node.js 都能直接运行。
+*   **`.ts` 给 JS 加了类型**，让代码更健壮，更适合大型项目。
+*   **`.jsx` 让 JS 能写 HTML 标签**，是 React 这类框架的“语法糖”。
+*   **`.tsx` 是 `.ts` 和 `.jsx` 的融合**，既有类型又有 UI 描述能力。
+
+**实际开发中如何选择？**
+
+*   **纯逻辑/工具函数**（不涉及 UI）：用 `.ts`。
+*   **React 组件文件**：用 `.tsx`。
+*   **普通 JS 项目**：用 `.js`。
+*   **React 项目（无 TS）**：用 `.jsx`。
 
 ```typescript
 // JavaScript 写法（没有类型标注）
@@ -854,7 +884,9 @@ const result = arr.map((letter, idx) => `${idx}:${letter}`);
 // ['0:a', '1:b']
 ```
 
-### chalk
+## npm 包
+
+### chalk 终端输出美化
 
 一个 npm 包，用于**在终端输出彩色文字**。
 
@@ -872,3 +904,8 @@ console.log(chalk.dim("灰色/暗淡的文字"));    // 暗淡
 console.log(chalk.blue.bold("蓝色加粗"));     // 链式组
 合
 ```
+
+### Linter (ESLint) 代码质量检查 和 Prettier 自动格式化
+
+**JavaScript / TypeScript 生态圈**（即 Node.js 技术栈）的标配工具。
+

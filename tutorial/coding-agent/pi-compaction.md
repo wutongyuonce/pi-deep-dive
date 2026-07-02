@@ -1,3 +1,65 @@
+```mermaid
+sequenceDiagram
+    autonumber
+    actor U as 用户
+    participant AS as AgentSession
+    participant SM as SessionManager
+    participant J as Session JSONL
+    participant C as Compaction
+    participant A as agent.state.messages
+
+    U->>AS: 发送一轮对话
+    Note over AS: 收到 message_end 事件
+
+    alt 普通消息(user/assistant/toolResult)
+        AS->>SM: appendMessage(event.message)
+        SM->>SM: 生成 SessionMessageEntry\nparentId = 当前 leafId
+        SM->>SM: _appendEntry(entry)
+        SM->>SM: 更新 fileEntries/byId/leafId
+        SM->>SM: _persist(entry)
+
+        alt 还没有 assistant 落盘点
+            SM-->>SM: 仅标记 flushed = false
+        else 首次已有 assistant
+            SM->>J: 追加写入整份快照
+        else 后续消息
+            SM->>J: 追加 1 行 JSONL
+        end
+    end
+
+    opt 触发 compaction(手动/自动)
+        AS->>SM: getBranch()
+        AS->>C: prepareCompaction(pathEntries)
+        C-->>AS: preparation
+        AS->>C: compact(...)
+        C-->>AS: {summary, firstKeptEntryId, tokensBefore, details}
+
+        AS->>SM: appendCompaction(summary, firstKeptEntryId, ...)
+        SM->>SM: 生成 CompactionEntry\nparentId = 当前 leafId
+        SM->>SM: _appendEntry(entry)
+        SM->>J: 追加 1 行 compaction JSONL
+
+        AS->>SM: buildSessionContext()
+        SM->>SM: 从当前 leaf 回溯到 root
+        SM->>SM: 找到最近一次 compaction
+        SM->>SM: 重建 messages =\ncompactionSummary\n+ firstKeptEntryId 之后保留消息\n+ compaction 之后的新消息
+        SM-->>AS: SessionContext
+        AS->>A: agent.state.messages = sessionContext.messages
+    end
+
+```
+
+- jsonl 是 pi 的追加式会话日志，记录消息、工具结果、模型切换、thinking level、compaction、branch summary 等条目。它保存的是完整历史和事件轨迹，不是直接送给模型的上下文。
+- 会话启动、恢复、fork、导航或 compaction 后，pi 会基于当前分支的 SessionEntry 重建运行时上下文，并把结果写入 agent.state.messages。重建后的 messages 是 **“最新 compaction 生成的摘要消息 + 从 firstKeptEntryId 开始保留的最近尾部消息 + compaction 之后新增的消息”**。正常连续对话时，后续 prompt 主要基于这份内存中的 messages 增量更新，同时新消息也会同步追加到 SessionManager 和 jsonl。
+- 当上下文接近模型窗口上限，或已发生上下文溢出时，pi 会触发 compaction。它不会删除旧 jsonl 历史，而是追加一条新的 compaction 条目，然后重新构建 messages。
+- compaction 的核心策略是：预留 reserveTokens 给系统提示词和模型输出；从最新消息向前保留约 keepRecentTokens 的最近上下文；在安全边界处切割；若切在一轮对话中间，则额外为该轮前缀生成摘要。
+  - 如果这是首次压缩，pi 用 fresh summary prompt 生成结构化摘要；
+  - 如果已经有旧摘要，则把旧摘要放进 <previous-summary> ，把本次新增需要压缩的消息放进 <conversation> ，使用 update summary prompt 要求 LLM 在旧摘要基础上增量更新，而不是整段重写。
+
+
+
+
+
 # 第 12 章：Compaction — 把无限对话装进有限窗口
 
 > **定位**：本章解析 pi 如何在不丢失关键信息的前提下压缩超长对话。

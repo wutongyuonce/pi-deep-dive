@@ -613,6 +613,23 @@ main.ts
 
 
 
+## Context Initialization 上下文初始化
+
+When a Pi session starts, the agent has to assemble the context that the model will see.
+当 Pi 会话开始时，代理必须组装模型将看到的上下文。
+
+That context typically includes:
+该背景通常包括：
+
+- The base system prompt 基本系统提示
+- Project-specific instructions
+  项目特定说明
+- Available tools 可用工具
+- Session history 会话历史记录
+- User messages 用户消息
+- Any relevant skill or extension instructions
+  任何相关的技能或扩展说明
+
 
 
 ## 资源系统、Extension、工具
