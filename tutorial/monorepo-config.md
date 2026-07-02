@@ -2,6 +2,169 @@
 
 本仓库采用 monorepo 结构，根目录下的配置文件作用于整个仓库的所有子包。
 
+### `package.json`
+
+```json
+{
+  // monorepo 根包名
+  "name": "pi-monorepo",
+
+  // private: true 表示这个根包本身不会被发布到 npm
+  // 它主要是工作区管理入口
+  "private": true,
+
+  // 整个仓库默认按 ESM 模块方式运行
+  "type": "module",
+
+  // npm workspaces 配置
+  // 表示这个仓库是 monorepo，下面这些目录都是子包
+  "workspaces": [
+    "packages/*",
+
+    // 下面这些例子本身也被当成 workspace 包管理
+    "packages/coding-agent/examples/extensions/with-deps",
+    "packages/coding-agent/examples/extensions/custom-provider-anthropic",
+    "packages/coding-agent/examples/extensions/custom-provider-gitlab-duo",
+    "packages/coding-agent/examples/extensions/sandbox"
+  ],
+
+  "scripts": {
+    // 清理所有 workspace 的构建产物
+    "clean": "npm run clean --workspaces",
+
+    // 按顺序构建各个核心包
+    // 先 tui，再 ai，再 agent，最后 coding-agent
+    "build": "cd packages/tui && npm run build && cd ../ai && npm run build && cd ../agent && npm run build && cd ../coding-agent && npm run build",
+
+    // 仓库级检查命令
+    // 依次做：
+    // 1. biome 格式/静态检查并自动写回
+    // 2. 检查依赖是否按项目要求固定版本
+    // 3. 检查 TS 相对导入规范
+    // 4. 检查 coding-agent shrinkwrap 是否最新
+    // 5. 用 tsgo 做一次 TS 类型检查（不产出文件）
+    // 6. 做浏览器 smoke 检查
+    "check": "biome check --write --error-on-warnings . && npm run check:pinned-deps && npm run check:ts-imports && npm run check:shrinkwrap && tsgo --noEmit && npm run check:browser-smoke",
+
+    // 浏览器相关 smoke 检查
+    "check:browser-smoke": "node scripts/check-browser-smoke.mjs",
+
+    // 检查依赖版本是否符合“固定版本”规则
+    "check:pinned-deps": "node scripts/check-pinned-deps.mjs",
+
+    // 检查 coding-agent 的 shrinkwrap 是否需要更新
+    "check:shrinkwrap": "node scripts/generate-coding-agent-shrinkwrap.mjs --check",
+
+    // 检查 TS 相对路径导入规则
+    "check:ts-imports": "node scripts/check-ts-relative-imports.mjs",
+
+    // 性能分析：以 TUI 模式跑 coding-agent
+    "profile:tui": "node scripts/profile-coding-agent-node.mjs --mode tui",
+
+    // 性能分析：以 RPC 模式跑 coding-agent
+    "profile:rpc": "node scripts/profile-coding-agent-node.mjs --mode rpc",
+
+    // 在所有 workspace 中运行 test（如果该包定义了 test 脚本）
+    "test": "npm run test --workspaces --if-present",
+
+    // 所有 workspace 统一升 patch 版本
+    // 不自动打 git tag，然后同步版本并更新 package-lock
+    "version:patch": "npm version patch -ws --no-git-tag-version && node scripts/sync-versions.js && npm install --package-lock-only",
+
+    // 所有 workspace 统一升 minor 版本
+    "version:minor": "npm version minor -ws --no-git-tag-version && node scripts/sync-versions.js && npm install --package-lock-only",
+
+    // 所有 workspace 统一升 major 版本
+    // 注意：项目规则里可能不鼓励实际发 major，这里只是技术上保留
+    "version:major": "npm version major -ws --no-git-tag-version && node scripts/sync-versions.js && npm install --package-lock-only",
+
+    // 手动指定版本号
+    "version:set": "npm version -ws",
+
+    // npm publish 前自动执行
+    // 清理 -> 构建 -> 检查
+    "prepublishOnly": "npm run clean && npm run build && npm run check",
+
+    // 发布所有 workspace 包到 npm
+    "publish": "npm run prepublishOnly && npm publish -ws --access public",
+
+    // dry-run 方式发布，先完整跑流程但不真正上传
+    "publish:dry": "npm run prepublishOnly && npm publish -ws --access public --dry-run",
+
+    // 做一次“本地发布模拟”
+    // 一般用于发布前验证 Node/Bun 产物是否都能正常工作
+    "release:local": "node scripts/local-release.mjs",
+
+    // 单独生成 coding-agent 的 shrinkwrap
+    "shrinkwrap:coding-agent": "node scripts/generate-coding-agent-shrinkwrap.mjs",
+
+    // 正式 patch 发布流程
+    "release:patch": "node scripts/release.mjs patch",
+
+    // 正式 minor 发布流程
+    "release:minor": "node scripts/release.mjs minor",
+
+    // 正式 major 发布流程
+    "release:major": "node scripts/release.mjs major",
+
+    // husky 安装 git hooks
+    // 通常在 npm install 后自动执行
+    "prepare": "husky"
+  },
+
+  "devDependencies": {
+    // sandbox 运行时依赖
+    "@anthropic-ai/sandbox-runtime": "0.0.26",
+
+    // 代码格式化 / lint 工具
+    "@biomejs/biome": "2.3.5",
+
+    // Node 类型声明
+    "@types/node": "22.19.19",
+
+    // TypeScript 官方 native preview
+    // 这里提供了 tsgo 命令
+    "@typescript/native-preview": "7.0.0-dev.20260120.1",
+
+    // 打包工具
+    "esbuild": "0.28.0",
+
+    // git hooks 工具
+    "husky": "9.1.7",
+
+    // 运行 TS/ESM 配置时常用的轻量加载器
+    "jiti": "2.7.0",
+
+    // 跨平台 shell 命令工具，比如 rm/cp/chmod
+    "shx": "0.4.0",
+
+    // 开发时直接运行 TS/TSX 文件的工具
+    "tsx": "4.22.1",
+
+    // TypeScript 官方编译器
+    "typescript": "5.9.3"
+  },
+
+  // 约束运行环境最低 Node 版本
+  "engines": {
+    "node": ">=22.19.0"
+  },
+
+  // monorepo 根版本
+  // 一般用于仓库层管理，不一定直接代表某个单独发布包
+  "version": "0.0.3",
+
+  // 覆盖某些依赖版本
+  // 强制让树中的 rimraf 统一为 6.1.2
+  "overrides": {
+    "rimraf": "6.1.2",
+    "gaxios": {
+      "rimraf": "6.1.2"
+    }
+  }
+}
+```
+
 ### `.npmrc`
 
 npm 配置文件，控制 `npm install` 等命令的默认行为。手写，存于仓库根目录。

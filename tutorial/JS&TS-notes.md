@@ -886,6 +886,140 @@ const result = arr.map((letter, idx) => `${idx}:${letter}`);
 
 ## npm 包
 
+```json
+// pi-coding-agent 中的 package.json
+"scripts": {
+  // 删除 dist 目录，清空之前的构建产物
+  "clean": "shx rm -rf dist",
+
+  // 普通构建：
+  // 1. 用 tsgo 按 tsconfig.build.json 编译源码
+  // 2. 给 dist/cli.js 加可执行权限
+  // 3. 把运行时需要的静态资源复制到 dist
+  "build": "tsgo -p tsconfig.build.json && shx chmod +x dist/cli.js && npm run copy-assets",
+
+  // 二进制构建：
+  // 1. 先把依赖的 workspace 包（tui / ai / agent）都构建好
+  // 2. 再执行本包自己的普通构建
+  // 3. 用 bun build --compile 把 dist/bun/cli.js 编译成可执行文件 dist/pi
+  // 4. 额外把 worker 文件一起作为构建入口传给 bun，避免编译后二进制里缺少 worker
+  // 5. 最后复制二进制运行需要的资源文件到 dist
+  "build:binary": "npm --prefix ../tui run build && npm --prefix ../ai run build && npm --prefix ../agent run build && npm run build && bun build --compile ./dist/bun/cli.js ./src/utils/image-resize-worker.ts --outfile dist/pi && npm run copy-binary-assets",
+
+  // 给普通 JS 构建产物复制配套资源：
+  // - 交互模式主题 JSON
+  // - 交互模式图片资源
+  // - export-html 用到的 html/css/js 模板和 vendor 文件
+  "copy-assets": "shx mkdir -p dist/modes/interactive/theme && shx cp src/modes/interactive/theme/*.json dist/modes/interactive/theme/ && shx mkdir -p dist/modes/interactive/assets && shx cp src/modes/interactive/assets/*.png dist/modes/interactive/assets/ && shx mkdir -p dist/core/export-html/vendor && shx cp src/core/export-html/template.html src/core/export-html/template.css src/core/export-html/template.js dist/core/export-html/ && shx cp src/core/export-html/vendor/*.js dist/core/export-html/vendor/",
+
+  // 给 Bun 二进制构建产物复制配套资源：
+  // - package.json / README / CHANGELOG
+  // - 主题和图片资源
+  // - export-html 模板和 vendor 文件
+  // - docs / examples
+  // - photon 的 wasm 文件
+  // 目的：让 dist/ 变成一个可运行、可分发的完整目录，而不只是一个 pi 二进制文件
+  "copy-binary-assets": "shx cp package.json dist/ && shx cp README.md dist/ && shx cp CHANGELOG.md dist/ && shx mkdir -p dist/theme && shx cp src/modes/interactive/theme/*.json dist/theme/ && shx mkdir -p dist/assets && shx cp src/modes/interactive/assets/*.png dist/assets/ && shx mkdir -p dist/export-html/vendor && shx cp src/core/export-html/template.html dist/export-html/ && shx cp src/core/export-html/vendor/*.js dist/export-html/vendor/ && shx cp -r docs dist/ && shx cp -r examples dist/ && shx cp ../../node_modules/@silvia-odwyer/photon-node/photon_rs_bg.wasm dist/",
+
+  // 运行测试
+  "test": "vitest --run",
+
+  // 生成或更新 coding-agent 的 shrinkwrap
+  // 用于锁定发布依赖
+  "shrinkwrap": "node ../../scripts/generate-coding-agent-shrinkwrap.mjs",
+
+  // npm publish 前自动执行：
+  // 1. 清理旧产物
+  // 2. 普通构建
+  // 3. 生成 shrinkwrap
+  // 保证发包前产物和依赖锁文件是最新的
+  "prepublishOnly": "npm run clean && npm run build && npm run shrinkwrap"
+}
+```
+
+1、正常的 TypeScript 项目发布 / 运行流程 最典型的是这条链：
+
+1. 写 src/*.ts
+2. 用 tsc (TypeScript Compiler) / tsgo，编译成 dist/*.js
+3. npm 发布 dist
+4. 用户安装后用 Node 运行 dist
+
+2、开发时为了方便，经常不用手工先编译：
+
+tsx 是一个运行 TypeScript 源码的工具，可以
+
+- 读取 cli.ts
+- 按 tsconfig.json 处理 TypeScript/模块语法
+- 在内存里把它转换成可运行的 JS
+- 交给 Node 跑
+
+```bash
+tsx packages/coding-agent/src/cli.ts
+```
+
+3、如果是命令行工具，通常还会在 package.json 里加 bin ：
+
+```json
+{
+  "bin": {
+    "mycli": "dist/cli.js"
+  }
+}
+```
+
+这样用户全局安装后：
+
+```bash
+npm install -g mycli
+```
+
+终端里就能直接运行：
+
+```bash
+mycli
+```
+
+但它背后通常仍然是：Node 去执行 dist/cli.js
+
+4、bun 工具
+
+最小例子：怎么编译 如果你有一个很简单的 CLI 文件：
+
+```
+// hello.ts
+console.log("hello");
+```
+
+可以直接：
+
+```
+bun build --compile ./hello.ts --outfile hello
+```
+
+然后运行：
+
+```
+./hello
+```
+
+这就是最基础的 Bun 二进制编译。
+
+Bun 支持指定目标平台：在这个项目里，Windows 输出 pi.exe，其他平台输出 pi
+
+```bash
+# 跨平台构建脚本 build-binaries.sh
+bun build --compile --target=bun-darwin-arm64 ...
+bun build --compile --target=bun-linux-x64 ...
+bun build --compile --target=bun-windows-x64 ...
+```
+
+Bun 二进制不会自动替你把所有项目资源都配备，很多非 JS 资源还是要你自己整理、复制、分发
+
+```bash
+// package.json
+"copy-binary-assets": "shx cp..."
+```
+
 ### chalk 终端输出美化
 
 一个 npm 包，用于**在终端输出彩色文字**。
@@ -908,4 +1042,12 @@ console.log(chalk.blue.bold("蓝色加粗"));     // 链式组
 ### Linter (ESLint) 代码质量检查 和 Prettier 自动格式化
 
 **JavaScript / TypeScript 生态圈**（即 Node.js 技术栈）的标配工具。
+
+### [Biome](https://biomejs.dev/)
+
+
+
+
+
+
 

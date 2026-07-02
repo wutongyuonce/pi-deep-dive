@@ -57,6 +57,15 @@ pi-mono 通过在根 `package.json` 的 `build` 脚本中**手动编排构建顺
 
 3. [pi-coding-agent](./pi-coding-agent.md)
 
+4. 其他
+
+   [Javascript、Typescript 相关知识（语法、项目）](./JS&TS-notes.md)
+
+   [monorepo-config 根目录配置文件](./monorepo-config.md)
+
+   [仓库 script 文件夹下的脚本](./scripts.md)
+
+
 ## 使用技巧
 
 > [Pi Agent 极简入门](https://www.bilibili.com/video/BV1mAEh6jEYU)
@@ -110,7 +119,7 @@ session 相关
 
 `/compact xxx（你想加的额外 prompt）`
 
-
+### Extension
 
 pi-web-access 
 

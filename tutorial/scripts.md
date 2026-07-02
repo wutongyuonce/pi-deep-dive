@@ -2,8 +2,6 @@
 
 按调用方式分类：
 
----
-
 ## 自动化调用（不是开发者手动执行）
 
 ### Git pre-commit 钩子（`git commit` 时自动触发）
@@ -27,8 +25,6 @@
 | **check-ts-relative-imports.mjs**                        | `npm run check:ts-imports`    | `git commit` 时自动运行。禁止 `.ts` 文件中有 `.js` 导入      |
 | **generate-coding-agent-shrinkwrap.mjs**                 | `npm run check:shrinkwrap`    | `git commit` 时自动运行（`--check` 模式，只验证不写入），也可 `npm run shrinkwrap:coding-agent` 手动生成 |
 | **check-browser-smoke.mjs** + **browser-smoke-entry.ts** | `npm run check:browser-smoke` | `git commit` 时，但**只当修改了 `packages/ai/` 或 `packages/web-ui/` 的文件时才触发** |
-
----
 
 ## 开发者手动调用的
 
