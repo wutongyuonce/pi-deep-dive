@@ -16,7 +16,8 @@
  * - Linux 下依赖 bubblewrap 等工具
  * - 本文件本身不直接实现内核级隔离，而是通过 `SandboxManager` 包装命令
  *
- * 配置文件（两层合并，项目配置优先级更高）：
+ * 配置文件（三层合并，项目配置优先级更高）：
+ * - DEFAULT_CONFIG
  * - `~/.pi/agent/extensions/sandbox.json`
  * - `<cwd>/.pi/sandbox.json`
  *
@@ -37,7 +38,7 @@
  * ```
  *
  * 使用方式：
- * - `pi -e ./sandbox`：按默认值和配置文件启用沙箱
+ * - `pi -e ./sandbox`：把当前目录下的 sandbox 扩展加载到 pi 里并启动
  * - `pi -e ./sandbox --no-sandbox`：通过 CLI 显式关闭沙箱
  * - `/sandbox`：查看当前沙箱配置
  *
@@ -195,6 +196,9 @@ function deepMerge(base: SandboxConfig, overrides: Partial<SandboxConfig>): Sand
  */
 function createSandboxedBashOps(): BashOperations {
 	return {
+		// - command ：调用方要执行的 shell 命令
+		// - cwd ：调用方指定的工作目录
+		// - { onData, signal, timeout } ：调用方传进来的 options 对象解构
 		async exec(command, cwd, { onData, signal, timeout }) {
 			// 先确认工作目录存在，避免在无效 cwd 中启动子进程。
 			if (!existsSync(cwd)) {
@@ -205,11 +209,13 @@ function createSandboxedBashOps(): BashOperations {
 			const wrappedCommand = await SandboxManager.wrapWithSandbox(command);
 
 			return new Promise((resolve, reject) => {
+				// spawn 是 Node 的子进程 API
+				// 这句不是在 JS 里直接执行命令，而是：让操作系统开一个 bash 子进程，再让 bash 去执行命令
 				// 通过 `bash -c` 执行包装后的命令，并单独接管 stdout/stderr。
 				const child = spawn("bash", ["-c", wrappedCommand], {
-					cwd,
-					detached: true,
-					stdio: ["ignore", "pipe", "pipe"],
+					cwd, // 这个 bash 子进程要在哪个工作目录里运行
+					detached: true, // 让这个子进程以“独立进程组”的方式启动，为了后面更好地整组杀进程
+					stdio: ["ignore", "pipe", "pipe"], // 程序默认有三条通道 stdin、stdout、stderr，这里是不给这个 bash 提供交互输入，但要把它的输出内容都接到当前程序
 				});
 
 				let timedOut = false;
@@ -233,7 +239,7 @@ function createSandboxedBashOps(): BashOperations {
 				child.stdout?.on("data", onData);
 				child.stderr?.on("data", onData);
 
-				// 启动失败或运行时错误直接向上抛出。
+				// 子进程出错：启动失败或运行时错误直接向上抛出。
 				child.on("error", (err) => {
 					if (timeoutHandle) clearTimeout(timeoutHandle);
 					reject(err);
@@ -252,7 +258,7 @@ function createSandboxedBashOps(): BashOperations {
 
 				signal?.addEventListener("abort", onAbort, { once: true });
 
-				// 进程结束后统一归并三类状态：abort / timeout / 正常退出。
+				// 子进程结束：统一归并三类状态：abort / timeout / 正常退出。
 				child.on("close", (code) => {
 					if (timeoutHandle) clearTimeout(timeoutHandle);
 					signal?.removeEventListener("abort", onAbort);

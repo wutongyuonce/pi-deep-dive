@@ -64,6 +64,8 @@ pi-mono 通过在根 `package.json` 的 `build` 脚本中**手动编排构建顺
    [monorepo-config 根目录配置文件](./monorepo-config.md)
 
    [仓库 script 文件夹下的脚本](./scripts.md)
+   
+   [官方 sandbox extension 示例解析](./sandbox.md)
 
 
 ## 使用技巧
@@ -120,6 +122,8 @@ session 相关
 `/compact xxx（你想加的额外 prompt）`
 
 ### Extension
+
+pi-guard-sandbox
 
 pi-web-access 
 

@@ -28,6 +28,7 @@ import { normalizePath } from "./utils/paths.ts";
 // 检测当前进程是 Bun 编译二进制还是 Node.js 运行时，影响后续所有路径解析逻辑
 // =============================================================================
 
+// ESM 中没有 CommonJS 的内置 __filename / __dirname，这里通过 import.meta.url 手动还原当前文件路径和所在目录。
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 

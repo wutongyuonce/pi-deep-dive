@@ -1045,7 +1045,17 @@ console.log(chalk.blue.bold("蓝色加粗"));     // 链式组
 
 ### [Biome](https://biomejs.dev/)
 
+通常把它看成 Prettier + ESLint 的一体化替代方案之一。
 
+- 用 Biome formatter 替代 Prettier
+- 用 Biome linter 覆盖大部分通用 ESLint 规则
+
+它能做什么
+
+- formatter ：统一代码风格，类似 Prettier
+- linter ：检查潜在问题、坏味道和风格问题，类似 ESLint
+- fix ：自动修复一部分可修复问题
+- import /代码整理：部分版本里也提供辅助整理能力
 
 
 

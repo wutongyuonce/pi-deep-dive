@@ -1,15 +1,20 @@
 /**
- * Subagent Tool - Delegate tasks to specialized agents
+ * Subagent 工具扩展
  *
- * Spawns a separate `pi` process for each subagent invocation,
- * giving it an isolated context window.
+ * 文件定位：`coding-agent` 示例扩展中的子代理调度层。
  *
- * Supports three modes:
- *   - Single: { agent: "name", task: "..." }
- *   - Parallel: { tasks: [{ agent: "name", task: "..." }, ...] }
- *   - Chain: { chain: [{ agent: "name", task: "... {previous} ..." }, ...] }
+ * 核心职责：
+ * - 注册 `subagent` 工具，把任务委托给独立的 `pi` 子进程
+ * - 支持 single、parallel、chain 三种调度模式
+ * - 汇总子代理的消息、工具调用、用量信息与渲染结果
  *
- * Uses JSON mode to capture structured output from subagents.
+ * 调用链路：
+ *   用户调用 subagent 工具
+ *   -> execute()
+ *   -> discoverAgents()
+ *   -> runSingleAgent()
+ *   -> spawn("pi" | 当前运行时)
+ *   -> renderResult()
  */
 
 import { spawn } from "node:child_process";
@@ -29,6 +34,9 @@ const MAX_CONCURRENCY = 4;
 const COLLAPSED_ITEM_COUNT = 10;
 const PER_TASK_OUTPUT_CAP = 50 * 1024;
 
+/**
+ * 将 token 数量格式化为更易读的短文本。
+ */
 function formatTokens(count: number): string {
 	if (count < 1000) return count.toString();
 	if (count < 10000) return `${(count / 1000).toFixed(1)}k`;
@@ -36,6 +44,11 @@ function formatTokens(count: number): string {
 	return `${(count / 1000000).toFixed(1)}M`;
 }
 
+/**
+ * 组装单次 agent 执行的用量摘要。
+ *
+ * 定位：结果渲染阶段的辅助格式化函数。
+ */
 function formatUsageStats(
 	usage: {
 		input: number;
@@ -62,6 +75,11 @@ function formatUsageStats(
 	return parts.join(" ");
 }
 
+/**
+ * 把工具调用转换成适合 TUI 展示的单行预览文本。
+ *
+ * 定位：渲染层辅助函数，用于把常见工具参数压缩成更短的可读摘要。
+ */
 function formatToolCall(
 	toolName: string,
 	args: Record<string, unknown>,
@@ -72,6 +90,7 @@ function formatToolCall(
 		return p.startsWith(home) ? `~${p.slice(home.length)}` : p;
 	};
 
+	// 对常见工具做专门格式化，避免结果视图被原始 JSON 参数淹没。
 	switch (toolName) {
 		case "bash": {
 			const command = (args.command as string) || "...";
@@ -130,6 +149,9 @@ function formatToolCall(
 	}
 }
 
+/**
+ * 汇总单个子代理执行过程中的 token、缓存与成本数据。
+ */
 interface UsageStats {
 	input: number;
 	output: number;
@@ -140,6 +162,9 @@ interface UsageStats {
 	turns: number;
 }
 
+/**
+ * 单个子代理任务的完整执行结果。
+ */
 interface SingleResult {
 	agent: string;
 	agentSource: "user" | "project" | "unknown";
@@ -154,6 +179,9 @@ interface SingleResult {
 	step?: number;
 }
 
+/**
+ * `subagent` 工具返回给 UI 的结构化详情。
+ */
 interface SubagentDetails {
 	mode: "single" | "parallel" | "chain";
 	agentScope: AgentScope;
@@ -161,6 +189,9 @@ interface SubagentDetails {
 	results: SingleResult[];
 }
 
+/**
+ * 从消息流中提取最后一段 assistant 文本，作为任务最终输出。
+ */
 function getFinalOutput(messages: Message[]): string {
 	for (let i = messages.length - 1; i >= 0; i--) {
 		const msg = messages[i];
@@ -173,10 +204,16 @@ function getFinalOutput(messages: Message[]): string {
 	return "";
 }
 
+/**
+ * 统一判断一个任务是否应视为失败。
+ */
 function isFailedResult(result: SingleResult): boolean {
 	return result.exitCode !== 0 || result.stopReason === "error" || result.stopReason === "aborted";
 }
 
+/**
+ * 返回适合展示给用户的任务输出，失败时优先展示错误信息。
+ */
 function getResultOutput(result: SingleResult): string {
 	if (isFailedResult(result)) {
 		return result.errorMessage || result.stderr || getFinalOutput(result.messages) || "(no output)";
@@ -184,10 +221,14 @@ function getResultOutput(result: SingleResult): string {
 	return getFinalOutput(result.messages) || "(no output)";
 }
 
+/**
+ * 限制并行模式下单个任务输出的展示长度，避免整体结果过大。
+ */
 function truncateParallelOutput(output: string): string {
 	const byteLength = Buffer.byteLength(output, "utf8");
 	if (byteLength <= PER_TASK_OUTPUT_CAP) return output;
 
+	// 以字节数为准截断，避免多字节字符导致上限判断失真。
 	let truncated = output.slice(0, PER_TASK_OUTPUT_CAP);
 	while (Buffer.byteLength(truncated, "utf8") > PER_TASK_OUTPUT_CAP) {
 		truncated = truncated.slice(0, -1);
@@ -197,6 +238,9 @@ function truncateParallelOutput(output: string): string {
 
 type DisplayItem = { type: "text"; text: string } | { type: "toolCall"; name: string; args: Record<string, any> };
 
+/**
+ * 从 assistant 消息中抽取可渲染的文本片段与工具调用片段。
+ */
 function getDisplayItems(messages: Message[]): DisplayItem[] {
 	const items: DisplayItem[] = [];
 	for (const msg of messages) {
@@ -210,6 +254,9 @@ function getDisplayItems(messages: Message[]): DisplayItem[] {
 	return items;
 }
 
+/**
+ * 以固定并发度执行异步映射，保持返回结果顺序与输入一致。
+ */
 async function mapWithConcurrencyLimit<TIn, TOut>(
 	items: TIn[],
 	concurrency: number,
@@ -219,6 +266,8 @@ async function mapWithConcurrencyLimit<TIn, TOut>(
 	const limit = Math.max(1, Math.min(concurrency, items.length));
 	const results: TOut[] = new Array(items.length);
 	let nextIndex = 0;
+
+	// worker 竞争共享游标，实现轻量级并发调度。
 	const workers = new Array(limit).fill(null).map(async () => {
 		while (true) {
 			const current = nextIndex++;
@@ -230,6 +279,9 @@ async function mapWithConcurrencyLimit<TIn, TOut>(
 	return results;
 }
 
+/**
+ * 把 system prompt 写入临时文件，供子进程通过 CLI 参数引用。
+ */
 async function writePromptToTempFile(agentName: string, prompt: string): Promise<{ dir: string; filePath: string }> {
 	const tmpDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "pi-subagent-"));
 	const safeName = agentName.replace(/[^\w.-]+/g, "_");
@@ -240,6 +292,11 @@ async function writePromptToTempFile(agentName: string, prompt: string): Promise
 	return { dir: tmpDir, filePath };
 }
 
+/**
+ * 根据当前运行环境构造再次调用 `pi` 的命令行入口。
+ *
+ * 定位：兼容 node、bun 以及已打包二进制等不同启动方式。
+ */
 function getPiInvocation(args: string[]): { command: string; args: string[] } {
 	const currentScript = process.argv[1];
 	const isBunVirtualScript = currentScript?.startsWith("/$bunfs/root/");
@@ -258,6 +315,23 @@ function getPiInvocation(args: string[]): { command: string; args: string[] } {
 
 type OnUpdateCallback = (partial: AgentToolResult<SubagentDetails>) => void;
 
+/**
+ * 执行单个 agent 任务，并把 JSON 事件流还原为结构化结果。
+ *
+ * 定位：三种调度模式共享的核心执行函数。
+ *
+ * 被谁调用：
+ *   - chain 模式循环
+ *   - parallel 模式并发映射
+ *   - single 模式直接执行
+ *
+ * 调用了谁：
+ *   - writePromptToTempFile()
+ *   - getPiInvocation()
+ *   - node:child_process.spawn()
+ *
+ * @returns 单个任务的完整执行结果
+ */
 async function runSingleAgent(
 	defaultCwd: string,
 	agents: AgentConfig[],
@@ -271,6 +345,7 @@ async function runSingleAgent(
 ): Promise<SingleResult> {
 	const agent = agents.find((a) => a.name === agentName);
 
+	// 未命中 agent 时直接返回结构化错误，避免进入子进程阶段。
 	if (!agent) {
 		const available = agents.map((a) => `"${a.name}"`).join(", ") || "none";
 		return {
@@ -315,6 +390,7 @@ async function runSingleAgent(
 
 	try {
 		if (agent.systemPrompt.trim()) {
+			// 通过临时文件注入 system prompt，避免命令行参数中出现大段文本。
 			const tmp = await writePromptToTempFile(agent.name, agent.systemPrompt);
 			tmpPromptDir = tmp.dir;
 			tmpPromptPath = tmp.filePath;
@@ -324,6 +400,7 @@ async function runSingleAgent(
 		args.push(`Task: ${task}`);
 		let wasAborted = false;
 
+		// 子进程以 JSON 流输出事件，这里逐行解析并同步更新当前结果。
 		const exitCode = await new Promise<number>((resolve) => {
 			const invocation = getPiInvocation(args);
 			const proc = spawn(invocation.command, invocation.args, {
@@ -347,6 +424,7 @@ async function runSingleAgent(
 					currentResult.messages.push(msg);
 
 					if (msg.role === "assistant") {
+						// assistant 消息携带本轮主要用量信息，逐步累加到当前任务。
 						currentResult.usage.turns++;
 						const usage = msg.usage;
 						if (usage) {
@@ -365,6 +443,7 @@ async function runSingleAgent(
 				}
 
 				if (event.type === "tool_result_end" && event.message) {
+					// 工具结果也作为消息保留，供最终渲染时重建执行轨迹。
 					currentResult.messages.push(event.message as Message);
 					emitUpdate();
 				}
@@ -407,6 +486,7 @@ async function runSingleAgent(
 		if (wasAborted) throw new Error("Subagent was aborted");
 		return currentResult;
 	} finally {
+		// 临时 prompt 文件只用于当前子进程执行，结束后立即清理。
 		if (tmpPromptPath)
 			try {
 				fs.unlinkSync(tmpPromptPath);
@@ -451,6 +531,9 @@ const SubagentParams = Type.Object({
 	cwd: Type.Optional(Type.String({ description: "Working directory for the agent process (single mode)" })),
 });
 
+/**
+ * 注册 `subagent` 工具，并提供参数定义、执行逻辑与结果渲染逻辑。
+ */
 export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "subagent",
@@ -464,6 +547,7 @@ export default function (pi: ExtensionAPI) {
 		parameters: SubagentParams,
 
 		async execute(_toolCallId, params, signal, onUpdate, ctx) {
+			// 先发现当前上下文下可用的 agent，并确定是否允许访问项目级目录。
 			const agentScope: AgentScope = params.agentScope ?? "user";
 			const discovery = discoverAgents(ctx.cwd, agentScope);
 			const agents = discovery.agents;
@@ -496,6 +580,7 @@ export default function (pi: ExtensionAPI) {
 				};
 			}
 
+			// 访问项目级 agent 前可选确认，降低仓库内配置被误执行的风险。
 			if ((agentScope === "project" || agentScope === "both") && confirmProjectAgents && ctx.hasUI) {
 				const requestedAgentNames = new Set<string>();
 				if (params.chain) for (const step of params.chain) requestedAgentNames.add(step.agent);
@@ -525,14 +610,14 @@ export default function (pi: ExtensionAPI) {
 				const results: SingleResult[] = [];
 				let previousOutput = "";
 
+				// chain 按顺序执行，每一步都可以引用上一步输出。
 				for (let i = 0; i < params.chain.length; i++) {
 					const step = params.chain[i];
 					const taskWithContext = step.task.replace(/\{previous\}/g, previousOutput);
 
-					// Create update callback that includes all previous results
+					// 流式更新时把已完成结果与当前步骤的增量结果合并回传。
 					const chainUpdate: OnUpdateCallback | undefined = onUpdate
 						? (partial) => {
-								// Combine completed results with current streaming result
 								const currentResult = partial.details?.results[0];
 								if (currentResult) {
 									const allResults = [...results, currentResult];
@@ -566,6 +651,8 @@ export default function (pi: ExtensionAPI) {
 							isError: true,
 						};
 					}
+
+					// 仅将 assistant 最终文本向后传递给下一步任务。
 					previousOutput = getFinalOutput(result.messages);
 				}
 				return {
@@ -586,10 +673,10 @@ export default function (pi: ExtensionAPI) {
 						details: makeDetails("parallel")([]),
 					};
 
-				// Track all results for streaming updates
+				// 预先分配结果数组，保证流式更新时可以按原始顺序渲染任务状态。
 				const allResults: SingleResult[] = new Array(params.tasks.length);
 
-				// Initialize placeholder results
+				// 先填充占位结果，便于 UI 显示“运行中”状态。
 				for (let i = 0; i < params.tasks.length; i++) {
 					allResults[i] = {
 						agent: params.tasks[i].agent,
@@ -615,6 +702,7 @@ export default function (pi: ExtensionAPI) {
 					}
 				};
 
+				// parallel 使用固定并发窗口执行，避免一次性拉起过多子进程。
 				const results = await mapWithConcurrencyLimit(params.tasks, MAX_CONCURRENCY, async (t, index) => {
 					const result = await runSingleAgent(
 						ctx.cwd,
@@ -624,7 +712,7 @@ export default function (pi: ExtensionAPI) {
 						t.cwd,
 						undefined,
 						signal,
-						// Per-task update callback
+						// 单任务的增量结果写回共享数组，再统一发出并行状态更新。
 						(partial) => {
 							if (partial.details?.results[0]) {
 								allResults[index] = partial.details.results[0];
@@ -658,6 +746,7 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			if (params.agent && params.task) {
+				// single 模式直接执行一个 agent 任务，并按统一错误语义返回。
 				const result = await runSingleAgent(
 					ctx.cwd,
 					agents,
@@ -694,13 +783,14 @@ export default function (pi: ExtensionAPI) {
 		renderCall(args, theme, _context) {
 			const scope: AgentScope = args.agentScope ?? "user";
 			if (args.chain && args.chain.length > 0) {
+				// 调用预览只展示前几步，避免工具标题区过长。
 				let text =
 					theme.fg("toolTitle", theme.bold("subagent ")) +
 					theme.fg("accent", `chain (${args.chain.length} steps)`) +
 					theme.fg("muted", ` [${scope}]`);
 				for (let i = 0; i < Math.min(args.chain.length, 3); i++) {
 					const step = args.chain[i];
-					// Clean up {previous} placeholder for display
+					// 展示时移除占位符，让用户看到更接近真实语义的任务摘要。
 					const cleanTask = step.task.replace(/\{previous\}/g, "").trim();
 					const preview = cleanTask.length > 40 ? `${cleanTask.slice(0, 40)}...` : cleanTask;
 					text +=
@@ -744,6 +834,7 @@ export default function (pi: ExtensionAPI) {
 
 			const mdTheme = getMarkdownTheme();
 
+			// 折叠态优先保留最近片段，展开态则完整展示文本和工具轨迹。
 			const renderDisplayItems = (items: DisplayItem[], limit?: number) => {
 				const toShow = limit ? items.slice(-limit) : items;
 				const skipped = limit && items.length > limit ? items.length - limit : 0;
@@ -782,6 +873,7 @@ export default function (pi: ExtensionAPI) {
 					if (displayItems.length === 0 && !finalOutput) {
 						container.addChild(new Text(theme.fg("muted", "(no output)"), 0, 0));
 					} else {
+						// 展开态保留所有工具调用，再把最终文本按 markdown 渲染。
 						for (const item of displayItems) {
 							if (item.type === "toolCall")
 								container.addChild(
@@ -894,7 +986,7 @@ export default function (pi: ExtensionAPI) {
 					return container;
 				}
 
-				// Collapsed view
+				// 折叠态按步骤列出摘要，便于快速判断在哪一步失败。
 				let text =
 					icon +
 					" " +
@@ -948,7 +1040,7 @@ export default function (pi: ExtensionAPI) {
 						);
 						container.addChild(new Text(theme.fg("muted", "Task: ") + theme.fg("dim", r.task), 0, 0));
 
-						// Show tool calls
+						// 展开态展示每个任务的工具调用轨迹。
 						for (const item of displayItems) {
 							if (item.type === "toolCall") {
 								container.addChild(
@@ -961,7 +1053,7 @@ export default function (pi: ExtensionAPI) {
 							}
 						}
 
-						// Show final output as markdown
+						// 最终文本按 markdown 渲染，保留并行任务各自的结构化输出。
 						if (finalOutput) {
 							container.addChild(new Spacer(1));
 							container.addChild(new Markdown(finalOutput.trim(), 0, 0, mdTheme));
@@ -979,7 +1071,7 @@ export default function (pi: ExtensionAPI) {
 					return container;
 				}
 
-				// Collapsed view (or still running)
+				// 折叠态同时承担“运行中”与“已完成摘要”两种显示职责。
 				let text = `${icon} ${theme.fg("toolTitle", theme.bold("parallel "))}${theme.fg("accent", status)}`;
 				for (const r of details.results) {
 					const rIcon =
