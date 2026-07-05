@@ -1,8 +1,8 @@
 # 第 17 章：Resource Loader — 一切外部资源的统一入口
 
-> **定位**：本章解析 pi 如何统一加载 extensions、skills、prompts、themes 四种资源。
-> 前置依赖：第 15 章（Extension 系统）、第 16 章（Skill 机制）。
-> 适用场景：当你想理解资源从哪里来、按什么顺序加载。
+本章解析 pi 如何统一加载 extensions、skills、prompts、themes 四种资源。
+前置依赖：第 15 章（Extension 系统）、第 16 章（Skill 机制）。
+资源从哪里来、按什么顺序加载。
 
 ## 为什么需要统一入口？
 

@@ -55,24 +55,31 @@ function toPosixPath(p: string): string {
  */
 function prefixIgnorePattern(line: string, prefix: string): string | null {
 	const trimmed = line.trim();
+	// 空行和普通注释行不参与 ignore 规则计算。
 	if (!trimmed) return null;
 	if (trimmed.startsWith("#") && !trimmed.startsWith("\\#")) return null;
 
 	let pattern = line;
 	let negated = false;
 
+	// 保留 ignore 的取反语义，后续补前缀时不能丢掉前导 `!`。
 	if (pattern.startsWith("!")) {
 		negated = true;
 		pattern = pattern.slice(1);
 	} else if (pattern.startsWith("\\!")) {
+		// 转义的 `!` 表示字面量，不应当触发取反。
 		pattern = pattern.slice(1);
 	}
 
+	// ignore 文件中的根路径规则改写为相对 rootDir 的规则形式。
 	if (pattern.startsWith("/")) {
 		pattern = pattern.slice(1);
 	}
 
+	// 例如当前正在处理 `foo/.gitignore`，其中的 `bar` 需要被理解成
+	// 相对于扫描根目录的 `foo/bar`，否则递归扫描时会丢失规则的作用域。
 	const prefixed = prefix ? `${prefix}${pattern}` : pattern;
+	// 前面暂存过取反标记，这里再补回去，确保最终规则和原始 ignore 语义一致。
 	return negated ? `!${prefixed}` : prefixed;
 }
 
@@ -93,11 +100,14 @@ function addIgnoreRules(ig: IgnoreMatcher, dir: string, rootDir: string): void {
 			const content = readFileSync(ignorePath, "utf-8");
 			const patterns = content
 				.split(/\r?\n/)
+				// 每个目录中的规则都要带上相对根目录前缀，这样递归扫描时匹配语义才一致。
 				.map((line) => prefixIgnorePattern(line, prefix))
 				.filter((line): line is string => Boolean(line));
 			if (patterns.length > 0) {
+				// 匹配器是跨递归层级共享的，因此这里加入的规则会自动影响所有后代目录。
 				ig.add(patterns);
 			}
+			// ignore 规则文件本身是辅助信息；读取失败时宁可少忽略，也不要让技能加载整体失败。
 		} catch {}
 	}
 }
@@ -145,18 +155,22 @@ export interface LoadSkillsResult {
 function validateName(name: string): string[] {
 	const errors: string[] = [];
 
+	// 名称校验只收集问题，不直接抛错，方便调用方统一产出诊断。
 	if (name.length > MAX_NAME_LENGTH) {
 		errors.push(`name exceeds ${MAX_NAME_LENGTH} characters (${name.length})`);
 	}
 
+	// 名称最终可能出现在命令、日志和提示词中，因此限制为较稳妥的字符集合。
 	if (!/^[a-z0-9-]+$/.test(name)) {
 		errors.push(`name contains invalid characters (must be lowercase a-z, 0-9, hyphens only)`);
 	}
 
+	// 连字符只允许出现在中间，避免出现 `-foo`、`foo-` 这类边界不清晰的名称。
 	if (name.startsWith("-") || name.endsWith("-")) {
 		errors.push(`name must not start or end with a hyphen`);
 	}
 
+	// 连续连字符通常不是有意设计，单独报出能让用户更快定位命名问题。
 	if (name.includes("--")) {
 		errors.push(`name must not contain consecutive hyphens`);
 	}
@@ -172,9 +186,11 @@ function validateName(name: string): string[] {
 function validateDescription(description: string | undefined): string[] {
 	const errors: string[] = [];
 
+	// 描述是技能能否暴露给模型的最小必要信息，因此缺失时直接记为错误。
 	if (!description || description.trim() === "") {
 		errors.push("description is required");
 	} else if (description.length > MAX_DESCRIPTION_LENGTH) {
+		// 过长不会阻止解析，但会增加系统提示词体积，因此仍给出 warning。
 		errors.push(`description exceeds ${MAX_DESCRIPTION_LENGTH} characters (${description.length})`);
 	}
 
@@ -199,23 +215,27 @@ export interface LoadSkillsFromDirOptions {
 function createSkillSourceInfo(filePath: string, baseDir: string, source: string): SourceInfo {
 	switch (source) {
 		case "user":
+			// 用户级技能固定标记为 local/user，便于后续诊断与优先级判定。
 			return createSyntheticSourceInfo(filePath, {
 				source: "local",
 				scope: "user",
 				baseDir,
 			});
 		case "project":
+			// 项目级技能与用户级技能同属 local，但 scope 不同。
 			return createSyntheticSourceInfo(filePath, {
 				source: "local",
 				scope: "project",
 				baseDir,
 			});
 		case "path":
+			// 显式路径可能来自任意位置，这里只保留 local 和 baseDir，不额外附带 scope。
 			return createSyntheticSourceInfo(filePath, {
 				source: "local",
 				baseDir,
 			});
 		default:
+			// 兜底分支保留原始 source 字符串，方便未来扩展新的来源类型。
 			return createSyntheticSourceInfo(filePath, { source, baseDir });
 	}
 }
@@ -253,19 +273,21 @@ function loadSkillsFromDirInternal(
 	const skills: Skill[] = [];
 	const diagnostics: ResourceDiagnostic[] = [];
 
+	// 缺失目录按“无技能”处理，避免把可选目录当成错误。
 	if (!existsSync(dir)) {
 		return { skills, diagnostics };
 	}
 
 	const root = rootDir ?? dir;
 	const ig = ignoreMatcher ?? ignore();
+	// 递归过程中持续把当前目录的 ignore 规则并入同一个匹配器。
 	addIgnoreRules(ig, dir, root);
 
 	try {
 		const entries = readdirSync(dir, { withFileTypes: true });
 
 		for (const entry of entries) {
-			// 步骤 1：如果当前目录本身就是技能根目录，优先直接加载它并停止下钻。
+			// 如果当前目录本身就是技能根目录，优先直接加载它并停止下钻。
 			if (entry.name !== "SKILL.md") {
 				continue;
 			}
@@ -275,8 +297,10 @@ function loadSkillsFromDirInternal(
 			let isFile = entry.isFile();
 			if (entry.isSymbolicLink()) {
 				try {
+					// 对符号链接做一次真实文件判断，避免把指向目录的链接误当成 SKILL.md 文件。
 					isFile = statSync(fullPath).isFile();
 				} catch {
+					// 断链或无权限链接直接跳过，不影响其它技能继续发现。
 					continue;
 				}
 			}
@@ -286,6 +310,8 @@ function loadSkillsFromDirInternal(
 				continue;
 			}
 
+			// 命中目录级 SKILL.md 后立即返回；该目录不再继续向下扫描其它候选项。
+			// 这样可以稳定表达“当前目录就是一个完整技能单元”的约定。
 			const result = loadSkillFromFile(fullPath, source);
 			if (result.skill) {
 				skills.push(result.skill);
@@ -295,13 +321,15 @@ function loadSkillsFromDirInternal(
 		}
 
 		for (const entry of entries) {
-			// 步骤 2：否则继续扫描子目录，并在根目录模式下接收散落的 .md 技能文件。
+			// 否则继续扫描子目录，并在根目录模式下接收散落的 .md 技能文件。
 			if (entry.name.startsWith(".")) {
+				// 隐藏目录通常包含内部元数据或缓存，不参与技能发现。
 				continue;
 			}
 
 			// Skip node_modules to avoid scanning dependencies
 			if (entry.name === "node_modules") {
+				// 依赖目录体积大且来源不受控，扫描它既低效也容易引入误判。
 				continue;
 			}
 
@@ -312,6 +340,7 @@ function loadSkillsFromDirInternal(
 			let isFile = entry.isFile();
 			if (entry.isSymbolicLink()) {
 				try {
+					// 这里同时判断文件和目录，是为了让符号链接也能完整参与后续分支逻辑。
 					const stats = statSync(fullPath);
 					isDirectory = stats.isDirectory();
 					isFile = stats.isFile();
@@ -324,10 +353,12 @@ function loadSkillsFromDirInternal(
 			const relPath = toPosixPath(relative(root, fullPath));
 			const ignorePath = isDirectory ? `${relPath}/` : relPath;
 			if (ig.ignores(ignorePath)) {
+				// 目录路径补 `/` 后再匹配，和 ignore 对目录规则的常见写法保持一致。
 				continue;
 			}
 
 			if (isDirectory) {
+				// 子目录继承同一套 ignore 上下文，保持整棵扫描树的匹配结果稳定。
 				const subResult = loadSkillsFromDirInternal(fullPath, source, false, ig, root);
 				skills.push(...subResult.skills);
 				diagnostics.push(...subResult.diagnostics);
@@ -338,12 +369,16 @@ function loadSkillsFromDirInternal(
 				continue;
 			}
 
+			// 只有根目录模式才接收散落的 .md 文件；子目录模式只认 SKILL.md。
+			// 这样根目录可以兼容“多个 markdown 技能文件并列存在”的场景，
+			// 同时避免深入子目录时把普通文档误识别为技能。
 			const result = loadSkillFromFile(fullPath, source);
 			if (result.skill) {
 				skills.push(result.skill);
 			}
 			diagnostics.push(...result.diagnostics);
 		}
+		// 读取目录失败时保持静默，调用方最终拿到的是“部分成功”的结果集合。
 	} catch {}
 
 	return { skills, diagnostics };
@@ -365,7 +400,7 @@ function loadSkillFromFile(
 	const diagnostics: ResourceDiagnostic[] = [];
 
 	try {
-		// 步骤 1：先解析 frontmatter，再推导技能名和基础目录。
+		// 先解析 frontmatter，再推导技能名和基础目录。
 		const rawContent = readFileSync(filePath, "utf-8");
 		const { frontmatter } = parseFrontmatter<SkillFrontmatter>(rawContent);
 		const skillDir = dirname(filePath);
@@ -374,10 +409,12 @@ function loadSkillFromFile(
 		// Validate description
 		const descErrors = validateDescription(frontmatter.description);
 		for (const error of descErrors) {
+			// 描述问题先进入诊断列表；只有“完全缺失”才会在后面阻断技能创建。
 			diagnostics.push({ type: "warning", message: error, path: filePath });
 		}
 
 		// Use name from frontmatter, or fall back to parent directory name
+		// 目录名兜底让最简技能文件只写 description 也能被系统识别。
 		const name = frontmatter.name || parentDirName;
 
 		// Validate name
@@ -386,11 +423,13 @@ function loadSkillFromFile(
 			diagnostics.push({ type: "warning", message: error, path: filePath });
 		}
 
-		// 步骤 2：描述完全缺失时视为无效技能；其余 warning 仅进入诊断，不阻断加载。
+		// 描述完全缺失时视为无效技能；其余 warning 仅进入诊断，不阻断加载。
 		if (!frontmatter.description || frontmatter.description.trim() === "") {
+			// 模型需要 description 来判断技能适用场景，因此这里不能继续生成 Skill 对象。
 			return { skill: null, diagnostics };
 		}
 
+		// 命名、来源和禁用标记都在这一层归一化，后续调用方只消费 Skill 运行时对象。
 		return {
 			skill: {
 				name,
@@ -403,6 +442,7 @@ function loadSkillFromFile(
 			diagnostics,
 		};
 	} catch (error) {
+		// 解析失败统一降级成 warning，让上层仍能继续加载其它技能来源。
 		const message = error instanceof Error ? error.message : "failed to parse skill file";
 		diagnostics.push({ type: "warning", message, path: filePath });
 		return { skill: null, diagnostics };
@@ -421,6 +461,7 @@ function loadSkillFromFile(
 export function formatSkillsForPrompt(skills: Skill[]): string {
 	const visibleSkills = skills.filter((s) => !s.disableModelInvocation);
 
+	// 没有可自动调用的技能时返回空串，避免在系统提示中注入空壳 XML。
 	if (visibleSkills.length === 0) {
 		return "";
 	}
@@ -434,6 +475,8 @@ export function formatSkillsForPrompt(skills: Skill[]): string {
 	];
 
 	for (const skill of visibleSkills) {
+		// 每个技能只暴露名称、描述和定位信息，具体内容由模型按需再去 read。
+		// 这种“先目录、后展开”的设计能把系统提示词体积控制在较小范围内。
 		lines.push("  <skill>");
 		lines.push(`    <name>${escapeXml(skill.name)}</name>`);
 		lines.push(`    <description>${escapeXml(skill.description)}</description>`);
@@ -448,6 +491,7 @@ export function formatSkillsForPrompt(skills: Skill[]): string {
 
 /** XML 特殊字符转义 */
 function escapeXml(str: string): string {
+	// 技能描述直接写入 XML 文本节点，必须先转义特殊字符，避免破坏标签结构。
 	return str
 		.replace(/&/g, "&amp;")
 		.replace(/</g, "&lt;")
@@ -496,11 +540,13 @@ export function loadSkills(options: LoadSkillsOptions): LoadSkillsResult {
 
 			// Skip silently if we've already loaded this exact file (via symlink)
 			if (realPathSet.has(realPath)) {
+				// 真实路径去重比字符串路径去重更稳，能覆盖软链接和不同相对路径写法。
 				continue;
 			}
 
 			const existing = skillMap.get(skill.name);
 			if (existing) {
+				// 同名冲突保留先到先得的技能，把后到者记录成 collision 诊断。
 				collisionDiagnostics.push({
 					type: "collision",
 					message: `name "${skill.name}" collision`,
@@ -513,6 +559,7 @@ export function loadSkills(options: LoadSkillsOptions): LoadSkillsResult {
 					},
 				});
 			} else {
+				// 名称唯一且真实路径未重复时，才真正进入最终技能表。
 				skillMap.set(skill.name, skill);
 				realPathSet.add(realPath);
 			}
@@ -521,6 +568,7 @@ export function loadSkills(options: LoadSkillsOptions): LoadSkillsResult {
 
 	if (includeDefaults) {
 		// 步骤 1：先装载默认目录，保证用户级和项目级技能拥有稳定优先顺序。
+		// 当前顺序意味着先加入的来源优先保留，同名后加入者只记录 collision。
 		addSkills(loadSkillsFromDirInternal(join(resolvedAgentDir, "skills"), "user", true));
 		addSkills(loadSkillsFromDirInternal(resolve(resolvedCwd, CONFIG_DIR_NAME, "skills"), "project", true));
 	}
@@ -533,11 +581,13 @@ export function loadSkills(options: LoadSkillsOptions): LoadSkillsResult {
 		if (target === normalizedRoot) {
 			return true;
 		}
+		// 通过补路径分隔符避免 `/a/b2` 被误判为位于 `/a/b` 下。
 		const prefix = normalizedRoot.endsWith(sep) ? normalizedRoot : `${normalizedRoot}${sep}`;
 		return target.startsWith(prefix);
 	};
 
 	const getSource = (resolvedPath: string): "user" | "project" | "path" => {
+		// 关闭默认目录加载时，显式路径仍可能落在默认目录下，需要恢复其真实来源标签。
 		if (!includeDefaults) {
 			if (isUnderPath(resolvedPath, userSkillsDir)) return "user";
 			if (isUnderPath(resolvedPath, projectSkillsDir)) return "project";
@@ -557,15 +607,19 @@ export function loadSkills(options: LoadSkillsOptions): LoadSkillsResult {
 			const stats = statSync(resolvedPath);
 			const source = getSource(resolvedPath);
 			if (stats.isDirectory()) {
+				// 显式目录沿用目录扫描规则，可一次性批量引入多个技能。
 				addSkills(loadSkillsFromDirInternal(resolvedPath, source, true));
 			} else if (stats.isFile() && resolvedPath.endsWith(".md")) {
+				// 单文件路径直接按技能文件解析，不必再走目录递归。
 				const result = loadSkillFromFile(resolvedPath, source);
 				if (result.skill) {
 					addSkills({ skills: [result.skill], diagnostics: result.diagnostics });
 				} else {
+					// 文件存在但无效时，仍保留解析产生的 warning，方便调用方展示原因。
 					allDiagnostics.push(...result.diagnostics);
 				}
 			} else {
+				// 非 markdown 普通文件不是合法技能输入，但这类问题只影响当前路径本身。
 				allDiagnostics.push({ type: "warning", message: "skill path is not a markdown file", path: resolvedPath });
 			}
 		} catch (error) {

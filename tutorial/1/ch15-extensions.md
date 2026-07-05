@@ -1,8 +1,6 @@
-# 第 15 章：Extension 系统 — 让产品长出新器官
+# Extension 系统 — 让产品长出新器官 `core/extensions`
 
-> **定位**：本章解析 pi 的 extension 系统如何在不修改核心代码的前提下扩展产品能力。
-> 前置依赖：第 10 章（Agent 类）、第 14 章（System Prompt 装配）。
-> 适用场景：当你想理解"能力外置"的具体实现，或者想为 pi 写 extension。
+本章解析 pi 的 extension 系统如何在不修改核心代码的前提下扩展产品能力。
 
 ## 哪些能力应该内建，哪些应该外置？
 

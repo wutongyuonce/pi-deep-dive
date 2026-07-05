@@ -66,11 +66,15 @@ export interface SessionHeader {
 	parentSession?: string;
 }
 
+/** 新建会话时可覆盖的选项 */
 export interface NewSessionOptions {
+	/** 可选的自定义会话 ID（默认使用 UUID v7） */
 	id?: string;
+	/** fork 时指向父会话文件路径 */
 	parentSession?: string;
 }
 
+/** 会话条目基类——所有条目类型共享的基础字段 */
 export interface SessionEntryBase {
 	type: string;
 	id: string;
@@ -78,41 +82,57 @@ export interface SessionEntryBase {
 	timestamp: string;
 }
 
+/** 消息条目——包含一条 LLM 对话消息 */
 export interface SessionMessageEntry extends SessionEntryBase {
 	type: "message";
 	message: AgentMessage;
 }
 
+/** 思考级别变更条目——标记用户在对话中切换了思考模式 */
 export interface ThinkingLevelChangeEntry extends SessionEntryBase {
 	type: "thinking_level_change";
 	thinkingLevel: string;
 }
 
+/** 模型变更条目——标记用户在对话中切换了 provider/model */
 export interface ModelChangeEntry extends SessionEntryBase {
 	type: "model_change";
 	provider: string;
 	modelId: string;
 }
 
+/** 压缩摘要条目——记录一次对话上下文压缩 */
 export interface CompactionEntry<T = unknown> extends SessionEntryBase {
 	type: "compaction";
+	/** 压缩生成的摘要文本（注入 LLM 上下文） */
 	summary: string;
+	/** 压缩后仍保留的第一条消息 ID */
 	firstKeptEntryId: string;
+	/** 压缩前上下文的 token 数量 */
 	tokensBefore: number;
-	/** 扩展专属数据（如 ArtifactIndex、结构化压缩的版本标记） */
+	/** 扩展专属数据 */
 	details?: T;
 	/** 由扩展生成时为 true，pi 生成时为 undefined/false（向后兼容） */
 	fromHook?: boolean;
 }
 
+/** 分支摘要条目——记录一次对话分支切换，附带被放弃路径的上下文摘要 */
 export interface BranchSummaryEntry<T = unknown> extends SessionEntryBase {
 	type: "branch_summary";
+	/** 分支起始点条目 ID，"root" 表示从根开始 */
 	fromId: string;
+	/** 涵盖被放弃路径的上下文摘要文本 */
 	summary: string;
 	/** 扩展专属数据（不发送给 LLM） */
 	details?: T;
 	/** 由扩展生成时为 true，pi 生成时为 false */
 	fromHook?: boolean;
+}
+
+/** 会话元数据条目（如用户自定义的会话显示名称） */
+export interface SessionInfoEntry extends SessionEntryBase {
+	type: "session_info";
+	name?: string;
 }
 
 /**
@@ -131,6 +151,21 @@ export interface CustomEntry<T = unknown> extends SessionEntryBase {
 	data?: T;
 }
 
+/**
+ * 自定义消息条目——供扩展向 LLM 上下文注入消息。
+ * 使用 customType 标识扩展的条目。
+ *
+ * 与 CustomEntry 不同，此类型参与 LLM 上下文。
+ * 内容在 buildSessionContext() 中转换为用户消息。
+ */
+export interface CustomMessageEntry<T = unknown> extends SessionEntryBase {
+	type: "custom_message";
+	customType: string;
+	content: string | (TextContent | ImageContent)[];
+	details?: T; // 扩展专属的元数据（不会发送给 LLM）
+	display: boolean; // 控制 TUI 渲染行为，false：完全隐藏，true：以特殊样式渲染（区别于普通用户消息）
+}
+
 /** 用户自定义的标签条目——用于在会话条目上添加书签/标记 */
 export interface LabelEntry extends SessionEntryBase {
 	type: "label";
@@ -138,43 +173,17 @@ export interface LabelEntry extends SessionEntryBase {
 	label: string | undefined;
 }
 
-/** 会话元数据条目（如用户自定义的会话显示名称） */
-export interface SessionInfoEntry extends SessionEntryBase {
-	type: "session_info";
-	name?: string;
-}
-
-/**
- * 自定义消息条目——供扩展向 LLM 上下文注入消息。
- * 使用 customType 标识扩展的条目。
- *
- * 与 CustomEntry 不同，此类型参与 LLM 上下文。
- * 内容在 buildSessionContext() 中转换为用户消息。
- * details 字段用于扩展专属的元数据（不会发送给 LLM）。
- *
- * display 控制 TUI 渲染行为：
- * - false：完全隐藏
- * - true：以特殊样式渲染（区别于普通用户消息）
- */
-export interface CustomMessageEntry<T = unknown> extends SessionEntryBase {
-	type: "custom_message";
-	customType: string;
-	content: string | (TextContent | ImageContent)[];
-	details?: T;
-	display: boolean;
-}
-
 /** 会话条目联合类型——通过 id/parentId 形成树结构（SessionManager 的读取方法返回此类型） */
 export type SessionEntry =
-	| SessionMessageEntry
-	| ThinkingLevelChangeEntry
-	| ModelChangeEntry
-	| CompactionEntry
-	| BranchSummaryEntry
-	| CustomEntry
-	| CustomMessageEntry
-	| LabelEntry
-	| SessionInfoEntry;
+	| SessionMessageEntry      // 对话消息（user/assistant/toolResult）
+	| ThinkingLevelChangeEntry // 思考级别变更
+	| ModelChangeEntry         // 模型切换
+	| CompactionEntry          // 上下文压缩摘要
+	| BranchSummaryEntry       // 分支摘要
+	| CustomEntry              // extension 数据（不进 LLM context）
+	| CustomMessageEntry       // extension 消息（进 LLM context）
+	| LabelEntry               // 用户书签
+	| SessionInfoEntry;        // 会话元数据（显示名称）
 
 /** 原始文件条目（包含文件头） */
 export type FileEntry = SessionHeader | SessionEntry;
@@ -189,14 +198,21 @@ export interface SessionTreeNode {
 	labelTimestamp?: string;
 }
 
+/** buildSessionContext() 返回的运行态对话上下文 */
 export interface SessionContext {
+	/** 按顺序排列的 LLM 消息列表（含压缩摘要、分支摘要等） */
 	messages: AgentMessage[];
+	/** 当前生效的思考级别 */
 	thinkingLevel: string;
+	/** 当前生效的模型信息（provider + modelId） */
 	model: { provider: string; modelId: string } | null;
 }
 
+/** 会话列表查询返回的会话摘要信息 */
 export interface SessionInfo {
+	/** JSONL 文件完整路径 */
 	path: string;
+	/** 会话唯一 ID */
 	id: string;
 	/** 创建会话时的工作目录（旧版会话为空字符串） */
 	cwd: string;
@@ -204,10 +220,15 @@ export interface SessionInfo {
 	name?: string;
 	/** 父会话文件路径（fork 时设置） */
 	parentSessionPath?: string;
+	/** 会话创建时间（来自 session header） */
 	created: Date;
+	/** 会话最后修改时间（优先最后一条消息时间戳） */
 	modified: Date;
+	/** 会话中的消息总条数 */
 	messageCount: number;
+	/** 首条用户消息的纯文本片段（用于列表预览） */
 	firstMessage: string;
+	/** 所有用户和助手消息的拼合文本（用于列表搜索） */
 	allMessagesText: string;
 }
 
@@ -234,7 +255,12 @@ function createSessionId(): string {
 	return uuidv7();
 }
 
-/** 生成唯一短 ID（8 个十六进制字符，带冲突检测） */
+/**
+ * 生成唯一短 ID（8 个十六进制字符）。
+ *
+ * 通过 `byId.has()` 检测已用 ID 避免碰撞，最多重试 100 次。
+ * 碰撞极罕见时退回到完整 UUID。
+ */
 function generateId(byId: { has(id: string): boolean }): string {
 	for (let i = 0; i < 100; i++) {
 		const id = randomUUID().slice(0, 8);
@@ -244,7 +270,12 @@ function generateId(byId: { has(id: string): boolean }): string {
 	return randomUUID();
 }
 
-/** 迁移 v1 → v2：添加 id/parentId 树结构。就地修改。 */
+/**
+ * v1 → v2 版本迁移：为所有条目补上 id / parentId，形成树状结构。
+ *
+ * 定位：启动时由 `setSessionFile()` → `migrateToCurrentVersion()` 调用。
+ * 就地修改 entries 数组，不创建新数组。
+ */
 function migrateV1ToV2(entries: FileEntry[]): void {
 	const ids = new Set<string>();
 	let prevId: string | null = null;
@@ -273,7 +304,12 @@ function migrateV1ToV2(entries: FileEntry[]): void {
 	}
 }
 
-/** 迁移 v2 → v3：将 hookMessage 角色重命名为 custom。就地修改。 */
+/**
+ * v2 → v3 版本迁移：将早期 `hookMessage` 角色重命名为 `custom`。
+ *
+ * 定位：与 migrateV1ToV2 在同一调用链，确保旧角色名不再出现在运行态。
+ * 就地修改 message 对象。
+ */
 function migrateV2ToV3(entries: FileEntry[]): void {
 	for (const entry of entries) {
 		if (entry.type === "session") {
@@ -292,8 +328,10 @@ function migrateV2ToV3(entries: FileEntry[]): void {
 }
 
 /**
- * 执行所有必要的迁移，将条目升级到当前版本。
- * 就地修改条目。返回是否应用了任何迁移。
+ * 执行所有必要的版本迁移，将条目升级到 ${CURRENT_SESSION_VERSION}。
+ *
+ * 定位：启动加载流程的统一入口。由 `loadEntriesFromFile()` 和 `setSessionFile()` 调用。
+ * 返回是否执行了任何迁移（调用方据此决定是否重写文件）。
  */
 function migrateToCurrentVersion(entries: FileEntry[]): boolean {
 	const header = entries.find((e) => e.type === "session") as SessionHeader | undefined;
@@ -307,12 +345,17 @@ function migrateToCurrentVersion(entries: FileEntry[]): boolean {
 	return true;
 }
 
-/** 导出供测试使用 */
+/** 导出供测试使用：对传入条目执行完整的版本迁移 */
 export function migrateSessionEntries(entries: FileEntry[]): void {
 	migrateToCurrentVersion(entries);
 }
 
-/** 导出供 compaction.test.ts 使用 */
+/**
+ * 将 JSONL 文本解析为文件条目数组。
+ *
+ * 定位：会话文件的反序列化入口。跳过空行和 JSON 格式错误的行。
+ * 不执行版本迁移——由调用方根据需要单独调用 migrateToCurrentVersion()。
+ */
 export function parseSessionEntries(content: string): FileEntry[] {
 	const entries: FileEntry[] = [];
 	const lines = content.trim().split("\n");
@@ -330,6 +373,12 @@ export function parseSessionEntries(content: string): FileEntry[] {
 	return entries;
 }
 
+/**
+ * 从给定的会话条目列表中获取最近一次压缩条目。
+ *
+ * 定位：供 `buildSessionContext()` 使用，遍历时不会占用主构建逻辑。
+ * 从列表末尾反向扫描，匹配第一条 compaction 类型条目。
+ */
 export function getLatestCompactionEntry(entries: SessionEntry[]): CompactionEntry | null {
 	for (let i = entries.length - 1; i >= 0; i--) {
 		if (entries[i].type === "compaction") {
@@ -463,7 +512,13 @@ export function getDefaultSessionDir(cwd: string, agentDir: string = getDefaultA
 	return sessionDir;
 }
 
-/** 导出供测试使用 */
+/**
+ * 从 JSONL 文件中加载所有文件条目。
+ *
+ * 定位：`setSessionFile()` 和静态工厂方法的文件反序列化入口。
+ * 会校验首行一定是合法的 session header，否则返回空数组。
+ * 不在此处执行版本迁移——由 `setSessionFile()` 完成。
+ */
 export function loadEntriesFromFile(filePath: string): FileEntry[] {
 	const resolvedFilePath = normalizePath(filePath);
 	if (!existsSync(resolvedFilePath)) return [];
@@ -492,6 +547,12 @@ export function loadEntriesFromFile(filePath: string): FileEntry[] {
 	return entries;
 }
 
+/**
+ * 快速校验文件是否为合法会话文件。
+ *
+ * 只读取并解析首行 512 字节，避免完整解析大文件。
+ * 通过 `openSync + readSync` 实现无缓冲同步检测。
+ */
 function isValidSessionFile(filePath: string): boolean {
 	try {
 		const fd = openSync(filePath, "r");
@@ -507,7 +568,12 @@ function isValidSessionFile(filePath: string): boolean {
 	}
 }
 
-/** Exported for testing */
+/**
+ * 在会话目录中找到最近修改的 .jsonl 文件。
+ *
+ * 定位：`SessionManager.continueRecent()` 的会话恢复入口。
+ * 遍历目录下所有 .jsonl，先快速校验合法性，再按 mtime 降序排序取最新一个。
+ */
 export function findMostRecentSession(sessionDir: string): string | null {
 	const resolvedSessionDir = normalizePath(sessionDir);
 	try {
@@ -524,10 +590,12 @@ export function findMostRecentSession(sessionDir: string): string | null {
 	}
 }
 
+/** 类型守卫：判定一条 AgentMessage 是否具备 role + content 字段 */
 function isMessageWithContent(message: AgentMessage): message is Message {
 	return typeof (message as Message).role === "string" && "content" in message;
 }
 
+/** 提取 Message 中的纯文本内容（多模态时只取 text block 并拼接） */
 function extractTextContent(message: Message): string {
 	const content = message.content;
 	if (typeof content === "string") {
@@ -539,6 +607,13 @@ function extractTextContent(message: Message): string {
 		.join(" ");
 }
 
+/**
+ * 从文件条目列表中提取用户/助手最后活跃时间。
+ *
+ * 定位：`getSessionModifiedDate()` 的时间戳来源。
+ * 优先读取消息的 `timestamp` 字段，退回到条目的 `timestamp` 字符串再解析。
+ * 没有 user/assistant 消息时返回 undefined。
+ */
 function getLastActivityTime(entries: FileEntry[]): number | undefined {
 	let lastActivityTime: number | undefined;
 
@@ -567,6 +642,13 @@ function getLastActivityTime(entries: FileEntry[]): number | undefined {
 	return lastActivityTime;
 }
 
+/**
+ * 计算会话的“最后修改时间”。
+ *
+ * 优先级：最后一条 user/assistant 消息的时间戳
+ *       → session header 的 timestamp
+ *       → 文件的 fs.Stats.mtime
+ */
 function getSessionModifiedDate(entries: FileEntry[], header: SessionHeader, statsMtime: Date): Date {
 	const lastActivityTime = getLastActivityTime(entries);
 	if (typeof lastActivityTime === "number" && lastActivityTime > 0) {
@@ -577,6 +659,12 @@ function getSessionModifiedDate(entries: FileEntry[], header: SessionHeader, sta
 	return !Number.isNaN(headerTime) ? new Date(headerTime) : statsMtime;
 }
 
+/**
+ * 解析单个会话文件并返回会话摘要信息。
+ *
+ * 定位：`listSessionsFromDir()` → `buildSessionInfosWithConcurrency()` 的并发单元。
+ * 异步读取文件，统计消息数、首条用户消息及全部消息文本。
+ */
 async function buildSessionInfo(filePath: string): Promise<SessionInfo | null> {
 	try {
 		const content = await readFile(filePath, "utf8");
@@ -647,10 +735,19 @@ async function buildSessionInfo(filePath: string): Promise<SessionInfo | null> {
 	}
 }
 
+/** 会话列表加载进度回调：loaded = 已完成数，total = 总数 */
 export type SessionListProgress = (loaded: number, total: number) => void;
 
+/** 同时加载会话信息的最大并发数 */
 const MAX_CONCURRENT_SESSION_INFO_LOADS = 10;
 
+/**
+ * 带并发限制的会话信息批量构建。
+ *
+ * 定位：`listSessionsFromDir()` 的底层并发调度器。
+ * 通过 `Promise.race` + while 循环实现最多 MAX_CONCURRENT_SESSION_INFO_LOADS 个并发任务。
+ * 每完成一个文件就回调 onLoaded() 以驱动进度条。
+ */
 async function buildSessionInfosWithConcurrency(
 	files: string[],
 	onLoaded: () => void,
@@ -691,6 +788,12 @@ async function buildSessionInfosWithConcurrency(
 	return results;
 }
 
+/**
+ * 列出指定目录下所有有效会话的摘要信息。
+ *
+ * 定位：`SessionManager.list()` 和 `listAll()` 的公共实现。
+ * 过滤 .jsonl 文件，并发解析每个文件，支持下层进度回调。
+ */
 async function listSessionsFromDir(
 	dir: string,
 	onProgress?: SessionListProgress,
@@ -735,18 +838,40 @@ async function listSessionsFromDir(
  * 该方法处理压缩摘要并从根节点遍历到当前叶子节点。
  */
 export class SessionManager {
+	/** 会话唯一 ID（UUID v7） */
 	private sessionId: string = "";
+	/** 当前会话的 JSONL 文件路径（未持久化时为 undefined） */
 	private sessionFile: string | undefined;
+	/** 会话文件存放目录 */
 	private sessionDir: string;
+	/** 创建会话时的工作目录 */
 	private cwd: string;
+	/** 是否启用文件持久化 */
 	private persist: boolean;
+	/**
+	 * 磁盘内容与 fileEntries 一致的标记。
+	 * false = 内存有变更但尚未落盘，下次写盘使用批量全写。
+	 */
 	private flushed: boolean = false;
+	/** 内存中的全部文件条目（含 session header） */
 	private fileEntries: FileEntry[] = [];
+	/** id → 条目的快速查找索引 */
 	private byId: Map<string, SessionEntry> = new Map();
+	/** targetId → 标签文本的快速查找索引 */
 	private labelsById: Map<string, string> = new Map();
+	/** targetId → 最新标签时间戳的快速查找索引 */
 	private labelTimestampsById: Map<string, string> = new Map();
+	/** 当前会话树的叶子节点 ID（null 表示无条目） */
 	private leafId: string | null = null;
 
+	/**
+	 * 构造 SessionManager（私有，通过静态工厂方法创建）。
+	 *
+	 * @param cwd 工作目录
+	 * @param sessionDir 会话文件存放目录
+	 * @param sessionFile 要打开的会话文件路径（undefined 则新建）
+	 * @param persist 是否启用文件持久化
+	 */
 	private constructor(cwd: string, sessionDir: string, sessionFile: string | undefined, persist: boolean) {
 		this.cwd = resolvePath(cwd);
 		this.sessionDir = normalizePath(sessionDir);
@@ -762,7 +887,15 @@ export class SessionManager {
 		}
 	}
 
-	/** 切换到不同的会话文件（用于恢复和分支操作） */
+	/**
+	 * 切换到不同的会话文件（用于恢复和分支操作）。
+	 *
+	 * 流程：
+	 * 1. 加载文件条目
+	 * 2. 校验会话头完整性（损坏时自动重建）
+	 * 3. 执行版本迁移（必要时重写文件）
+	 * 4. 重建内存索引
+	 */
 	setSessionFile(sessionFile: string): void {
 		this.sessionFile = resolvePath(sessionFile);
 		if (existsSync(this.sessionFile)) {
@@ -795,6 +928,14 @@ export class SessionManager {
 		}
 	}
 
+	/**
+	 * 新建空白会话，写入 SessionHeader 作为第一条文件条目。
+	 *
+	 * 定位：构造函数、setSessionFile、createBranchedSession、forkFrom 等流程的公共初始化入口。
+	 * 持久化模式下会自动生成 `{timestamp}_{id}.jsonl` 文件路径。
+	 *
+	 * @returns 新建的会话文件路径（非持久化模式下为 undefined）
+	 */
 	newSession(options?: NewSessionOptions): string | undefined {
 		this.sessionId = options?.id ?? createSessionId();
 		const timestamp = new Date().toISOString();
@@ -819,6 +960,12 @@ export class SessionManager {
 		return this.sessionFile;
 	}
 
+	/**
+	 * 从 fileEntries 重建内存索引（byId、leafId、labelsById）。
+	 *
+	 * 调用时机：setSessionFile 加载或重写文件后、createBranchedSession 构建后。
+	 * 索引规则：顺序扫描跳过 session header，每个非 header 条目都会覆盖同一个键，最后一个生效。
+	 */
 	private _buildIndex(): void {
 		this.byId.clear();
 		this.labelsById.clear();
@@ -841,32 +988,51 @@ export class SessionManager {
 		}
 	}
 
+	/**
+	 * 将当前 fileEntries 全量覆盖写回 JSONL 文件。
+	 *
+	 * 调用于：版本迁移后、createBranchedSession 后。
+	 * 仅在 persist=true 且有 sessionFile 时生效。
+	 */
 	private _rewriteFile(): void {
 		if (!this.persist || !this.sessionFile) return;
 		const content = `${this.fileEntries.map((e) => JSON.stringify(e)).join("\n")}\n`;
 		writeFileSync(this.sessionFile, content);
 	}
 
+	/** 返回当前会话管理器是否使用文件持久化存储 */
 	isPersisted(): boolean {
 		return this.persist;
 	}
 
+	/** 返回创建会话时记录的工作目录 */
 	getCwd(): string {
 		return this.cwd;
 	}
 
+	/** 返回当前会话文件的存放目录路径 */
 	getSessionDir(): string {
 		return this.sessionDir;
 	}
 
+	/** 返回当前会话的唯一 ID */
 	getSessionId(): string {
 		return this.sessionId;
 	}
 
+	/** 返回当前会话的 JSONL 文件路径（未持久化时为 undefined） */
 	getSessionFile(): string | undefined {
 		return this.sessionFile;
 	}
 
+	/**
+	 * 将条目异步落盘（确保内存变更可靠到达磁盘）。
+	 *
+	 * 写入策略：
+	 * - 当前文件中还没有 assistant 消息 → 延迟到第一条 assistant 到达时批量写入
+	 * - 有 assistant 但尚未批量写入 → 一次性写入所有 fileEntries
+	 * - 已经批量写入过 → 追加当前条目到文件尾部
+	 */
 	_persist(entry: SessionEntry): void {
 		if (!this.persist || !this.sessionFile) return;
 
@@ -889,6 +1055,11 @@ export class SessionManager {
 		}
 	}
 
+	/**
+	 * 将条目追加到内存并异步落盘。
+	 *
+	 * 定位：所有 append*() 方法的统一出口。更新 fileEntries、byId、leafId 之后调用 _persist。
+	 */
 	private _appendEntry(entry: SessionEntry): void {
 		this.fileEntries.push(entry);
 		this.byId.set(entry.id, entry);
@@ -1037,14 +1208,17 @@ export class SessionManager {
 	// 树遍历
 	// =========================================================================
 
+	/** 返回当前叶子节点 ID（新条目将作为该节点的子节点） */
 	getLeafId(): string | null {
 		return this.leafId;
 	}
 
+	/** 返回当前叶子节点条目（新条目将作为该条目的子节点） */
 	getLeafEntry(): SessionEntry | undefined {
 		return this.leafId ? this.byId.get(this.leafId) : undefined;
 	}
 
+	/** 按 ID 查找任意一条会话条目 */
 	getEntry(id: string): SessionEntry | undefined {
 		return this.byId.get(id);
 	}

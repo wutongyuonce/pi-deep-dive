@@ -114,6 +114,7 @@ skills 放置文件夹：.agents/skills/ .cloude/skills .pi/agent/skills
 session 相关
 
 * `/name xxx` — 命名本 session 对话
+* `/resume` — 恢复某个 session 会话
 * `/session` — 显示本 session 信息，包括 name、file（jsonl 存放地址，一般在 .pi/agent/sessions 文件夹下）、id、对话数、token 数、cost
 * `/tree` — 跳转到 session 某个对话树节点位置
 * `/fork` `/clone`

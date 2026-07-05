@@ -60,11 +60,7 @@ sequenceDiagram
 
 
 
-# 第 12 章：Compaction — 把无限对话装进有限窗口
-
-> **定位**：本章解析 pi 如何在不丢失关键信息的前提下压缩超长对话。
-> 前置依赖：第 11 章（会话树）、第 8 章（循环引擎的 transformContext）。
-> 适用场景：当你想理解 agent 产品如何处理 context overflow，或者想设计自己的上下文管理策略。
+# Compaction — 把无限对话装进有限窗口 `core/compaction`
 
 ## Context window 快满了，怎么办？
 

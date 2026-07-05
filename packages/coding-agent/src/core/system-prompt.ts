@@ -47,6 +47,7 @@ export interface BuildSystemPromptOptions {
  * 2. 默认模式：生成包含角色定义、工具列表、使用指南、文档路径的完整提示
  */
 export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
+	// 先把调用方传入的构建参数解构出来，后续按“基础 prompt / 上下文 / 技能 / 运行时信息”分阶段组装。
 	const {
 		customPrompt,
 		selectedTools,
@@ -57,17 +58,22 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 		contextFiles: providedContextFiles,
 		skills: providedSkills,
 	} = options;
+
+	// cwd 在 prompt 末尾会作为环境信息注入；统一转成正斜杠，避免 Windows 反斜杠被模型误读成转义符。
 	const resolvedCwd = cwd;
 	const promptCwd = resolvedCwd.replace(/\\/g, "/");
 
+	// 生成 YYYY-MM-DD 格式的当天日期，作为稳定且易读的运行时上下文注入到 system prompt 末尾。
 	const now = new Date();
 	const year = now.getFullYear();
 	const month = String(now.getMonth() + 1).padStart(2, "0");
 	const day = String(now.getDate()).padStart(2, "0");
 	const date = `${year}-${month}-${day}`;
 
+	// appendSystemPrompt 是可选补充段落；有值时前面补两个换行，便于和前一段正文自然分隔。
 	const appendSection = appendSystemPrompt ? `\n\n${appendSystemPrompt}` : "";
 
+	// 调用方可能不传上下文文件或技能列表，这里统一兜底为空数组，简化后续拼接分支判断。
 	const contextFiles = providedContextFiles ?? [];
 	const skills = providedSkills ?? [];
 
@@ -75,7 +81,7 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 	if (customPrompt) {
 		let prompt = customPrompt;
 
-		// 步骤 1：先拼接调用方附加的补充段落。
+		// 先拼接调用方附加的补充段落。
 		if (appendSection) {
 			prompt += appendSection;
 		}
@@ -90,13 +96,15 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 			prompt += "</project_context>\n";
 		}
 
-		// 追加技能列表（仅当 read 工具可用时）
+		// 追加技能列表
+		// - 如果 selectedTools 没传，说明没有自定义限制工具列表。这时默认认为 read 是可用的。
+		// - 如果传了工具列表，就检查里面是否包含 "read"。
 		const customPromptHasRead = !selectedTools || selectedTools.includes("read");
 		if (customPromptHasRead && skills.length > 0) {
 			prompt += formatSkillsForPrompt(skills);
 		}
 
-		// 步骤 2：最后统一追加运行时上下文，保证模型知道当前日期和 cwd。
+		// 最后统一追加运行时上下文，保证模型知道当前日期和 cwd。
 		prompt += `\nCurrent date: ${date}`;
 		prompt += `\nCurrent working directory: ${promptCwd}`;
 
@@ -111,9 +119,9 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 
 	// 步骤 2：根据 selectedTools 和 toolSnippets 计算真正可见的工具列表。
 	const tools = selectedTools || ["read", "bash", "edit", "write"];
-	const visibleTools = tools.filter((name) => !!toolSnippets?.[name]);
+	const visibleTools = tools.filter((name) => !!toolSnippets?.[name]); // 只保留那些在 toolSnippets 里能找到非空说明的工具
 	const toolsList =
-		visibleTools.length > 0 ? visibleTools.map((name) => `- ${name}: ${toolSnippets![name]}`).join("\n") : "(none)";
+		visibleTools.length > 0 ? visibleTools.map((name) => `- ${name}: ${toolSnippets![name]}`).join("\n") : "(none)"; // 把筛出来的工具格式化成 prompt 里能直接插入的文本
 
 	// 步骤 3：根据工具组合生成指南，并用 Set 去重，避免提示词重复。
 	const guidelinesList: string[] = [];
@@ -140,9 +148,10 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 	}
 
 	for (const guideline of promptGuidelines ?? []) {
-		const normalized = guideline.trim();
+		// 遍历 promptGuidelines
+		const normalized = guideline.trim(); // 对每条 guideline 做首尾去空格处理
 		if (normalized.length > 0) {
-			addGuideline(normalized);
+			addGuideline(normalized); // 把清洗后的 guideline 加进最终集合
 		}
 	}
 
@@ -175,7 +184,7 @@ Pi documentation (read only when the user asks about pi itself, its SDK, extensi
 		prompt += appendSection;
 	}
 
-	// 步骤 5：把项目上下文文件和技能说明追加到默认提示后部。
+	// 把项目上下文文件和技能说明追加到默认提示后部。
 	if (contextFiles.length > 0) {
 		prompt += "\n\n<project_context>\n\n";
 		prompt += "Project-specific instructions and guidelines:\n\n";
@@ -190,7 +199,7 @@ Pi documentation (read only when the user asks about pi itself, its SDK, extensi
 		prompt += formatSkillsForPrompt(skills);
 	}
 
-	// 步骤 6：统一补上运行时日期和 cwd，给模型提供时空上下文。
+	// 统一补上运行时日期和 cwd，给模型提供时空上下文。
 	prompt += `\nCurrent date: ${date}`;
 	prompt += `\nCurrent working directory: ${promptCwd}`;
 

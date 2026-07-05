@@ -8,6 +8,8 @@
 
 它的公共接口已经非常说明问题：
 
+
+
 - `getExtensions()`
 - `getSkills()`
 - `getPrompts()`
@@ -547,3 +549,123 @@ tool 定义同时服务于：
 > `coding-agent` 的资源系统不是“加载一些附属文件”。
 > 它实际上是在决定：
 > **当前这个 session 到底拥有哪些规则、能力、工具、模板和 UI 外观。**
+
+
+
+
+
+```typescript
+~/.pi/agent/          ← 全局配置（所有项目）
+  ├── settings.json
+  ├── AGENTS.md
+  └── SYSTEM.md
+
+/project/.pi/         ← 项目配置（覆盖全局）
+  ├── settings.json
+  └── AGENTS.md
+
+/project/packages/    ← 目录上溯
+  └── legacy/
+      └── AGENTS.md   ← 目录级规则（追加）
+```
+
+
+
+## AGENTS.md 的拼接规则
+
+`AGENTS.md`（或 `CLAUDE.md`）的规则不同于 settings — 它是**拼接**而非覆盖。
+
+### 目录树上溯发现
+
+`loadProjectContextFiles` 函数从当前工作目录向上搜索，收集路径上所有的 context 文件：
+
+```typescript
+// packages/coding-agent/src/core/resource-loader.ts:58-113（简化）
+
+function loadProjectContextFiles(options): Array<{ path; content }> {
+  const contextFiles = [];
+  const seenPaths = new Set();
+
+  // 1. 先加载全局 context（~/.pi/agent/AGENTS.md 或 CLAUDE.md）
+  const globalContext = loadContextFileFromDir(resolvedAgentDir);
+  if (globalContext) {
+    contextFiles.push(globalContext);
+    seenPaths.add(globalContext.path);
+  }
+
+  // 2. 从 cwd 向上遍历到根目录
+  const ancestorContextFiles = [];
+  let currentDir = resolvedCwd;
+  while (true) {
+    const contextFile = loadContextFileFromDir(currentDir);
+    if (contextFile && !seenPaths.has(contextFile.path)) {
+      ancestorContextFiles.unshift(contextFile); // 最远的在前
+      seenPaths.add(contextFile.path);
+    }
+    if (currentDir === root) break;
+    currentDir = resolve(currentDir, "..");
+  }
+
+  // 3. 全局在前，祖先目录从远到近排列
+  contextFiles.push(...ancestorContextFiles);
+  return contextFiles;
+}
+```
+
+`loadContextFileFromDir` 在每个目录中依次查找 `AGENTS.md` 和 `CLAUDE.md`，找到第一个就返回。这意味着如果同一个目录同时有 `AGENTS.md` 和 `CLAUDE.md`，只有 `AGENTS.md` 会被加载（它在候选列表中排第一）。
+
+```typescript
+// packages/coding-agent/src/core/resource-loader.ts:58-74
+
+function loadContextFileFromDir(dir: string) {
+  const candidates = ["AGENTS.md", "CLAUDE.md"];
+  for (const filename of candidates) {
+    const filePath = join(dir, filename);
+    if (existsSync(filePath)) {
+      return { path: filePath, content: readFileSync(filePath, "utf-8") };
+    }
+  }
+  return null;
+}
+```
+
+最终的拼接顺序：
+
+```
+1. ~/.pi/agent/AGENTS.md         ← 全局规则（最先注入）
+2. /AGENTS.md                    ← 根目录（如果有）
+3. /project/AGENTS.md            ← 项目根目录
+4. /project/packages/AGENTS.md   ← 子目录
+5. /project/packages/legacy/AGENTS.md  ← 当前工作目录
+```
+
+三者**同时生效**，后者可以补充或细化前者的规则。这些文件最终被注入到 system prompt 的 `# Project Context` 区域（见第 14 章）。
+
+### SYSTEM.md 的替换规则
+
+`SYSTEM.md` 的规则又不同 — 它是**替换**而非拼接：
+
+```
+如果项目 .pi/SYSTEM.md 存在 → 替换默认 system prompt
+否则如果全局 SYSTEM.md 存在 → 替换默认 system prompt
+否则 → 使用默认 system prompt
+```
+
+```typescript
+// packages/coding-agent/src/core/resource-loader.ts:834-846
+
+private discoverSystemPromptFile(): string | undefined {
+  const projectPath = join(this.cwd, CONFIG_DIR_NAME, "SYSTEM.md");
+  if (existsSync(projectPath)) return projectPath;
+  const globalPath = join(this.agentDir, "SYSTEM.md");
+  if (existsSync(globalPath)) return globalPath;
+  return undefined;
+}
+```
+
+pi 还支持 `APPEND_SYSTEM.md` — 一个追加到 system prompt 末尾的文件，发现逻辑与 SYSTEM.md 相同（项目优先于全局）。这让用户可以在不替换默认 prompt 的情况下追加内容。
+
+为什么 AGENTS.md 拼接而 SYSTEM.md 替换？
+
+因为它们的语义不同。AGENTS.md 是"额外的规则" — 目录级规则不应该消灭全局规则，而是在全局规则的基础上添加新的约束。SYSTEM.md 是"完全自定义的 system prompt" — 如果用户要自定义 system prompt，通常是想完全控制 prompt 的内容，而不是在默认 prompt 后面追加一段。
+
