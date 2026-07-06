@@ -63,53 +63,327 @@ await session.prompt("帮我阅读当前项目的入口并解释启动流程");
 
 ```text
 六、产品外壳层
-   cli.ts: Node CLI 真正入口，负责进程级初始化后转给 `main.ts`
-   main.ts: 启动编排器，负责参数解析、session 选择、runtime 创建、模式分发
-   bun/cli.ts: Bun 打包产物对应的入口壳，解决 Bun 环境下的启动适配
+    cli.ts: Node CLI 真正入口，负责进程级初始化后转给 main.ts
+    main.ts: 启动编排器，负责参数解析、session 选择、runtime 创建、模式分发
+    
+    bun/cli.ts: Bun 打包产物入口壳，解决 Bun 环境下的启动适配
+    bun/restore-sandbox-env.ts: Bun 沙箱环境变量恢复，解决 Bun 打包后环境差异
+    
+    config.ts: 全局常量定义（APP_NAME、路径、环境变量 key、版本检查等）
+    migrations.ts: 应用级数据迁移（旧版本目录结构升级等）
+    index.ts: 公共 API 聚合导出，定义对外的模块边界
+    package-manager-cli.ts: 包管理 CLI 入口，独立于主 agent 进程运行
+    
+    cli/args.ts: CLI 参数类型定义和解析（--model、--session、--resume 等所有 flag）
+    cli/config-selector.ts: 启动时配置源选择（交互式或参数驱动）
+    cli/file-processor.ts: 文件参数处理器（--file 传入的文件预处理）
+    cli/initial-message.ts: 启动时的初始消息处理（--prompt / 管道输入等）
+    cli/list-models.ts: --list-models 命令实现，列出所有可用 provider/model
+    cli/session-picker.ts: --resume 的交互式会话选择器 UI
 
 五、运行模式层
-   modes/interactive/*: 交互式 TUI 壳，包含 `InteractiveMode`、组件、选择器、主题系统
-   modes/print-mode.ts: 一次性执行壳，负责把 session 输出成纯文本或 JSON 事件流
-   modes/rpc/*: headless RPC 壳，把 `AgentSessionRuntime` 暴露成 JSONL 协议
+    modes/index.ts: 运行模式统一导出
+    modes/print-mode.ts: 一次性执行壳，把 session 输出成纯文本或 JSON 事件流
+    modes/interactive/interactive-mode.ts: 交互式 TUI 主控制器，管理输入循环和组件编排
+    modes/interactive/theme/theme.ts: 主题系统，管理颜色方案和 UI 样式
+    modes/interactive/components/index.ts: 组件导出聚合
+    modes/interactive/components/assistant-message.ts: 助手消息渲染组件
+    modes/interactive/components/user-message.ts: 用户消息渲染组件
+    modes/interactive/components/user-message-selector.ts: 用户消息选择器（/resume 时选择起点）
+    modes/interactive/components/custom-message.ts: 自定义消息渲染组件
+    modes/interactive/components/custom-editor.ts: 自定义编辑器组件（command mode）
+    modes/interactive/components/footer.ts: 状态栏组件（token/费用/耗时显示）
+    modes/interactive/components/settings-selector.ts: /settings 配置面板
+    modes/interactive/components/model-selector.ts: /model 切换面板
+    modes/interactive/components/scoped-models-selector.ts: Ctrl+P 限定模型切换面板
+    modes/interactive/components/thinking-selector.ts: /thinking 思维级别切换面板
+    modes/interactive/components/auth-selector.ts: /login 认证提供方选择面板
+    modes/interactive/components/theme-selector.ts: /theme 主题切换面板
+    modes/interactive/components/tree-selector.ts: /tree 会话树导航面板
+    modes/interactive/components/session-selector.ts: /session 会话列表面板
+    modes/interactive/components/session-selector-search.ts: 会话搜索过滤
+    modes/interactive/components/config-selector.ts: 配置选项选择器
+    modes/interactive/components/extension-selector.ts: 扩展选择面板
+    modes/interactive/components/extension-input.ts: 扩展输入组件
+    modes/interactive/components/extension-editor.ts: 扩展编辑器组件
+    modes/interactive/components/show-images-selector.ts: 图片显示配置面板
+    modes/interactive/components/bash-execution.ts: bash 命令执行 UI 组件
+    modes/interactive/components/tool-execution.ts: 工具调用执行状态 UI
+    modes/interactive/components/diff.ts: 代码 diff 渲染组件
+    modes/interactive/components/skill-invocation-message.ts: 技能调用消息渲染
+    modes/interactive/components/compaction-summary-message.ts: 压缩摘要消息渲染
+    modes/interactive/components/branch-summary-message.ts: 分支摘要消息渲染
+    modes/interactive/components/keybinding-hints.ts: 快捷键提示组件
+    modes/interactive/components/login-dialog.ts: 登录对话框
+    modes/interactive/components/dynamic-border.ts: 动态边框渲染
+    modes/interactive/components/bordered-loader.ts: 带边框的加载动画
+    modes/interactive/components/countdown-timer.ts: 倒计时组件（重试延迟显示）
+    modes/interactive/components/visual-truncate.ts: 可视化截断组件
+    modes/interactive/components/armin.ts: armin 特效组件
+    modes/interactive/components/earendil-announcement.ts: 公告栏组件
+    modes/rpc/rpc-mode.ts: headless RPC 模式主控制器，把 AgentSessionRuntime 暴露为 JSONL 协议
+    modes/rpc/rpc-types.ts: RPC 协议类型定义（请求/响应/事件类型）
+    modes/rpc/rpc-client.ts: RPC 客户端实现，管理 stdin/stdout JSONL 通信
+    modes/rpc/jsonl.ts: JSONL 解析与序列化工具
 
 四、会话运行时层
-   core/agent-session-runtime.ts: 当前激活 session 的宿主，负责 `new/resume/fork/import/switch`
-   core/agent-session-services.ts: cwd 绑定的基础设施工厂，集中创建 settings、auth、model registry、resource loader
-   core/sdk.ts: 会话装配入口，负责把模型、工具、session manager、resource loader 拼成 `AgentSession`
-   core/agent-session.ts: 产品核心对象，负责 prompt、持久化、扩展绑定、bash、compaction、tree navigation
+    core/agent-session-runtime.ts: 当前激活 session 的宿主，负责 new/resume/fork/import/switch
+    core/agent-session-services.ts: cwd 绑定的基础设施工厂，集中创建 settings、auth、model registry、resource loader
+    core/sdk.ts: 会话装配入口，把模型、工具、session manager、resource loader 拼成 AgentSession
+    core/agent-session.ts: 产品核心对象，负责 prompt、持久化、扩展绑定、bash、compaction、tree navigation
 
 三、产品机制层
-   core/session-manager.ts: 负责 session tree、JSONL entry 持久化、上下文重建
-   core/compaction/*: 负责长对话压缩、branch summary、文件操作摘要和切点计算
-   core/settings-manager.ts: 负责全局/项目 settings 加载、深度合并、迁移与持久化
-   core/system-prompt.ts: 负责把工具、context files、skills、日期、cwd 拼成最终 system prompt
-   core/resource-loader.ts: 负责统一装载 extensions、skills、prompts、themes、AGENTS.md、SYSTEM.md
-   core/model-registry.ts、model-resolver.ts: 负责 provider/model 可见性、默认模型与 CLI 覆盖解析
-   core/prompt-templates.ts: 负责 prompt template 的发现、解析与展开
-   core/package-manager.ts: 负责把 settings 中声明的包来源解析成资源路径
+    core/session-manager.ts: session tree、JSONL entry 持久化、上下文重建
+    core/compaction/*: 长对话压缩、branch summary、文件操作摘要和切点计算
+    core/settings-manager.ts: 全局/项目 settings 加载、深度合并、迁移与持久化
+    core/system-prompt.ts: 把工具、context files、skills、日期、cwd 拼成最终 system prompt
+    core/resource-loader.ts: 统一装载 extensions、skills、prompts、themes、AGENTS.md、SYSTEM.md
+    core/model-registry.ts: provider/model 注册表，API key 解析和模型发现
+    core/model-resolver.ts: 默认模型选择、CLI 覆盖、scoped models 优先级解析
+    core/prompt-templates.ts: prompt template 的发现、解析与运行时展开
+    core/package-manager.ts: 把 settings 中声明的包来源（npm/git/local）解析成资源路径
+    core/bash-executor.ts: bash 命令执行引擎，在伪终端中运行命令并流式返回输出
+    core/exec.ts: 子进程生命周期封装，管理 spawn/kill/signal 和输出缓冲
+    core/messages.ts: 自定义消息类型编码（BashExecutionMessage/CustomMessage）与转换器
+    core/slash-commands.ts: 斜杠命令解析与路由（/model /session /settings /name 等）
+    core/keybindings.ts: 快捷键常量和默认绑定（Ctrl+P/Ctrl+O/Escape 等）及处理函数
+    core/output-guard.ts: 模型输出守卫，拦截敏感信息、过滤无效输出
+    core/session-cwd.ts: session 文件头中的 cwd 解析与恢复
 
 二、扩展与工具层
-   core/extensions/*: extension 协议、加载器、运行器和桥接层，负责把代码插件接入 session 生命周期
-   core/skills.ts: - 负责 skill 发现、frontmatter 解析、冲突处理和 `<available_skills>` 注入
-   core/tools/*: 内建工具集合，既定义工具 schema，也实现 read/edit/write/bash/find/grep/ls 等执行逻辑
+    core/extensions/*: extension 协议定义、加载器、运行器和桥接层
+    core/extensions/types.ts: extension 类型系统（Extension、ExtensionRuntime、事件/钩子接口）
+    core/extensions/loader.ts: extension 加载器，从文件系统加载 d.ts/js 扩展代码
+    core/extensions/runner.ts: extension 运行时，管理生命周期和事件分发
+    core/extensions/wrapper.ts: extension 包装器，给 agent 暴露 API 入口
+    core/extensions/index.ts: extension 模块统一导出
+    core/skills.ts: skill 发现、frontmatter 解析、冲突处理和 <available_skills> 注入
+    core/tools/index.ts: 内建工具集合统一导出和注册
+    core/tools/read.ts: 文件读取工具（schema + 执行逻辑）
+    core/tools/edit.ts: 文件编辑工具（基于 SearchReplace 模式）
+    core/tools/write.ts: 文件写入工具
+    core/tools/bash.ts: bash 命令执行工具
+    core/tools/grep.ts: 文本搜索工具（ripgrep 封装）
+    core/tools/find.ts: 文件名搜索工具
+    core/tools/ls.ts: 目录列表工具
+    core/tools/edit-diff.ts: 编辑差异生成和预览
+    core/tools/tool-definition-wrapper.ts: AgentTool → ToolDefinition 包装器
+    core/tools/file-mutation-queue.ts: 文件变更队列，管理批量编辑的顺序执行
+    core/tools/output-accumulator.ts: 工具输出累积器，聚集流式输出为完整结果
+    core/tools/truncate.ts: 输出截断工具，防止过大的工具结果爆上下文
+    core/tools/render-utils.ts: 工具结果渲染辅助函数
+    core/tools/path-utils.ts: 路径安全检查与规范化
 
 一、基础支撑层
-   utils/*: 各种通用基础设施，比如 shell、路径、图片、剪贴板、HTML 导出、版本检查
-   core/event-bus.ts: 提供轻量事件总线，给扩展和运行时传播内部事件
-   core/messages.ts: 负责消息内容辅助逻辑和若干消息级工具函数
-   core/timings.ts diagnostics.ts: 提供耗时统计和诊断输出，辅助运行时观测
+    core/event-bus.ts: 轻量事件总线，给扩展和运行时传播内部事件
+    core/messages.ts: 消息内容辅助逻辑和消息级工具函数
+    core/timings.ts: 耗时统计，记录工具调用、LLM 请求、压缩各阶段耗时
+    core/diagnostics.ts: 诊断信息收集，/diagnostics 命令的数据来源
+    core/auth-storage.ts: API 密钥持久化存储，支持加密和跨进程共享
+    core/auth-guidance.ts: 认证引导文案生成，未登录时的提示信息
+    core/telemetry.ts: 匿名遥测数据收集和上报
+    core/footer-data-provider.ts: 状态栏数据计算（token 数、费用、耗时等）
+    core/http-dispatcher.ts: HTTP 请求调度器，管理重试、超时和并发
+    core/resolve-config-value.ts: 配置值解析工具，统一处理 env var 和 settings 读取
+    core/provider-display-names.ts: provider ID 到展示名称的映射（如 anthropic-vertex → Anthropic）
+    core/source-info.ts: 工具来源标识（builtin / extension / sdk-custom）
+    core/defaults.ts: 全局默认常量（默认模型、超时、路径等兜底值）
+    core/index.ts: core 模块公共 API 聚合导出
+    utils/ansi.ts: ANSI 转义序列处理
+    utils/changelog.ts: changelog 版本检查和展示
+    utils/child-process.ts: 子进程管理辅助
+    utils/clipboard.ts: 剪贴板操作（统一接口）
+    utils/clipboard-image.ts: 剪贴板图片提取
+    utils/clipboard-native.ts: 平台原生剪贴板
+    utils/exif-orientation.ts: 图片 EXIF 方向处理
+    utils/frontmatter.ts: Markdown frontmatter 解析
+    utils/fs-watch.ts: 文件系统监听
+    utils/git.ts: git 操作辅助
+    utils/html.ts: HTML 导出辅助
+    utils/image-convert.ts: 图片格式转换
+    utils/image-resize.ts: 图片尺寸调整
+    utils/image-resize-core.ts: 图片缩放核心算法
+    utils/image-resize-worker.ts: 图片缩放 Worker 线程
+    utils/mime.ts: MIME 类型检测
+    utils/paths.ts: 路径处理工具
+    utils/photon.ts: 终端渲染底层库
+    utils/pi-user-agent.ts: HTTP User-Agent 生成
+    utils/shell.ts: shell 环境检测和配置（PS1、ANSI 支持等）
+    utils/sleep.ts: sleep 工具函数
+    utils/syntax-highlight.ts: 代码语法高亮
+    utils/tools-manager.ts: 工具生命周期管理器
+    utils/version-check.ts: 版本检查（新版本通知）
+    utils/windows-self-update.ts: Windows 自助更新
 ```
 
-可以把它理解成两条横向主线加一条纵向装配链：
+```
+┌───────────────────────────────────────────────────────────────────────────┐
+│                         六、产品外壳层                                      │
+│                                                                           │
+│   cli.ts                      main.ts                     bun/cli.ts      │
+│   (Node CLI 入口) ────────→ (启动编排器) ←──────────── (Bun 适配入口)         │
+│   进程级初始化               参数解析 / session选择                           │
+│                              runtime创建 / 模式分发                         │
+│                                    │                                      │
+├────────────────────────────────────┼──────────────────────────────────────┤
+│                         五、运行模式层                                      │
+│                                    │                                      │
+│         ┌──────────────────────────┼──────────────────────────┐           │
+│         ▼                          ▼                          ▼           │
+│  modes/interactive/*       modes/print-mode.ts        modes/rpc/*         │
+│  ┌──────────────────┐    ┌──────────────────┐    ┌──────────────────┐     │
+│  │ InteractiveMode  │    │ PrintMode        │    │ RpcServer        │     │
+│  │ (交互式 TUI 壳)   │    │ (一次性执行壳)     │    │ (headless JSONL) │     │
+│  │                  │    │                  │    │                  │     │
+│  │ • settings-select│    │ • --print-events │    │ • JSONL 协议      │     │
+│  │ • 主题系统        │    │ • --print-latest  │    │ • stdin/stdout  │     │
+│  │ • 组件系统        │    │ • 管道模式         │    │ • 外部集成        │     │
+│  └────────┬─────────┘    └────────┬─────────┘    └────────┬─────────┘     │
+│           │                       │                       │               │
+│           └───────────────────────┼───────────────────────┘               │
+│                                   │                                       │
+├───────────────────────────────────┼───────────────────────────────────────┤
+│                       四、会话运行时层                                       │
+│                                   │                                       │
+│  ┌────────────────────────────────┼──────────────────────────────────┐    │
+│  │                    AgentSessionRuntime (组合容器)                   │   │
+│  │                                                                    │   │
+│  │  fork() / newSession() / switchSession() / resume() / import()     │   │
+│  │    └→ 销毁旧 session → 重新走完整创建链路 → 替换 .session               │   │
+│  │                                                                    │   │
+│  │  ┌───────────────────────────────────────────────────────────┐     │   │
+│  │  │              agent-session-services.ts                    │     │   │
+│  │  │           (cwd 绑定的基础设施工厂)                           │     │   │
+│  │  │                                                           │     │   │
+│  │  │  createAgentSessionServices()                             │     │   │
+│  │  │    → AuthStorage / SettingsManager / ModelRegistry        │     │   │
+│  │  │    → DefaultResourceLoader / Extension加载                 │     │   │
+│  │  │                                                           │     │   │
+│  │  │  createAgentSessionFromServices()                         │     │   │
+│  │  │    → 模型分辨率 / 工具注册 / 参数合并                         │     │   │
+│  │  │    └──────────────────────┐                               │    │   │
+│  │  └───────────────────────────┼───────────────────────────────┘    │   │
+│  │                              ▼                                    │   │
+│  │  ┌──────────────────────────────────────────────────────────┐     │   │
+│  │  │                     sdk.ts (唯一工厂)                     │     │   │
+│  │  │                 createAgentSession(options)              │     │   │
+│  │  │                                                          │     │   │
+│  │  │  new Agent(...) + new AgentSession({...})                │     │   │
+│  │  │                                                          │     │   │
+│  │  │  ┌──────────────────────────────────────────────────┐    │     │   │
+│  │  │  │              AgentSession (核心对象)              │    │     │   │
+│  │  │  │                                                  │    │     │   │
+│  │  │  │  session.start()  /  session.submit()            │    │     │   │
+│  │  │  │  session.interrupt()  /  session.pause()         │    │     │   │
+│  │  │  │                                                  │    │     │   │
+│  │  │  │  组装并持有以下全部产品机制层模块 ────────────────────┼┐   │     │   │
+│  │  │  └──────────────────────────────────────────────────┘│   │     │   │
+│  │  └──────────────────────────────────────────────────────┼───┘     │   │
+│  └─────────────────────────────────────────────────────────┼─────────┘   │
+│                                                            │             │
+├────────────────────────────────────────────────────────────┼─────────────┤
+│                       三、产品机制层                         │             │
+│                                                            │             │
+│  ┌────────────────────────┐  ┌──────────────────────────┐  │             │
+│  │   session-manager.ts   │  │   settings-manager.ts    │  │             │
+│  │                        │  │                          │  │             │
+│  │  • session tree        │  │  • global/project merge  │  │             │
+│  │  • JSONL 追加式持久化    │  │  • 脏字段追踪增量写入       │  │             │
+│  │  • branch / fork       │  │  • 文件锁保护 (withLock)   │  │             │
+│  │  • buildSessionContext │  │  • 序列化写入队列           │  │             │
+│  │  • 9 种 Entry 类型      │  │  • 版本迁移                │  │             │
+│  └────────────────────────┘  └──────────────────────────┘  │             │
+│                                                            │             │
+│  ┌───────────────────────┐  ┌──────────────────────────┐   │             │
+│  │  compaction/*         │  │   resource-loader.ts     │   │             │
+│  │                       │  │                          │   │             │
+│  │  • 长对话压缩          │  │  • extensions 统一装载     │◄──┘             │
+│  │  • branch summary     │  │  • skills / prompts      │                 │
+│  │  • 文件操作摘要         │  │  • themes / AGENTS.md    │                 │
+│  │  • 切点计算            │  │  • SYSTEM.md 上下文       │                 │
+│  └───────────────────────┘  └──────────────────────────┘                 │
+│                                                                          │
+│  ┌───────────────────────┐  ┌──────────────────────────┐                 │
+│  │   system-prompt.ts    │  │  model-registry.ts       │                 │
+│  │                       │  │  model-resolver.ts       │                 │
+│  │  • tools + context    │  │                          │                 │
+│  │  • skills 注入         │  │  • provider/model 可见性  │                 │
+│  │  • guidelines 格式化   │  │  • 默认模型解析            │                 │
+│  │  • 日期 / cwd 拼接     │  │  • CLI 覆盖 / scoped      │                 │
+│  └───────────────────────┘  └──────────────────────────┘                 │
+│                                                                          │
+│  ┌───────────────────────┐  ┌──────────────────────────┐                 │
+│  │  prompt-templates.ts  │  │  package-manager.ts      │                 │
+│  │  • 模板发现与解析       │  │  • package 来源 → 资源     │                 │
+│  │  • 变量展开            │  │  • 路径解析与缓存           │                 │
+│  └───────────────────────┘  └──────────────────────────┘                 │
+│                                                                          │
+├──────────────────────────────────────────────────────────────────────────┤
+│                       二、扩展与工具层                                      │
+│                                                                          │
+│  ┌───────────────────────┐  ┌──────────────────────────┐                 │
+│  │  extensions/*         │  │   skills.ts              │                 │
+│  │                       │  │                          │                 │
+│  │  • extension 协议      │  │  • SKILL.md 发现与解析    │                 │
+│  │  • 加载器 / 运行器      │  │  • frontmatter 提取      │                  │
+│  │  • 桥接层 (生命周期)    │  │  • 冲突处理 / 去重         │                 │
+│  │  • 自定义工具注册       │  │  • available_skills 注入  │                 │
+│  └───────────────────────┘  └──────────────────────────┘                 │
+│                                                                          │
+│  ┌────────────────────────────────────────────────────────────────┐      │
+│  │                       tools/*                                  │      │
+│  │                                                                │      │
+│  │  read.ts / edit.ts / write.ts / bash.ts / find.ts / grep.ts    │      │
+│  │  ls.ts / glob.ts / web-search.ts / web-fetch.ts / task.ts      │      │
+│  │                                                                │      │
+│  │  • 工具 schema 定义 + 执行逻辑                                    │      │
+│  │  • 权限控制 / 路径安全检查                                         │      │
+│  │  • agent → tool call → toolResult 三角                          │      │
+│  └────────────────────────────────────────────────────────────────┘      │
+│                                                                          │
+├──────────────────────────────────────────────────────────────────────────┤
+│                       一、基础支撑层                                        │
+│                                                                           │
+│  ┌──────────────┐ ┌──────────────┐ ┌──────────────┐ ┌──────────────┐      │
+│  │  utils/*     │ │  event-bus   │ │  messages    │ │  timings     │      │
+│  │              │ │              │ │              │ │  diagnostics │      │
+│  │  • shell     │ │  • 轻量事件   │ │  • 消息辅助   │ │  • 耗时统计    │      │
+│  │  • 路径       │ │  • 扩展传播   │ │  • 内容判断   │ │  • 诊断输出    │      │
+│  │  • 图片       │ │  • 生命周期   │ │  • 格式转换   │ │  • 运行时观测  │      │
+│  │  • 剪贴板     │ │              │ │              │ │              │      │
+│  │  • HTML导出   │ │              │ │              │ │              │      │
+│  │  • 版本检查   │ │              │ │              │ │              │       │
+│  └──────────────┘ └──────────────┘ └──────────────┘ └──────────────┘       │
+│                                                                            │
+└────────────────────────────────────────────────────────────────────────────┘
+```
 
-- **横向主线 1：运行时主线**
-  - `cli.ts -> main.ts -> createAgentSessionRuntime() -> createAgentSession() -> AgentSession -> Interactive/Print/RPC`
-- **横向主线 2：资源注入主线**
-  - `settings -> package manager -> resource loader -> extensions/skills/prompts/themes -> system prompt -> active tools`
-- **纵向装配链**
-  - `pi-ai` 提供模型与流式协议
-  - `pi-agent-core` 提供 loop 和 tool runtime
-  - `pi-coding-agent` 提供持久化、配置、扩展、UI、CLI、模式切换
+**主线 1：运行时主线**
+
+* `cli.ts -> main.ts -> createAgentSessionRuntime() -> createAgentSession() -> AgentSession -> Interactive/Print/RPC`
+
+**主线 2：资源注入主线**
+
+- `settings -> package manager -> resource loader -> extensions/skills/prompts/themes -> system prompt -> active tools`
+
+- main.ts → runtime → services → sdk.ts 是完整的创建链
+
+- sdk.ts = AgentSession 的唯一工厂 ，组装所有产品机制层模块（sessionManager / settingsManager / resourceLoader / modelRegistry）。无论是 CLI 还是外部 SDK 消费者，最终都经过这里。
+
+- services 层负责在 AgentSession 创建前完成模型分辨率和工具注册
+
+- agent-session-runtime.ts = 组合外壳 ，不继承 AgentSession，而是持有它并支持热替换（fork 时销毁重建）
+
+- modes/interactive 是消费者 ，通过 runtime.session 拿到 AgentSession，再调 sessionManager 的 append 方法和 settingsManager 的 setter 等
+
+  ```
+  InteractiveMode.run(runtime)                              
+        │                                                      
+        ├→ runtime.session.sessionManager.appendMessage(...)    
+        ├→ runtime.session.settingsManager.setTheme(...)        
+        ├→ runtime.fork()  →  内部重建 AgentSession              
+        └→ runtime.session.resourceLoader.reload()
+  ```
 
 ## 配置文件
 
@@ -221,131 +495,7 @@ await session.prompt("帮我阅读当前项目的入口并解释启动流程");
 
 * vitest.config.ts - Vitest 测试框架的配置文件，设置测试环境、超时时间、依赖处理和路径别名。路径别名让测试可以直接引用源代码，便于调试和开发。手写。
 
-## 源码地图
-
-### 顶层文件
-
-| 文件 | 定位 | 核心功能 | 主要被谁调用 | 它主要调用谁 |
-| --- | --- | --- | --- | --- |
-| `src/cli.ts` | CLI 进程入口 | 初始化进程与 HTTP dispatcher，调用 `main()` | npm bin / bun bin | `main.ts` |
-| `src/main.ts` | 产品启动编排器 | 解析参数、恢复 session、创建 runtime、分发模式 | `cli.ts`、外部 SDK 也可直接调 `main()` | `cli/*`、`core/*`、`modes/*` |
-| `src/index.ts` | 包公共入口 | re-export SDK、tools、extensions、session、modes | 外部 npm 使用者、示例代码 | `core/*`、`modes/*` |
-| `src/config.ts` | 路径与版本配置 | `getAgentDir()`、版本、环境路径 | `main.ts`、SDK、工具 | Node path/env |
-| `src/migrations.ts` | 数据迁移入口 | session / 配置迁移与弃用告警 | `main.ts` | `SessionManager` 等 |
-| `src/package-manager-cli.ts` | 包管理 CLI 子命令 | `package` / `config` 相关命令处理 | `main.ts` | `core/package-manager.ts` |
-
-### `src/cli/`
-
-| 文件 | 定位 | 核心功能 | 主要被谁调用 | 它主要调用谁 |
-| --- | --- | --- | --- | --- |
-| `args.ts` | 参数协议层 | CLI schema、`parseArgs()`、`printHelp()` | `main.ts` | 无 |
-| `file-processor.ts` | `@file` 参数处理 | 将文件文本/图片拼成初始消息 | `main.ts` | `utils/image-*`、`read` 相关逻辑 |
-| `initial-message.ts` | 初始消息组装 | 合并 `-p`、stdin、file args | `main.ts` | 无 |
-| `list-models.ts` | 列模型命令 | 列出 provider/model | `main.ts` | `ModelRegistry` |
-| `session-picker.ts` | session 选择器 | 启动时选择继续哪个会话 | `main.ts` | `SessionManager` |
-| `config-selector.ts` | 配置选择器 | 配合 TUI/CLI 选择配置 | `main.ts` | settings 相关模块 |
-
-### `src/core/`
-
-这是整个包最重要的一层。可以再拆成五组：
-
-```text
-1. 会话宿主
-   agent-session-runtime.ts
-   agent-session-services.ts
-   sdk.ts
-   agent-session.ts
-
-2. 会话与上下文
-   session-manager.ts
-   compaction/*
-   messages.ts
-
-3. 配置与 prompt
-   settings-manager.ts
-   system-prompt.ts
-   prompt-templates.ts
-
-4. 资源与扩展
-   resource-loader.ts
-   package-manager.ts
-   extensions/*
-   skills.ts
-
-5. 模型与认证
-   auth-storage.ts
-   model-registry.ts
-   model-resolver.ts
-```
-
-其中最值得优先读的 8 个文件是：
-
-| 文件 | 定位 | 为什么重要 |
-| --- | --- | --- |
-| `core/agent-session.ts` | 产品核心对象 | 几乎所有真正的产品逻辑都在这里汇合 |
-| `core/sdk.ts` | SDK 装配入口 | 看懂它就知道会话是怎么被创建出来的 |
-| `core/agent-session-runtime.ts` | session 宿主层 | 看懂 `new/resume/fork/import` 怎么落地 |
-| `core/agent-session-services.ts` | 基础设施工厂 | 看懂 service 和 session 为什么被拆开 |
-| `core/session-manager.ts` | 会话树与 JSONL 持久化 | 看懂 session 为什么不是普通聊天记录 |
-| `core/resource-loader.ts` | 外部资源统一入口 | 看懂 extensions/skills/prompts/themes 从哪来 |
-| `core/settings-manager.ts` | 分层配置中心 | 看懂全局/项目/目录规则如何叠加 |
-| `core/system-prompt.ts` | prompt 装配器 | 看懂模型最终看到什么 |
-
-### `src/modes/`
-
-| 目录 / 文件 | 定位 | 核心功能 | 主要被谁调用 |
-| --- | --- | --- | --- |
-| `modes/interactive/interactive-mode.ts` | 交互模式总控 | TUI 生命周期、键盘输入、和 `AgentSessionRuntime` 绑定 | `main.ts` |
-| `modes/interactive/components/*` | TUI 组件库 | message/tool/bash/tree/footer 等 UI 组件 | `InteractiveMode` |
-| `modes/interactive/theme/*` | 主题系统 | 主题 schema、默认深浅色主题、热更新 | `InteractiveMode`、`ResourceLoader` |
-| `modes/print-mode.ts` | 单次执行模式 | 非交互运行，支持文本或 JSON 输出 | `main.ts` |
-| `modes/rpc/*` | 嵌入式协议层 | 通过 stdin/stdout JSONL 暴露 headless agent | `main.ts`、外部宿主 |
-
-### `src/core/tools/`
-
-`tools/` 是下层 agent loop 能真正"动手"的手臂，但在 `coding-agent` 里，这套工具同时还有两层产品含义：
-
-- 它们是 `system prompt` 的一部分
-- 它们会被 extension 再包装、拦截、替换、过滤
-
-| 文件 | 定位 | 核心功能 |
-| --- | --- | --- |
-| `read.ts` | 文件读取工具 | 偏移读取、截断保护、图片支持 |
-| `bash.ts` | Bash 后备工具 | 外部命令执行、流式输出、超时、截断 |
-| `edit.ts` | 精确编辑工具 | `oldText -> newText` 精确替换 |
-| `edit-diff.ts` | 编辑算法模块 | LF 归一化、fuzzy match、diff 生成 |
-| `write.ts` | 文件写入工具 | 新建/覆盖写文件 |
-| `grep.ts` | 内容搜索 | ripgrep 后端、结构化搜索 |
-| `find.ts` | 文件搜索 | glob/fd 风格路径发现 |
-| `ls.ts` | 目录浏览 | 列目录、结果截断 |
-| `truncate.ts` | 统一截断策略 | 2000 行 / 50KB 保护 |
-| `file-mutation-queue.ts` | 并发安全层 | 同文件写操作串行化 |
-| `tool-definition-wrapper.ts` | 双层工具桥 | `ToolDefinition <-> AgentTool` 包装 |
-| `index.ts` | 工具注册入口 | 批量创建工具定义/工具实例 |
-
-### `src/core/extensions/`
-
-| 文件 | 定位 | 核心功能 |
-| --- | --- | --- |
-| `types.ts` | 扩展协议总表 | 事件、上下文、工具定义、命令、UI API |
-| `loader.ts` | 发现与加载层 | 加载 TS extension、创建 runtime stub |
-| `runner.ts` | 运行器 | emit 各类事件、绑定核心动作、管理生命周期 |
-| `wrapper.ts` | 适配层 | 把 extension tool 包成核心可执行工具 |
-| `index.ts` | barrel | 对外统一导出 |
-
-### `src/utils/`
-
-这一层不是产品主角，但它解释了很多"为什么 coding-agent 能跑起来"的细节，比如：
-
-- 剪贴板图片读取
-- shell 选择与路径规范化
-- 图像缩放与 MIME 检测
-- changelog/version check
-- git 工具与 HTML 导出辅助
-
-它们的特点是：**不决定产品策略，但为上层策略提供机械支撑。**
-
-## 主调用链
+## 一、主调用链（产品外壳层、会话运行时层）
 
 从 `pi` 命令启动到进入交互模式，主调用链路本质上是在**启动一个可切换、可恢复、可扩展的 session runtime**，然后再给这个 runtime 套上 interactive / print / rpc 三种外壳：
 
@@ -496,41 +646,9 @@ main.ts
 		b. rpc: runRpcMode(runtime) / interactive: InteractiveMode.run(runtime) / print/json: runPrintMode(runtime)
 ```
 
-### 为什么 `main.ts` 要自己定义 `createRuntime`
-
-这是 `main.ts` 最关键的一个点。
-
-它不会直接写死：
-
-```typescript
-const runtime = await createAgentSessionRuntime(...)
-```
-
-而是先定义一个 `createRuntime` 闭包，再交给 `createAgentSessionRuntime()` 使用。
-
-这么做的原因是：
-
-- session 切换时，cwd 可能变化
-- cwd 变化时，`settingsManager` / `resourceLoader` / `modelRegistry` 这些服务都必须随 cwd 重建
-- 所以 runtime 需要一个**“如何重新创建自己”**的工厂，而不是一次性建好的死对象
-
-于是形成了这个分层：
-
-```text
-main.ts
-  提供“如何创建一个 cwd 绑定 runtime”的工厂
-    ↓
-AgentSessionRuntime
-  在 new / resume / fork / import 时反复调用这个工厂
-```
-
----
-
-## 
-
-## 会话运行时层
 
 
+### 会话运行时外壳
 
 ```
 main.ts
@@ -546,6 +664,33 @@ main.ts
  	-> （2）再 new AgentSessionRuntime(session, services, createRuntime, diagnostics, modelFallbackMessage)
 ```
 
+> **为什么 `main.ts` 要自己定义 `createRuntime`？**这是最关键的一个点。
+>
+> 它不会直接写死：
+>
+> ```typescript
+> const runtime = await createAgentSessionRuntime(...)
+> ```
+>
+> 而是先定义一个 `createRuntime` 闭包，再交给 `createAgentSessionRuntime()` 使用。
+>
+> 这么做的原因是：
+>
+> - session 切换时，cwd 可能变化
+> - cwd 变化时，`settingsManager` / `resourceLoader` / `modelRegistry` 这些服务都必须随 cwd 重建
+> - 所以 runtime 需要一个**“如何重新创建自己”**的工厂，而不是一次性建好的死对象
+>
+> 于是：
+>
+> ```text
+> main.ts
+>   提供“如何创建一个 cwd 绑定 runtime”的工厂
+>     ↓
+> AgentSessionRuntime
+>   在 new / resume / fork / import 时反复调用这个工厂
+> ```
+>
+
 三层对象：
 
 ```ts
@@ -554,46 +699,332 @@ main.ts
 业务层：AgentSession
 ```
 
-- `core/agent-session-services.ts` **与 cwd 绑定的环境基础设施集合**
-  - 解决的是 **cwd 环境问题**，关心“这轮对话是站在哪个目录里跑”，包含 `createAgentSessionServices()` 函数，以这个目录为中心，向外推导出当前 session 可见的配置、资源、上下文规则和相对路径语义，具体包括：
-    - 项目配置环境
-      - 这个目录下有没有 .pi/settings.json
-    - 上下文规则环境
-      - 从这个目录向上找哪些 AGENTS.md / CLAUDE.md
-    - 资源发现环境
-      - 这个项目下有哪些本地 extensions / skills / prompts / themes
-    - 路径解析环境
-      - 用户说“读 src/index.ts ”时， src/index.ts 相对谁解析
-    - session 归属环境
-      - 这个 session 属于哪个项目/子目录视角
-  - 负责创建 `authStorage`、`settingsManager`、`modelRegistry`、`resourceLoader` 等
-- `core/sdk.ts` **会话装配逻辑**
-  - 解决的是**会话装配问题**，包含 `createAgentSession()` 函数，真正把 `pi-ai + pi-agent-core + tools + prompt + session context` 组装成会话的工厂
-- `core/agent-session.ts` **产品层真正的核心对象**
-  - 解决的是**运行问题**，关心“这轮对话怎么跑”
-  - 真正负责 prompt、持久化消息、tool hooks、extension 扩展绑定、compaction、bash、tree navigation
-
-* `core/agent-session-runtime.ts` **当前激活 session 的宿主对象**
-  - AgentSessionRuntime 持有 AgentSession、AgentSessionServices，也持有“如何重新创建它们”的 createRuntime 工厂函数
-  - 它不负责“具体一轮 prompt 怎么跑”，而负责“当前宿主现在挂着哪个 session，以及如何切换到另一个 session”
-
-
 > **为什么要分三层？**
 >
-> 1、两类生命周期天然不同，不该由同一对象同时负责
+> 1、AgentSessionRuntime 与AgentSession 分层：两类生命周期，不该由同一对象同时负责
 >
 > * `AgentSession` 只负责“这个 session 怎么活”，承担**会话生命周期**
 > * 产品层还要支持：`newSession()`、`switchSession()`、`fork()`、`importFromJsonl()`，承担**宿主生命周期**
 >
-> 2、cwd 绑定的环境状态和会话状态应该分开
+> 2、AgentSessionServices 与AgentSession 分层：cwd 绑定的环境状态和会话状态应该分开
+>
+> 让 CLI 层可以在真正创建 session 之前，先把下面这些事做完：
+>
+> - 解析模型范围
+> - 决定 active tools
+> - 装载 extensions
+> - 收集 diagnostics
+> - 处理 CLI 传入的 API key / flags
 
-让 CLI 层可以在真正创建 session 之前，先把下面这些事做完：
+#### `core/agent-session.ts` **产品层真正的核心对象**
 
-- 解析模型范围
-- 决定 active tools
-- 装载 extensions
-- 收集 diagnostics
-- 处理 CLI 传入的 API key / flags
+- 解决的是**运行问题**，关心“这轮对话怎么跑”
+- 真正负责 prompt、持久化消息、tool hooks、extension 扩展绑定、compaction、bash、tree navigation
+
+```ts
+export class AgentSession {
+	/** LLM 调用引擎，负责消息发送/流式响应/工具调用 */
+	readonly agent: Agent;
+	/** 会话持久化管理器，负责 JSONL 写入、分支、上下文重建 */
+	readonly sessionManager: SessionManager;
+	/** 配置管理器，负责全局/项目级设置的合并与持久化 */
+	readonly settingsManager: SettingsManager;
+
+	/** 会话级别绑定的模型白名单，可为不同 session 限定不同的 provider/model */
+	private _scopedModels: Array<{ model: Model<any>; thinkingLevel?: ThinkingLevel }>;
+
+	// -----------------------------------------------------------------
+	// 事件订阅
+	// -----------------------------------------------------------------
+
+	/** Agent 事件订阅的取消函数，dispose 时调用以解绑 */
+	private _unsubscribeAgent?: () => void;
+	/** 外部注册的事件监听器列表 */
+	private _eventListeners: AgentSessionEventListener[] = [];
+
+	// -----------------------------------------------------------------
+	// 用户交互消息队列
+	// -----------------------------------------------------------------
+
+	/** 待处理的 steer 打断消息队列，用于 UI 显示。消息被投递后移除。 */
+	private _steeringMessages: string[] = [];
+	/** 待处理的 follow-up 后续消息队列，用于 UI 显示。消息被投递后移除。 */
+	private _followUpMessages: string[] = [];
+	/** 排队等待在下一次用户提示词中作为上下文附带发送的消息。 */
+	private _pendingNextTurnMessages: CustomMessage[] = [];
+
+	// -----------------------------------------------------------------
+	// 压缩（Compaction）
+	// -----------------------------------------------------------------
+
+	/** 手动触发的压缩取消控制器 */
+	private _compactionAbortController: AbortController | undefined = undefined;
+	/** 上下文溢出时自动触发的压缩取消控制器 */
+	private _autoCompactionAbortController: AbortController | undefined = undefined;
+	/** 当前轮次是否已尝试过溢出恢复（避免重复压缩死循环） */
+	private _overflowRecoveryAttempted = false;
+
+	// -----------------------------------------------------------------
+	// 分支摘要
+	// -----------------------------------------------------------------
+
+	/** 分支摘要请求的取消控制器 */
+	private _branchSummaryAbortController: AbortController | undefined = undefined;
+
+	// -----------------------------------------------------------------
+	// 自动重试
+	// -----------------------------------------------------------------
+
+	/** 重试请求的取消控制器 */
+	private _retryAbortController: AbortController | undefined = undefined;
+	/** 当前重试次数计数器 */
+	private _retryAttempt = 0;
+
+	// -----------------------------------------------------------------
+	// Bash 执行
+	// -----------------------------------------------------------------
+
+	/** Bash 执行的取消控制器 */
+	private _bashAbortController: AbortController | undefined = undefined;
+	/** Bash 执行完成后待持久化的消息队列（先排队，batch 写入） */
+	private _pendingBashMessages: BashExecutionMessage[] = [];
+
+	// -----------------------------------------------------------------
+	// 扩展系统
+	// -----------------------------------------------------------------
+
+	/** 扩展运行时，管理所有已加载扩展的生命周期和钩子 */
+	private _extensionRunner!: ExtensionRunner;
+	/** 当前会话的轮次计数（从 0 开始，每次用户提交递增） */
+	private _turnIndex = 0;
+
+	/** 资源加载器，统一管理 skills/prompts/themes/AGENTS.md 等外部资源 */
+	private _resourceLoader: ResourceLoader;
+	/** SDK 消费者注入的自定义工具定义列表 */
+	private _customTools: ToolDefinition[];
+	/** 内建工具的基础定义集合 */
+	private _baseToolDefinitions: Map<string, ToolDefinition> = new Map();
+	/** 当前工作目录 */
+	private _cwd: string;
+	/** 扩展运行时的间接引用，用于延迟注入或外部访问 */
+	private _extensionRunnerRef?: { current?: ExtensionRunner };
+	/** 构造时指定的初始激活工具名称列表 */
+	private _initialActiveToolNames?: string[];
+	/** 允许使用的工具白名单（Set 以 O(1) 检查） */
+	private _allowedToolNames?: Set<string>;
+	/** 内建工具覆盖映射，用于替换默认的工具实现 */
+	private _baseToolsOverride?: Record<string, AgentTool>;
+	/** 会话启动事件（startup / resume / fork 等） */
+	private _sessionStartEvent: SessionStartEvent;
+	/** 扩展提供的 UI 上下文，供交互模式使用 */
+	private _extensionUIContext?: ExtensionUIContext;
+	/** 扩展命令上下文操作，供命令面板使用 */
+	private _extensionCommandContextActions?: ExtensionCommandContextActions;
+	/** 用户中止当前操作时调用的扩展中断处理器 */
+	private _extensionAbortHandler?: () => void;
+	/** 会话关闭时的扩展清理处理器 */
+	private _extensionShutdownHandler?: ShutdownHandler;
+	/** 扩展错误事件的监听器 */
+	private _extensionErrorListener?: ExtensionErrorListener;
+	/** 取消扩展错误监听的函数 */
+	private _extensionErrorUnsubscriber?: () => void;
+
+	/** 模型注册表，用于 API 密钥解析和 provider/model 发现 */
+	private _modelRegistry: ModelRegistry;
+
+	// -----------------------------------------------------------------
+	// 工具注册与提示词
+	// -----------------------------------------------------------------
+
+	/** 工具名 → AgentTool 实例的注册表，供扩展系统的 getTools/setTools 使用 */
+	private _toolRegistry: Map<string, AgentTool> = new Map();
+	/** 工具名 → ToolDefinitionEntry（定义 + 元数据） */
+	private _toolDefinitions: Map<string, ToolDefinitionEntry> = new Map();
+	/** 工具名 → prompt 片段，用于 system prompt 中的工具描述 */
+	private _toolPromptSnippets: Map<string, string> = new Map();
+	/** 工具名 → 使用指南数组，用于 system prompt 中的行为约束 */
+	private _toolPromptGuidelines: Map<string, string[]> = new Map();
+
+	// -----------------------------------------------------------------
+	// 系统提示词
+	// -----------------------------------------------------------------
+
+	/** 基础系统提示词（不含扩展附加内容），每轮对话重新应用扩展附加 */
+	private _baseSystemPrompt = "";
+	/** 上一次 _rebuildSystemPrompt() 使用的参数缓存，用于需要重新构建时复用 */
+	private _baseSystemPromptOptions!: BuildSystemPromptOptions;
+
+	constructor(config: AgentSessionConfig) {
+		// ── 三大只读服务 ──
+		this.agent = config.agent;
+		this.sessionManager = config.sessionManager;
+		this.settingsManager = config.settingsManager;
+
+		// ── 模型与会话范围 ──
+		this._scopedModels = config.scopedModels ?? [];
+
+		// ── 资源与工具注入 ──
+		this._resourceLoader = config.resourceLoader;
+		this._customTools = config.customTools ?? [];
+		this._cwd = config.cwd;
+
+		// ── 模型注册表 ──
+		this._modelRegistry = config.modelRegistry;
+
+		// ── 扩展系统 ──
+		this._extensionRunnerRef = config.extensionRunnerRef;
+
+		// ── 工具策略 ──
+		this._initialActiveToolNames = config.initialActiveToolNames;
+		this._allowedToolNames = config.allowedToolNames ? new Set(config.allowedToolNames) : undefined;
+		this._baseToolsOverride = config.baseToolsOverride;
+
+		// ── 会话启动事件（默认 startup） ──
+		this._sessionStartEvent = config.sessionStartEvent ?? { type: "session_start", reason: "startup" };
+
+		// ── 订阅 agent 事件（持久化、扩展、自动压缩、重试）──
+		this._unsubscribeAgent = this.agent.subscribe(this._handleAgentEvent);
+		this._installAgentToolHooks();
+
+		// ── 构建运行时：注册工具、绑定扩展、初始化 system prompt ──
+		this._buildRuntime({
+			activeToolNames: this._initialActiveToolNames,
+			includeAllExtensionTools: true,
+		});
+	}
+
+```
+
+```ts
+01. 初始化与工具钩子 (477-582)
+    modelRegistry getter
+    _getRequiredRequestAuth       
+    _getCompactionRequestAuth     
+    _installAgentToolHooks
+
+02. 事件系统 (583-859)
+    _emit, _emitQueueUpdate, _handleAgentEvent
+    _willRetryAfterAgentEnd       
+    _getUserMessageText, _findLastAssistantMessage
+    _replaceMessageInPlace, _emitExtensionEvent
+    subscribe, _disconnectFromAgent
+    _reconnectToAgent, dispose
+
+03. 只读状态 (860-1054)
+    state/model/thinkingLevel/isStreaming/systemPrompt/retryAttempt getters
+    getActiveToolNames, getAllTools
+    getToolDefinition             
+    setActiveToolsByName
+    isCompacting/messages/steeringMode/followUpMode getters
+    sessionFile/sessionId/sessionName/scopedModels getters
+    setScopedModels, promptTemplates getter
+
+04. 系统提示词 (从 03 中拆出)
+    _normalizePromptSnippet       
+    _normalizePromptGuidelines    
+    _rebuildSystemPrompt          
+
+05. 提示词与消息发送 (原 提示词管理)
+    _runAgentPrompt               
+    _handlePostAgentRun
+    prompt, _tryExecuteExtensionCommand
+    _expandSkillCommand, steer, followUp
+    _queueSteer, _queueFollowUp
+    _throwIfExtensionCommand
+    sendCustomMessage, sendUserMessage
+    clearQueue, pendingMessageCount getter
+    getSteeringMessages, getFollowUpMessages
+    resourceLoader getter         
+    abort
+
+06. 模型管理 (原 模型管理)
+    _emitModelSelect              
+    setModel, cycleModel
+    _cycleScopedModel             
+    _cycleAvailableModel          
+
+07. 思维级别 (原 思维级别管理)
+    setThinkingLevel, cycleThinkingLevel
+    getAvailableThinkingLevels, supportsThinking
+    _getThinkingLevelForModelSwitch  
+    _clampThinkingLevel           
+
+08. 消息队列模式 (合并 队列模式管理)
+    setSteeringMode, setFollowUpMode
+
+09. 上下文压缩 (从原 压缩 中拆出，仅保留压缩逻辑)
+    compact, abortCompaction
+    abortBranchSummary
+    _checkCompaction, _runAutoCompaction
+    setAutoCompactionEnabled, autoCompactionEnabled getter
+
+10. 扩展与运行时 (从原 压缩 中拆出)
+    bindExtensions
+    extendResourcesFromExtensions
+    buildExtensionResourcePaths   
+    getExtensionSourceLabel       
+    _applyExtensionBindings       
+    _refreshCurrentModelFromRegistry  
+    _bindExtensionCore            
+    _refreshToolRegistry
+    _buildRuntime, reload
+
+11. 自动重试
+    _isNonRetryableProviderLimitError  
+    _isRetryableError
+    _prepareRetry, abortRetry
+    isRetrying/autoRetryEnabled getters
+    setAutoRetryEnabled
+
+12. Bash 执行
+    executeBash, recordBashResult, abortBash
+    isBashRunning/hasPendingBashMessages getters
+    _flushPendingBashMessages
+
+13. 会话信息与导出 (合并 会话管理 + 树状导航后半段)
+    setSessionName
+    navigateTree, getUserMessagesForForking
+    _extractUserMessageText      
+    getSessionStats
+    getContextUsage               
+    exportToHtml, exportToJsonl
+
+14. 辅助方法 (合并 工具方法 + 扩展系统)
+    getLastAssistantText
+    createReplacedSessionContext  
+    hasExtensionHandlers
+    extensionRunner getter
+```
+
+
+
+#### `core/agent-session-services.ts` **与 cwd 绑定的环境基础设施集合**
+
+- 解决的是 **cwd 环境问题**，关心“这轮对话是站在哪个目录里跑”，包含 `createAgentSessionServices()` 函数，以这个目录为中心，向外推导出当前 session 可见的配置、资源、上下文规则和相对路径语义，具体包括：
+  - 项目配置环境
+    - 这个目录下有没有 .pi/settings.json
+  - 上下文规则环境
+    - 从这个目录向上找哪些 AGENTS.md / CLAUDE.md
+  - 资源发现环境
+    - 这个项目下有哪些本地 extensions / skills / prompts / themes
+  - 路径解析环境
+    - 用户说“读 src/index.ts ”时， src/index.ts 相对谁解析
+  - session 归属环境
+    - 这个 session 属于哪个项目/子目录视角
+- 负责创建 `authStorage`、`settingsManager`、`modelRegistry`、`resourceLoader` 等
+
+
+
+#### `core/sdk.ts` **会话装配逻辑**
+
+- 解决的是**会话装配问题**，包含 `createAgentSession()` 函数，真正把 `pi-ai + pi-agent-core + tools + prompt + session context` 组装成会话的工厂
+
+
+
+#### `core/agent-session-runtime.ts` **当前激活 session 的宿主对象**
+
+- AgentSessionRuntime 持有 AgentSession、AgentSessionServices，也持有“如何重新创建它们”的 createRuntime 工厂函数
+- 它不负责“具体一轮 prompt 怎么跑”，而负责“当前宿主现在挂着哪个 session，以及如何切换到另一个 session”
 
 
 
@@ -611,28 +1042,11 @@ main.ts
 - 再重建一整套 runtime 结果
 - 最后替换当前 `session/services`
 
-
-
-## Context Initialization 上下文初始化
-
-When a Pi session starts, the agent has to assemble the context that the model will see.
-当 Pi 会话开始时，代理必须组装模型将看到的上下文。
-
-That context typically includes:
-该背景通常包括：
-
-- The base system prompt 基本系统提示
-- Project-specific instructions
-  项目特定说明
-- Available tools 可用工具
-- Session history 会话历史记录
-- User messages 用户消息
-- Any relevant skill or extension instructions
-  任何相关的技能或扩展说明
+## 二、AgentSession 中的加载链（Extension、skills、工具）
 
 
 
-## 资源系统、Extension、工具
+### AgentSession 资源注入主线（全部经 ResourceLoader 统一加载后提供）
 
 怎样把 settings、packages、extensions、skills、prompts、themes、tools 装进一个统一运行时。
 
@@ -667,9 +1081,302 @@ flowchart TD
     D --> N["tool registry / command registry / UI bindings"]
 ```
 
+#### packageManager
+
+#### Extensions
+
+#### Skills
+
+#### prompt-templates
 
 
 
+### 会话生命周期服务（构造函数直接注入 AgentSession，不走 ResourceLoader）
+
+#### sessionManager
+
+完全无关。管理会话树，与资源发现无交集。
+
+#### settingsManager
+
+SettingsManager 传给 ResourceLoader 用于解析 package 路径，但本身不受 ResourceLoader 管理。
+
+#### modelRegistry
+
+完全无关。管理 API 密钥和模型元数据。
+provider/model 池
+
+
+
+#### AGENTS.md
+
+```
+┌────────────────────────────────────────────────────────────────────────┐
+│                        ResourceLoader.reload()                         │
+│  this.agentsFiles = loadProjectContextFiles({ cwd, agentDir })         │
+│                          │                                             │
+│                          ├→ ~/.pi/agent/AGENTS.md  (全局上下文)          │
+│                          ├→ /home/user/AGENTS.md     (祖先层级)          │
+│                          └→ /home/user/proj/AGENTS.md (项目上下文)       │
+│  存储在 ResourceLoader._agentsFiles                                     │
+└──────────────────────────────────┬─────────────────────────────────────┘
+                                   │ getAgentsFiles()
+                                   ▼
+```
+
+
+
+### tools/* 第三条路径（AgentSession._buildRuntime() 编程式构建）
+
+完全无关。内建工具是硬编码的，不来自外部文件。
+
+
+
+resource-loader 和 SessionManager 是平行关系，各自提供 LLM 上下文的一部分，在 LLM 请求层合并：
+
+* SessionManager.buildSessionContext() 消息读取链路
+
+* resource-loader.ts → loadProjectContextFiles() → AGENTS.md 等项目上下文
+
+  - The base system prompt 基本系统提示
+
+  - Project-specific instructions
+    项目特定说明
+
+  - Available tools 可用工具
+
+  - Session history 会话历史记录
+
+  - User messages 用户消息
+
+  - Any relevant skill or extension instructions
+    任何相关的技能或扩展说明
+
+### AgentSession 如何构建上下文
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│ 第一层：AgentSession — 分别准备两部分                                   │
+│                                                                     │
+│  1. 系统提示词                                                        │
+│  ┌──────────────────────────────────────────────────────────────┐   │
+│  │ _rebuildSystemPrompt()                                       │   │
+│  │   ├─ resourceLoader.getSkills()        → <available_skills>  │   │
+│  │   ├─ resourceLoader.getAgentsFiles()   → <project_context>   │   │
+│  │   ├─ resourceLoader.getSystemPrompt()  → customPrompt        │   │
+│  │   ├─ resourceLoader.getAppendSystemPrompt() → appendPrompt   │   │
+│  │   ├─ _toolPromptSnippets               → 工具描述             │   │
+│  │   └─ _toolPromptGuidelines             → 工具指南             │   │
+│  │        │                                                     │   │
+│  │        ▼ buildSystemPrompt() [system-prompt.ts]              │   │
+│  │   _baseSystemPrompt (string)                                 │   │
+│  └──────────────────────────────────────────────────────────────┘   │
+│                                                                     │
+│  2. 会话消息                                                         │
+│  ┌──────────────────────────────────────────────────────────────┐   │
+│  │ buildSessionContext() [session-manager.ts]                   │   │
+│  └──────────────────────────────────────────────────────────────┘   │
+│                                                                     │
+│  3. 合并到 Agent 状态（agent-session.ts prompt() 方法）                │
+│  ┌──────────────────────────────────────────────────────────────┐   │
+│  │ // 扩展系统最后一次机会修改 system prompt                         │   │
+│  │ const result = await this._extensionRunner                    │   │
+│  │     .emitBeforeAgentStart(text, images,                       │   │
+│  │         this._baseSystemPrompt,                               │   │
+│  │         this._baseSystemPromptOptions);                       │   │
+│  │                                                               │   │
+│  │ this.agent.state.systemPrompt = result?.systemPrompt          │   │
+│  │     ?? this._baseSystemPrompt;   // 扩展修改过就用修改版      │   │
+│  │                                                               │   │
+│  │ // 用户消息追加到 agent.state.messages                        │   │
+│  │ this.agent.state.messages.push(userMessage);                  │   │
+│  └──────────────────────────────────────────────────────────────┘   │
+└─────────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│ 第二层：Agent — 快照 + 转换                                            │
+│                                                                     │
+│  agent.prompt(messages) → agent.ts                                  │
+│    │                                                                │
+│    ├─ createContextSnapshot() → AgentContext                        │
+│    │    { systemPrompt, messages[], tools[] }                       │
+│    │                                                                │
+│    └─ runAgentLoop() → agent-loop.ts                                │
+│         │                                                           │
+│         ├─ transformContext(messages)     ← 可选钩子（修剪/注入）      │
+│         │                                                           │
+│         ├─ convertToLlm(messages)      ← AgentMessage[] → Message[] │
+│         │    (bashExecution/custom 角色 → 标准 user/assistant/tool)  │
+│         │                                                           │
+│         └─ Context {                                                │
+│                systemPrompt: "你是...",                              │
+│                messages: [                                          │
+│                  { role: "user", content: "..." },                  │
+│                  { role: "assistant", content: "..." },             │
+│                  { role: "toolResult", ... },                       │
+│                ],                                                   │
+│                tools: [read, edit, write, bash, ...]                │
+│            }                                                        │
+└─────────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│ 第三层：Provider — 转换为 API 格式                                     │
+│                                                                     │
+│  streamSimple(model, context, options) → ai/src/stream.ts           │
+│    │                                                                │
+│    ├─ Anthropic:                                                    │
+│    │    context.systemPrompt → params.system (独立字段)              │
+│    │    context.messages     → params.messages                      │
+│    │    context.tools        → params.tools                         │
+│    │                                                                │
+│    ├─ OpenAI:                                                       │
+│    │    context.systemPrompt → params[0] { role: "system" }         │
+│    │    context.messages     → params[1..n]                         │
+│    │    context.tools        → params.tools                         │
+│    │                                                                │
+│    └─ before_provider_request 钩子 ← 扩展最后一次拦截                  │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+1、system-prompt.ts 是 ResourceLoader 的消费方，从 ResourceLoader 取数据（skills/contextFiles）做最终格式化。 → 对应 **静态上下文（技能、规则、工具描述），每轮不变，仅工具切换/资源重载时重建**
+
+```
+system-prompt.ts 在 AgentSession (agent-session.ts) 中有两个触发场景：
+│
+├─ setActiveToolsByName(toolNames)       
+│     (用户通过 /tools 命令或编程方式切换激活工具集)
+│     └─ this._baseSystemPrompt = this._rebuildSystemPrompt(validToolNames)
+│          this.agent.state.systemPrompt = this._baseSystemPrompt
+│
+├─ extendResourcesFromExtensions(reason)
+│     (扩展在启动/重载时动态注入新技能、提示、主题后重建)
+│     └─ this._baseSystemPrompt = this._rebuildSystemPrompt(this.getActiveToolNames())
+│          this.agent.state.systemPrompt = this._baseSystemPrompt
+│
+└─ _rebuildSystemPrompt(toolNames)        ← private
+       │
+       │  组装 BuildSystemPromptOptions：
+       │    contextFiles ← resourceLoader.getAgentsFiles()
+       │    skills       ← resourceLoader.getSkills()
+       │    customPrompt ← resourceLoader.getSystemPrompt()
+       │    toolSnippets ← tool registry
+       │    ...
+       │
+       └─ buildSystemPrompt(options) 
+```
+
+每次重建后，结果存入 `this.agent.state.systemPrompt = this._baseSystemPrompt`，下一轮 LLM 调用时自动生效。
+
+2、SessionManager.buildSessionContext() 消息读取链路 → 对应 **动态上下文（对话历史），每轮新增用户消息，压缩/分叉时重建**
+
+
+
+两者在 agent-session.ts 的 prompt() 方法中 分别写入 agent.state.systemPrompt 和 agent.state.messages ，然后由 Agent 在发送前打包成 Context { systemPrompt, messages, tools } ，最终由 provider 映射为 API 格式。
+
+
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                       AgentSession 构造函数                          │
+│                          (sdk.ts:420)                               │
+│                                                                     │
+│   注入的模块分为两类：                                                │
+│                                                                     │
+│   ┌─────────────────────────┐    ┌──────────────────────────────┐   │
+│   │  会话生命周期服务        │    │  资源注入主线                 │   │
+│   │  (独立注入，不走         │    │  (全部经 ResourceLoader       │   │
+│   │   ResourceLoader)       │    │   统一加载后提供)              │   │
+│   │                         │    │                              │   │
+│   │  ● sessionManager       │    │  ResourceLoader.reload()      │   │
+│   │    (会话树/持久化)       │    │    │                          │   │
+│   │                         │    │    ├─ packageManager          │   │
+│   │  ● settingsManager      │    │    │  解析 package 来源       │   │
+│   │    (配置合并/持久化)     │    │    │   → 返回路径列表         │   │
+│   │                         │    │    │                          │   │
+│   │  ● modelRegistry        │    │    ├─ loadExtensions()        │   │
+│   │    (API密钥/模型池)      │    │    │  → extensions/loader.ts  │   │
+│   │                         │    │    │                          │   │
+│   └─────────────────────────┘    │    ├─ loadSkills()            │   │
+│                                  │    │  → skills.ts             │   │
+│                                  │    │                          │   │
+│                                  │    ├─ loadPromptTemplates()   │   │
+│                                  │    │  → prompt-templates.ts   │   │
+│                                  │    │                          │   │
+│                                  │    ├─ loadProjectContextFiles │   │
+│                                  │    │  → AGENTS.md / CLAUDE.md │   │
+│                                  │    │                          │   │
+│                                  │    ├─ discoverSystemPromptFile│   │
+│                                  │    │  → SYSTEM.md             │   │
+│                                  │    │                          │   │
+│                                  │    └─ loadThemes()            │   │
+│                                  │       → modes/interactive/    │   │
+│                                  │         theme/                │   │
+│                                  └──────────────────────────────┘   │
+│                                                                     │
+│   ┌──────────────────────────────────────────────────────────────┐  │
+│   │                   tools/* (第三条路径)                         │  │
+│   │                                                              │  │
+│   │  不走 ResourceLoader，在 AgentSession._buildRuntime() 中      │  │
+│   │  直接调用 createAllToolDefinitions() 编程式构建。              │  │
+│   │  输入是 SettingsManager 的 shell/image 设置，                │  │
+│   │  与 ResourceLoader 完全无关。                                 │  │
+│   └──────────────────────────────────────────────────────────────┘  │
+└─────────────────────────────────────────────────────────────────────┘
+
+                      ResourceLoader (数据加载)
+                      ════════════════════════
+                      加载用户可配置的外部资源：
+                      
+                      ● extensions  →  d.ts/js 插件代码
+                      ● skills      →  SKILL.md 技能文件  
+                      ● prompts     →  prompt 模板文件
+                      ● themes      →  主题 CSS/配置
+                      ● AGENTS.md   →  项目级规则上下文
+                      ● SYSTEM.md   →  用户自定义 system prompt
+                      
+                      这些资源的共同特征：
+                      都是"用户/项目自行提供的文件"，
+                      路径来自 SettingsManager 的 packages/
+                      extensions/skills/prompts/themes 配置。
+                      
+                      
+  不走 ResourceLoader 的模块            与 ResourceLoader 的关系
+  ════════════════════════            ════════════════════════
+  
+  sessionManager                      完全无关。管理会话树，
+    会话持久化与树导航                  与资源发现无交集。
+    
+  settingsManager                     部分交叉。SettingsManager
+    配置管理                           传给 ResourceLoader 用于
+                                      解析 package 路径，但本身
+                                      不受 ResourceLoader 管理。
+    
+  modelRegistry                       完全无关。管理 API 密钥
+    provider/model 池                 和模型元数据。
+    
+  tools/*                             完全无关。内建工具是硬编码
+    工具 schema + 执行逻辑             的，不来自外部文件。
+    
+  system-prompt.ts                    消费方。从 ResourceLoader
+    prompt 组装                        取数据（skills/contextFiles）
+                                      做最终格式化，但不依赖
+                                      ResourceLoader 接口。
+    
+  compaction/*                        完全无关。操作会话树内的
+    压缩与摘要                         压缩条目。
+```
+
+```
+skills.ts
+  ├─ loadSkills(paths)         ← ResourceLoader 调用（加载数据）
+  └─ formatSkillsForPrompt()  ← system-prompt.ts 直接 import（格式化输出）
+
+prompt-templates.ts
+  ├─ loadPromptTemplates()    ← ResourceLoader 调用（加载数据）
+  └─ expandPromptTemplate()   ← AgentSession 直接 import（运行时展开用户输入）
+```
 
 
 
@@ -1340,8 +2047,6 @@ async reload(): Promise<void> {
    3. 追加 skills 技能列表
    4. 追加日期和工作目录
 
-
-
 ```mermaid
 flowchart TD
     Check{customPrompt\n存在?}
@@ -1352,7 +2057,7 @@ flowchart TD
     Default --> Append
 
     Append --> Context["追加 < project_context >"]
-    Context --> Skills["追加 available_skills\n需要 read 工具"]
+    Context --> Skills["formatSkillsForPrompt(skills) 追加 available_skills\n需要 read 工具"]
     Skills --> Tail["追加 Current date\n+ Current working directory"]
     Tail --> Final["最终 system prompt"]
 ```
@@ -1640,7 +2345,7 @@ Pi documentation (read only when the user asks about pi itself, its SDK, extensi
    ```
 
    DefaultPackageManager 内部通过 settingsManager.getPackages() 、 settingsManager.getExtensionPaths() 等 getter 拿到当前配置的包来源和资源路径，再去解析和发现具体的扩展、技能、主题文件。
-## 运行模式层 `mode/`
+## 三、运行模式层 `mode/`
 
 核心的模式解析逻辑位于 `resolveAppMode()` 函数中，该函数评估三个信号：显式指定的 `--mode` 标志、`--print` 标志，以及 stdin/stdout 的 TTY 状态：
 

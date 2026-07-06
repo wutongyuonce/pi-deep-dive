@@ -17,9 +17,12 @@
  * - 各种条目类型定义（SessionEntry 的联合类型）
  *
  * 调用链路：
- *   前端交互 → SessionManager.appendMessage() → _persist() → JSONL 文件
- *   LLM 请求 → SessionManager.buildSessionContext() → 消息列表
- *   resource-loader.ts → loadProjectContextFiles() → 加载 AGENTS.md 上下文
+ *   写入：前端交互 → SessionManager.appendMessage() → _persist() → JSONL 文件
+ *   读取：LLM 请求 → SessionManager.buildSessionContext() → 会话消息列表
+ *
+ *   注：resource-loader 和 SessionManager 是平行关系，各自提供 LLM 上下文的一部分，在 LLM 请求层合并：
+ *     (1) SessionManager → 会话历史（读取链路）
+ *     (2) resource-loader.ts → loadProjectContextFiles() → AGENTS.md 等项目上下文
  */
 
 import { type AgentMessage, uuidv7 } from "@earendil-works/pi-agent-core";
@@ -330,7 +333,7 @@ function migrateV2ToV3(entries: FileEntry[]): void {
 /**
  * 执行所有必要的版本迁移，将条目升级到 ${CURRENT_SESSION_VERSION}。
  *
- * 定位：启动加载流程的统一入口。由 `loadEntriesFromFile()` 和 `setSessionFile()` 调用。
+ * 定位：启动加载流程的统一入口。由`setSessionFile()` 调用。
  * 返回是否执行了任何迁移（调用方据此决定是否重写文件）。
  */
 function migrateToCurrentVersion(entries: FileEntry[]): boolean {
@@ -861,7 +864,7 @@ export class SessionManager {
 	private labelsById: Map<string, string> = new Map();
 	/** targetId → 最新标签时间戳的快速查找索引 */
 	private labelTimestampsById: Map<string, string> = new Map();
-	/** 当前会话树的叶子节点 ID（null 表示无条目） */
+	/** 游标，指向当前活跃分支的叶子节点 ID（null 表示无条目） */
 	private leafId: string | null = null;
 
 	/**
@@ -876,8 +879,8 @@ export class SessionManager {
 		this.cwd = resolvePath(cwd);
 		this.sessionDir = normalizePath(sessionDir);
 		this.persist = persist;
-		if (persist && this.sessionDir && !existsSync(this.sessionDir)) {
-			mkdirSync(this.sessionDir, { recursive: true });
+		if (persist && this.sessionDir && !existsSync(this.sessionDir)) { // 同步检查路径是否存在
+			mkdirSync(this.sessionDir, { recursive: true }); // 同步创建目录， recursive: true 表示会递归创建父目录
 		}
 
 		if (sessionFile) {
@@ -889,42 +892,42 @@ export class SessionManager {
 
 	/**
 	 * 切换到不同的会话文件（用于恢复和分支操作）。
-	 *
-	 * 流程：
-	 * 1. 加载文件条目
-	 * 2. 校验会话头完整性（损坏时自动重建）
-	 * 3. 执行版本迁移（必要时重写文件）
-	 * 4. 重建内存索引
 	 */
 	setSessionFile(sessionFile: string): void {
 		this.sessionFile = resolvePath(sessionFile);
 		if (existsSync(this.sessionFile)) {
+			// 分支 A：文件已存在 → 加载并校验
 			this.fileEntries = loadEntriesFromFile(this.sessionFile);
 
-			// 如果文件为空或损坏（无有效会话头），截断并重新创建，
-			// 避免在缺少会话头的情况下追加消息（会导致会话损坏）
 			if (this.fileEntries.length === 0) {
+				// 文件为空或损坏（无有效 SessionHeader）
+				// → 视为新会话重建，避免在空文件上追加消息导致持续损坏
 				const explicitPath = this.sessionFile;
 				this.newSession();
-				this.sessionFile = explicitPath;
+				this.sessionFile = explicitPath; // 保留用户指定的文件路径
 				this._rewriteFile();
 				this.flushed = true;
 				return;
 			}
 
+			// 恢复 sessionId（SessionHeader 缺失时降级创建新 id）
 			const header = this.fileEntries.find((e) => e.type === "session") as SessionHeader | undefined;
 			this.sessionId = header?.id ?? createSessionId();
 
+			// 旧版本 JSONL → 就地升级到当前版本
 			if (migrateToCurrentVersion(this.fileEntries)) {
 				this._rewriteFile();
 			}
 
+			// 重建 byId/labelsById/labelTimestampsById 三个内存索引
 			this._buildIndex();
 			this.flushed = true;
 		} else {
+			// 分支 B：文件不存在（--session 指定了一个新路径）
+			// → 创建全新 SessionHeader，推迟到首次 _persist() 时落盘
 			const explicitPath = this.sessionFile;
 			this.newSession();
-			this.sessionFile = explicitPath; // 保留 --session 标志传入的显式路径
+			this.sessionFile = explicitPath; // 保留用户指定的文件路径
 		}
 	}
 
@@ -950,6 +953,7 @@ export class SessionManager {
 		this.fileEntries = [header];
 		this.byId.clear();
 		this.labelsById.clear();
+		this.labelTimestampsById.clear();
 		this.leafId = null;
 		this.flushed = false;
 
@@ -1070,8 +1074,6 @@ export class SessionManager {
 	/** 追加消息到当前叶子节点之后。返回条目 ID。
 	 * 不允许直接写入 CompactionSummaryMessage 和 BranchSummaryMessage。
 	 * 原因：这些消息需要作为会话的顶级条目，而非消息子条目，
-	 * 以便更容易找到它们。需要通过 appendCompaction() 和
-	 * appendBranchSummary() 方法来追加。
 	 */
 	appendMessage(message: Message | CustomMessage | BashExecutionMessage): string {
 		const entry: SessionMessageEntry = {
@@ -1204,6 +1206,34 @@ export class SessionManager {
 		return entry.id;
 	}
 
+	/**
+	 * 设置或清除条目的标签。
+	 * 标签是用户定义的书签/导航标记。
+	 * 传入 undefined 或空字符串以清除标签。
+	 */
+	appendLabelChange(targetId: string, label: string | undefined): string {
+		if (!this.byId.has(targetId)) {
+			throw new Error(`Entry ${targetId} not found`);
+		}
+		const entry: LabelEntry = {
+			type: "label",
+			id: generateId(this.byId),
+			parentId: this.leafId, // 父节点为当前游标
+			timestamp: new Date().toISOString(),
+			targetId,
+			label,
+		};
+		this._appendEntry(entry);
+		if (label) {
+			this.labelsById.set(targetId, label);
+			this.labelTimestampsById.set(targetId, entry.timestamp);
+		} else {
+			this.labelsById.delete(targetId);
+			this.labelTimestampsById.delete(targetId);
+		}
+		return entry.id;
+	}
+
 	// =========================================================================
 	// 树遍历
 	// =========================================================================
@@ -1224,75 +1254,10 @@ export class SessionManager {
 	}
 
 	/**
-	 * 获取指定条目的所有直接子条目。
-	 */
-	getChildren(parentId: string): SessionEntry[] {
-		const children: SessionEntry[] = [];
-		for (const entry of this.byId.values()) {
-			if (entry.parentId === parentId) {
-				children.push(entry);
-			}
-		}
-		return children;
-	}
-
-	/**
 	 * 获取条目的标签（如果有）。
 	 */
 	getLabel(id: string): string | undefined {
 		return this.labelsById.get(id);
-	}
-
-	/**
-	 * 设置或清除条目的标签。
-	 * 标签是用户定义的书签/导航标记。
-	 * 传入 undefined 或空字符串以清除标签。
-	 */
-	appendLabelChange(targetId: string, label: string | undefined): string {
-		if (!this.byId.has(targetId)) {
-			throw new Error(`Entry ${targetId} not found`);
-		}
-		const entry: LabelEntry = {
-			type: "label",
-			id: generateId(this.byId),
-			parentId: this.leafId,
-			timestamp: new Date().toISOString(),
-			targetId,
-			label,
-		};
-		this._appendEntry(entry);
-		if (label) {
-			this.labelsById.set(targetId, label);
-			this.labelTimestampsById.set(targetId, entry.timestamp);
-		} else {
-			this.labelsById.delete(targetId);
-			this.labelTimestampsById.delete(targetId);
-		}
-		return entry.id;
-	}
-
-	/**
-	 * 从指定条目遍历到根节点，返回路径上所有条目（按顺序）。
-	 * 包含所有条目类型（消息、压缩、模型变更等）。
-	 * 使用 buildSessionContext() 获取发送给 LLM 的已解析消息列表。
-	 */
-	getBranch(fromId?: string): SessionEntry[] {
-		const path: SessionEntry[] = [];
-		const startId = fromId ?? this.leafId;
-		let current = startId ? this.byId.get(startId) : undefined;
-		while (current) {
-			path.unshift(current);
-			current = current.parentId ? this.byId.get(current.parentId) : undefined;
-		}
-		return path;
-	}
-
-	/**
-	 * 构建会话上下文（发送给 LLM 的内容）。
-	 * 从当前叶子节点进行树遍历。
-	 */
-	buildSessionContext(): SessionContext {
-		return buildSessionContext(this.getEntries(), this.leafId, this.byId);
 	}
 
 	/**
@@ -1310,6 +1275,42 @@ export class SessionManager {
 	 */
 	getEntries(): SessionEntry[] {
 		return this.fileEntries.filter((e): e is SessionEntry => e.type !== "session");
+	}
+
+	/**
+	 * 获取指定条目的所有直接子条目。
+	 */
+	getChildren(parentId: string): SessionEntry[] {
+		const children: SessionEntry[] = [];
+		for (const entry of this.byId.values()) {
+			if (entry.parentId === parentId) {
+				children.push(entry);
+			}
+		}
+		return children;
+	}
+
+	/**
+	 * 从指定条目遍历到根节点，返回路径上所有条目（按顺序）。
+	 * 包含所有条目类型（消息、压缩、模型变更等）。
+	 */
+	getBranch(fromId?: string): SessionEntry[] {
+		const path: SessionEntry[] = [];
+		const startId = fromId ?? this.leafId;     // 起点：显式指定 → 当前叶子
+		let current = startId ? this.byId.get(startId) : undefined;
+		while (current) {
+			path.unshift(current);                   // 头插法：子 → 父 → ... → root
+			current = current.parentId ? this.byId.get(current.parentId) : undefined; // 沿 parentId 链向上
+		}
+		return path;                                 // 从根到叶的顺序
+	}
+
+	/**
+	 * 构建会话上下文（发送给 LLM 的内容）。
+	 * 从当前叶子节点进行树遍历。
+	 */
+	buildSessionContext(): SessionContext {
+		return buildSessionContext(this.getEntries(), this.leafId, this.byId);
 	}
 
 	/**
@@ -1515,18 +1516,17 @@ export class SessionManager {
 	}
 
 	/**
-	 * 打开指定的会话文件。
-	 * @param path 会话文件路径
-	 * @param sessionDir 可选的会话目录，用于 /new 或 /branch 操作。省略时从文件的父目录推导
-	 * @param cwdOverride 可选的 cwd 覆盖，替代会话头中的 cwd
+	 * 打开指定的会话 JSONL 文件并重建 SessionManager 实例。
+	 *
+	 * @param path 会话 JSONL 文件路径（支持波浪号展开）
+	 * @param sessionDir 可选，指定会话目录（用于 /new 或 /branch 操作时查找相邻会话）
+	 * @param cwdOverride 可选，覆盖 cwd（用于 fork 场景，新 fork 使用当前 cwd 而非原始 cwd）
 	 */
 	static open(path: string, sessionDir?: string, cwdOverride?: string): SessionManager {
 		const resolvedPath = resolvePath(path);
-		// 提取 cwd（从会话头中，或使用 process.cwd()）
 		const entries = loadEntriesFromFile(resolvedPath);
 		const header = entries.find((e) => e.type === "session") as SessionHeader | undefined;
 		const cwd = cwdOverride ?? header?.cwd ?? process.cwd();
-		// 如果未提供 sessionDir，从文件的父目录推导
 		const dir = sessionDir ? normalizePath(sessionDir) : resolve(resolvedPath, "..");
 		return new SessionManager(cwd, dir, resolvedPath, true);
 	}

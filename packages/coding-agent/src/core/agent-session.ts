@@ -110,9 +110,13 @@ import { createToolDefinitionFromAgentTool } from "./tools/tool-definition-wrapp
 
 /** 从用户消息中解析出的技能块 */
 export interface ParsedSkillBlock {
+	/** 技能名称（对应 SKILL.md 中 name 字段） */
 	name: string;
+	/** 技能文件路径 */
 	location: string;
+	/** 技能提示词内容（SKILL.md 正文） */
 	content: string;
+	/** 技能块之后跟随的用户消息正文，无则为 undefined */
 	userMessage: string | undefined;
 }
 
@@ -131,22 +135,34 @@ export function parseSkillBlock(text: string): ParsedSkillBlock | null {
 	};
 }
 
-/** 会话级别的事件类型，扩展自核心 AgentEvent */
+/**
+ * 会话级别的事件类型，扩展自核心 AgentEvent。
+ *
+ * 在 Agent 事件基础上新增了 UI 队列更新、压缩生命周期、会话元数据变更、
+ * 思考级别切换和自动重试等会话层特有事件。
+ */
 export type AgentSessionEvent =
+	/** 继承所有 AgentEvent，但替换 agent_end 为会话版本 */
 	| Exclude<AgentEvent, { type: "agent_end" }>
+	/** Agent 运行结束，包含最终消息列表和是否将重试 */
 	| {
 			type: "agent_end";
 			messages: AgentMessage[];
 			willRetry: boolean;
 	  }
+	/** 用户消息队列更新（steer 打断 / followUp 排队） */
 	| {
 			type: "queue_update";
 			steering: readonly string[];
 			followUp: readonly string[];
 	  }
+	/** 压缩开始（手动 / 阈值触发 / 上下文溢出） */
 	| { type: "compaction_start"; reason: "manual" | "threshold" | "overflow" }
+	/** 会话显示名称变更 */
 	| { type: "session_info_changed"; name: string | undefined }
+	/** 思考级别变更 */
 	| { type: "thinking_level_changed"; level: ThinkingLevel }
+	/** 压缩完成，含结果、是否中止、是否将重试和错误信息 */
 	| {
 			type: "compaction_end";
 			reason: "manual" | "threshold" | "overflow";
@@ -155,7 +171,9 @@ export type AgentSessionEvent =
 			willRetry: boolean;
 			errorMessage?: string;
 	  }
+	/** 自动重试开始（第几次/共几次/延迟毫秒/错误信息） */
 	| { type: "auto_retry_start"; attempt: number; maxAttempts: number; delayMs: number; errorMessage: string }
+	/** 自动重试结束（成功与否/第几次/最终错误） */
 	| { type: "auto_retry_end"; success: boolean; attempt: number; finalError?: string };
 
 /** Agent 会话事件的监听函数类型 */
@@ -195,11 +213,17 @@ export interface AgentSessionConfig {
 	sessionStartEvent?: SessionStartEvent;
 }
 
+/** 扩展系统与 AgentSession 之间的绑定接口 */
 export interface ExtensionBindings {
+	/** 扩展提供的 UI 上下文（菜单、面板等） */
 	uiContext?: ExtensionUIContext;
+	/** 扩展命令注册到命令面板的操作 */
 	commandContextActions?: ExtensionCommandContextActions;
+	/** 用户中止操作时的中断处理器 */
 	abortHandler?: () => void;
+	/** 会话关闭时的清理处理器 */
 	shutdownHandler?: ShutdownHandler;
+	/** 扩展运行时错误的监听回调 */
 	onError?: ExtensionErrorListener;
 }
 
@@ -227,26 +251,44 @@ export interface ModelCycleResult {
 
 /** 会话统计信息，用于 /session 命令 */
 export interface SessionStats {
+	/** 会话文件的绝对路径（内存会话时为 undefined） */
 	sessionFile: string | undefined;
+	/** 会话唯一标识 */
 	sessionId: string;
+	/** 用户消息数量 */
 	userMessages: number;
+	/** 助手（模型）消息数量 */
 	assistantMessages: number;
+	/** 工具调用次数 */
 	toolCalls: number;
+	/** 工具结果消息数量 */
 	toolResults: number;
+	/** 消息总数 */
 	totalMessages: number;
+	/** Token 用量明细 */
 	tokens: {
+		/** 输入 token 数 */
 		input: number;
+		/** 输出 token 数 */
 		output: number;
+		/** 缓存读取 token 数（命中的缓存） */
 		cacheRead: number;
+		/** 缓存写入 token 数（新创建的缓存） */
 		cacheWrite: number;
+		/** 总 token 数 */
 		total: number;
 	};
+	/** 预估费用（美元） */
 	cost: number;
+	/** 上下文窗口使用率 */
 	contextUsage?: ContextUsage;
 }
 
+/** 工具定义条目，包含定义本身及其来源信息 */
 interface ToolDefinitionEntry {
+	/** 工具的定义（名称、描述、参数 schema 等） */
 	definition: ToolDefinition;
+	/** 工具来源（内置 / 扩展 / SDK 自定义） */
 	sourceInfo: SourceInfo;
 }
 
@@ -262,15 +304,28 @@ const THINKING_LEVELS: ThinkingLevel[] = ["off", "minimal", "low", "medium", "hi
 // ============================================================================
 
 export class AgentSession {
+	/** LLM 调用引擎，负责消息发送/流式响应/工具调用 */
 	readonly agent: Agent;
+	/** 会话持久化管理器，负责 JSONL 写入、分支、上下文重建 */
 	readonly sessionManager: SessionManager;
+	/** 配置管理器，负责全局/项目级设置的合并与持久化 */
 	readonly settingsManager: SettingsManager;
 
+	/** 会话级别绑定的模型白名单，可为不同 session 限定不同的 provider/model */
 	private _scopedModels: Array<{ model: Model<any>; thinkingLevel?: ThinkingLevel }>;
 
-	// 事件订阅状态
+	// -----------------------------------------------------------------
+	// 事件订阅
+	// -----------------------------------------------------------------
+
+	/** Agent 事件订阅的取消函数，dispose 时调用以解绑 */
 	private _unsubscribeAgent?: () => void;
+	/** 外部注册的事件监听器列表 */
 	private _eventListeners: AgentSessionEventListener[] = [];
+
+	// -----------------------------------------------------------------
+	// 用户交互消息队列
+	// -----------------------------------------------------------------
 
 	/** 待处理的 steer 打断消息队列，用于 UI 显示。消息被投递后移除。 */
 	private _steeringMessages: string[] = [];
@@ -279,86 +334,162 @@ export class AgentSession {
 	/** 排队等待在下一次用户提示词中作为上下文附带发送的消息。 */
 	private _pendingNextTurnMessages: CustomMessage[] = [];
 
-	// 压缩（Compaction）相关状态
+	// -----------------------------------------------------------------
+	// 压缩（Compaction）
+	// -----------------------------------------------------------------
+
+	/** 手动触发的压缩取消控制器 */
 	private _compactionAbortController: AbortController | undefined = undefined;
+	/** 上下文溢出时自动触发的压缩取消控制器 */
 	private _autoCompactionAbortController: AbortController | undefined = undefined;
+	/** 当前轮次是否已尝试过溢出恢复（避免重复压缩死循环） */
 	private _overflowRecoveryAttempted = false;
 
-	// 分支摘要状态
+	// -----------------------------------------------------------------
+	// 分支摘要
+	// -----------------------------------------------------------------
+
+	/** 分支摘要请求的取消控制器 */
 	private _branchSummaryAbortController: AbortController | undefined = undefined;
 
-	// 自动重试状态
+	// -----------------------------------------------------------------
+	// 自动重试
+	// -----------------------------------------------------------------
+
+	/** 重试请求的取消控制器 */
 	private _retryAbortController: AbortController | undefined = undefined;
+	/** 当前重试次数计数器 */
 	private _retryAttempt = 0;
 
-	// Bash 执行状态
+	// -----------------------------------------------------------------
+	// Bash 执行
+	// -----------------------------------------------------------------
+
+	/** Bash 执行的取消控制器 */
 	private _bashAbortController: AbortController | undefined = undefined;
+	/** Bash 执行完成后待持久化的消息队列（先排队，batch 写入） */
 	private _pendingBashMessages: BashExecutionMessage[] = [];
 
+	// -----------------------------------------------------------------
 	// 扩展系统
+	// -----------------------------------------------------------------
+
+	/** 扩展运行时，管理所有已加载扩展的生命周期和钩子 */
 	private _extensionRunner!: ExtensionRunner;
+	/** 当前会话的轮次计数（从 0 开始，每次用户提交递增） */
 	private _turnIndex = 0;
 
+	/** 资源加载器，统一管理 skills/prompts/themes/AGENTS.md 等外部资源 */
 	private _resourceLoader: ResourceLoader;
+	/** SDK 消费者注入的自定义工具定义列表 */
 	private _customTools: ToolDefinition[];
+	/** 内建工具的基础定义集合 */
 	private _baseToolDefinitions: Map<string, ToolDefinition> = new Map();
+	/** 当前工作目录 */
 	private _cwd: string;
+	/** 扩展运行时的间接引用，用于延迟注入或外部访问 */
 	private _extensionRunnerRef?: { current?: ExtensionRunner };
+	/** 构造时指定的初始激活工具名称列表 */
 	private _initialActiveToolNames?: string[];
+	/** 允许使用的工具白名单（Set 以 O(1) 检查） */
 	private _allowedToolNames?: Set<string>;
+	/** 内建工具覆盖映射，用于替换默认的工具实现 */
 	private _baseToolsOverride?: Record<string, AgentTool>;
+	/** 会话启动事件（startup / resume / fork 等） */
 	private _sessionStartEvent: SessionStartEvent;
+	/** 扩展提供的 UI 上下文，供交互模式使用 */
 	private _extensionUIContext?: ExtensionUIContext;
+	/** 扩展命令上下文操作，供命令面板使用 */
 	private _extensionCommandContextActions?: ExtensionCommandContextActions;
+	/** 用户中止当前操作时调用的扩展中断处理器 */
 	private _extensionAbortHandler?: () => void;
+	/** 会话关闭时的扩展清理处理器 */
 	private _extensionShutdownHandler?: ShutdownHandler;
+	/** 扩展错误事件的监听器 */
 	private _extensionErrorListener?: ExtensionErrorListener;
+	/** 取消扩展错误监听的函数 */
 	private _extensionErrorUnsubscriber?: () => void;
 
-	// 模型注册表，用于 API 密钥解析
+	/** 模型注册表，用于 API 密钥解析和 provider/model 发现 */
 	private _modelRegistry: ModelRegistry;
 
-	// 工具注册表，供扩展系统的 getTools/setTools 使用
+	// -----------------------------------------------------------------
+	// 工具注册与提示词
+	// -----------------------------------------------------------------
+
+	/** 工具名 → AgentTool 实例的注册表，供扩展系统的 getTools/setTools 使用 */
 	private _toolRegistry: Map<string, AgentTool> = new Map();
+	/** 工具名 → ToolDefinitionEntry（定义 + 元数据） */
 	private _toolDefinitions: Map<string, ToolDefinitionEntry> = new Map();
+	/** 工具名 → prompt 片段，用于 system prompt 中的工具描述 */
 	private _toolPromptSnippets: Map<string, string> = new Map();
+	/** 工具名 → 使用指南数组，用于 system prompt 中的行为约束 */
 	private _toolPromptGuidelines: Map<string, string[]> = new Map();
 
-	// 基础系统提示词（不含扩展附加内容）——每轮对话重新应用扩展附加
+	// -----------------------------------------------------------------
+	// 系统提示词
+	// -----------------------------------------------------------------
+
+	/** 基础系统提示词（不含扩展附加内容），每轮对话重新应用扩展附加 */
 	private _baseSystemPrompt = "";
+	/** 上一次 _rebuildSystemPrompt() 使用的参数缓存，用于需要重新构建时复用 */
 	private _baseSystemPromptOptions!: BuildSystemPromptOptions;
 
 	constructor(config: AgentSessionConfig) {
+		// ── 三大只读服务 ──
 		this.agent = config.agent;
 		this.sessionManager = config.sessionManager;
 		this.settingsManager = config.settingsManager;
+
+		// ── 模型与会话范围 ──
 		this._scopedModels = config.scopedModels ?? [];
+
+		// ── 资源与工具注入 ──
 		this._resourceLoader = config.resourceLoader;
 		this._customTools = config.customTools ?? [];
 		this._cwd = config.cwd;
+
+		// ── 模型注册表 ──
 		this._modelRegistry = config.modelRegistry;
+
+		// ── 扩展系统 ──
 		this._extensionRunnerRef = config.extensionRunnerRef;
+
+		// ── 工具策略 ──
 		this._initialActiveToolNames = config.initialActiveToolNames;
 		this._allowedToolNames = config.allowedToolNames ? new Set(config.allowedToolNames) : undefined;
 		this._baseToolsOverride = config.baseToolsOverride;
+
+		// ── 会话启动事件（默认 startup） ──
 		this._sessionStartEvent = config.sessionStartEvent ?? { type: "session_start", reason: "startup" };
 
-		// 始终订阅 agent 事件以进行内部处理
-		// （会话持久化、扩展系统、自动压缩、重试逻辑）
+		// ── 订阅 agent 事件（持久化、扩展、自动压缩、重试）──
 		this._unsubscribeAgent = this.agent.subscribe(this._handleAgentEvent);
 		this._installAgentToolHooks();
 
+		// ── 构建运行时：注册工具、绑定扩展、初始化 system prompt ──
 		this._buildRuntime({
 			activeToolNames: this._initialActiveToolNames,
 			includeAllExtensionTools: true,
 		});
 	}
 
-	/** 模型注册表，用于 API 密钥解析和模型发现 */
+	// ============================================================================
+	// 初始化与工具钩子
+	// ============================================================================
+
+	/** 模型注册表，用于 API 密钥解析和 provider/model 发现 */
 	get modelRegistry(): ModelRegistry {
 		return this._modelRegistry;
 	}
 
+	/**
+	 * 解析模型请求所需的认证信息（API Key + Headers）。
+	 *
+	 * 先从 modelRegistry 获取，失败时根据错误类型生成对应的用户提示文案：
+	 *   - 无 API Key → 提示用户配置
+	 *   - 订阅认证失效 → 提示用户 /login 重新认证
+	 */
 	private async _getRequiredRequestAuth(model: Model<any>): Promise<{
 		apiKey: string;
 		headers?: Record<string, string>;
@@ -386,6 +517,12 @@ export class AgentSession {
 		throw new Error(formatNoApiKeyFoundMessage(model.provider));
 	}
 
+	/**
+	 * 获取压缩请求的认证信息（比 _getRequiredRequestAuth 宽松）。
+	 *
+	 * streamSimple 模式下必须具备真实认证；其他流函数允许返回空认证，
+	 * 由此类流函数自行兼容无认证场景。
+	 */
 	private async _getCompactionRequestAuth(model: Model<any>): Promise<{
 		apiKey?: string;
 		headers?: Record<string, string>;
@@ -471,6 +608,7 @@ export class AgentSession {
 		}
 	}
 
+	/** 向 UI 层广播当前的消息队列状态（steer 打断 + followUp 后续）。 */
 	private _emitQueueUpdate(): void {
 		this._emit({
 			type: "queue_update",
@@ -556,6 +694,11 @@ export class AgentSession {
 		}
 	};
 
+	/**
+	 * 判断 agent_end 事件后是否需要自动重试。
+	 *
+	 * 条件：重试已启用 && 未达最大重试次数 && 最后一条 assistant 消息包含可重试错误。
+	 */
 	private _willRetryAfterAgentEnd(event: Extract<AgentEvent, { type: "agent_end" }>): boolean {
 		const settings = this.settingsManager.getRetrySettings();
 		if (!settings.enabled || this._retryAttempt >= settings.maxRetries) {
@@ -791,6 +934,7 @@ export class AgentSession {
 		}));
 	}
 
+	/** 按工具名获取单个工具的定义，未注册时返回 undefined */
 	getToolDefinition(name: string): ToolDefinition | undefined {
 		return this._toolDefinitions.get(name)?.definition;
 	}
@@ -872,6 +1016,16 @@ export class AgentSession {
 		return this._resourceLoader.getPrompts().prompts;
 	}
 
+	// ============================================================================
+	// 系统提示词
+	// ============================================================================
+
+	/**
+	 * 规范化工具 prompt 片段。
+	 *
+	 * 将多行/多余空白合并为单行，确保 toolSnippets 中的描述文本格式一致。
+	 * 空字符串或纯空白返回 undefined。
+	 */
 	private _normalizePromptSnippet(text: string | undefined): string | undefined {
 		if (!text) return undefined;
 		const oneLine = text
@@ -881,6 +1035,11 @@ export class AgentSession {
 		return oneLine.length > 0 ? oneLine : undefined;
 	}
 
+	/**
+	 * 规范化工具使用指南列表。
+	 *
+	 * 对每条 guideline 做 trim 去重，剔除空字符串，确保 system prompt 中无重复指南。
+	 */
 	private _normalizePromptGuidelines(guidelines: string[] | undefined): string[] {
 		if (!guidelines || guidelines.length === 0) {
 			return [];
@@ -896,6 +1055,13 @@ export class AgentSession {
 		return Array.from(unique);
 	}
 
+	/**
+	 * 重建系统提示词。
+	 *
+	 * 从 resourceLoader 获取 skills/contextFiles/systemPrompt 等数据，
+	 * 结合当前激活工具的 snippets/guidelines，调用 buildSystemPrompt() 生成完整 prompt。
+	 * 结果存入 _baseSystemPrompt（不含扩展附加内容，每轮重新应用）。
+	 */
 	private _rebuildSystemPrompt(toolNames: string[]): string {
 		const validToolNames = toolNames.filter((name) => this._toolRegistry.has(name));
 		const toolSnippets: Record<string, string> = {};
@@ -936,6 +1102,12 @@ export class AgentSession {
 	// 提示词（Prompt）管理
 	// =========================================================================
 
+	/**
+	 * 执行一次 Agent 运行，并在完成后处理压缩/重试/分支摘要等尾部决策。
+	 *
+	 * 接收单条或批量消息，提交给 agent 引擎运行，agent 完成后调用
+	 * _handlePostAgentRun() 处理压缩检查和重试逻辑。
+	 */
 	private async _runAgentPrompt(messages: AgentMessage | AgentMessage[]): Promise<void> {
 		try {
 			await this.agent.prompt(messages);
@@ -1414,6 +1586,7 @@ export class AgentSession {
 		return this._followUpMessages;
 	}
 
+	/** 获取资源加载器，用于外部访问已加载的 skills/contextFiles 等 */
 	get resourceLoader(): ResourceLoader {
 		return this._resourceLoader;
 	}
@@ -1431,6 +1604,14 @@ export class AgentSession {
 	// 模型管理
 	// =========================================================================
 
+	/**
+	 * 发送模型切换事件。
+	 *
+	 * 向 event-bus 广播模型变更、发送事件给 UI、持久化为 ModelChangeEntry。
+	 * 模型未变时跳过。
+	 *
+	 * @param source "set"（直接设置）/ "cycle"（循环切换）/ "restore"（恢复）
+	 */
 	private async _emitModelSelect(
 		nextModel: Model<any>,
 		previousModel: Model<any> | undefined,
@@ -1480,6 +1661,7 @@ export class AgentSession {
 		return this._cycleAvailableModel(direction);
 	}
 
+	/** 在 scopedModels 列表中循环切换模型（--models 参数限定的范围内） */
 	private async _cycleScopedModel(direction: "forward" | "backward"): Promise<ModelCycleResult | undefined> {
 		const scopedModels = this._scopedModels.filter((scoped) => this._modelRegistry.hasConfiguredAuth(scoped.model));
 		if (scopedModels.length <= 1) return undefined;
@@ -1509,6 +1691,7 @@ export class AgentSession {
 		return { model: next.model, thinkingLevel: this.thinkingLevel, isScoped: true };
 	}
 
+	/** 在所有可用模型中循环切换（排除已废弃/实验性模型，跳过非最新版本） */
 	private async _cycleAvailableModel(direction: "forward" | "backward"): Promise<ModelCycleResult | undefined> {
 		const availableModels = await this._modelRegistry.getAvailable();
 		if (availableModels.length <= 1) return undefined;
@@ -1599,6 +1782,11 @@ export class AgentSession {
 		return !!this.model?.reasoning;
 	}
 
+	/**
+	 * 模型切换时确定思维级别。
+	 *
+	 * 优先级：显式指定 > 当前会话设置的级别（切换时不丢失） > scopedModels 中附带的默认级别。
+	 */
 	private _getThinkingLevelForModelSwitch(explicitLevel?: ThinkingLevel): ThinkingLevel {
 		if (explicitLevel !== undefined) {
 			return explicitLevel;
@@ -1609,6 +1797,7 @@ export class AgentSession {
 		return this.thinkingLevel;
 	}
 
+	/** 将思维级别裁剪到可用范围内，不支持的级别回退到可用列表中的最接近值。 */
 	private _clampThinkingLevel(level: ThinkingLevel, _availableLevels: ThinkingLevel[]): ThinkingLevel {
 		return this.model ? (clampThinkingLevel(this.model, level) as ThinkingLevel) : "off";
 	}
@@ -2070,6 +2259,10 @@ export class AgentSession {
 		return this.settingsManager.getCompactionEnabled();
 	}
 
+	// =========================================================================
+	// 扩展与运行时
+	// =========================================================================
+
 	/**
 	 * 绑定宿主侧扩展上下文。
 	 *
@@ -2132,6 +2325,7 @@ export class AgentSession {
 		this.agent.state.systemPrompt = this._baseSystemPrompt;
 	}
 
+	/** 将扩展上报的资源路径转换为 ResourceLoader.extendResources() 所需的格式 */
 	private buildExtensionResourcePaths(entries: Array<{ path: string; extensionPath: string }>): Array<{
 		path: string;
 		metadata: { source: string; scope: "temporary"; origin: "top-level"; baseDir?: string };
@@ -2151,6 +2345,7 @@ export class AgentSession {
 		});
 	}
 
+	/** 从扩展路径中提取人类可读的来源标签（包名或目录名） */
 	private getExtensionSourceLabel(extensionPath: string): string {
 		if (extensionPath.startsWith("<")) {
 			return `extension:${extensionPath.replace(/[<>]/g, "")}`;
@@ -2160,6 +2355,7 @@ export class AgentSession {
 		return `extension:${name}`;
 	}
 
+	/** 将扩展上下文绑定注入到 ExtensionRunner（UI 上下文、命令操作、中断/关闭/错误处理） */
 	private _applyExtensionBindings(runner: ExtensionRunner): void {
 		runner.setUIContext(this._extensionUIContext);
 		runner.bindCommandContext(this._extensionCommandContextActions);
@@ -2170,6 +2366,12 @@ export class AgentSession {
 			: undefined;
 	}
 
+	/**
+	 * 根据 modelRegistry 刷新当前 agent 的模型引用。
+	 *
+	 * agent.state.model 可能持有过时的 Model 对象引用，此方法从注册表中
+	 * 重新查找同名模型以确保引用一致。常用于设置或重载后。
+	 */
 	private _refreshCurrentModelFromRegistry(): void {
 		const currentModel = this.model;
 		if (!currentModel) {
@@ -2184,6 +2386,12 @@ export class AgentSession {
 		this.agent.state.model = refreshedModel;
 	}
 
+	/**
+	 * 绑定扩展核心功能到 AgentSession。
+	 *
+	 * 包括：设置工具注册表、模型循环、系统提示词、重新加载、模型恢复、
+	 * 会话上下文访问、资源发现、session_start 事件发送等。
+	 */
 	private _bindExtensionCore(runner: ExtensionRunner): void {
 		const getCommands = (): SlashCommandInfo[] => {
 			const extensionCommands: SlashCommandInfo[] = runner.getRegisteredCommands().map((command) => ({
@@ -2490,6 +2698,7 @@ export class AgentSession {
 	// 自动重试
 	// =========================================================================
 
+	/** 检查错误是否为不可重试的 provider 额度限制（非瞬态错误，不应重试） */
 	private _isNonRetryableProviderLimitError(errorMessage: string): boolean {
 		return /GoUsageLimitError|FreeUsageLimitError|Monthly usage limit reached|available balance|insufficient_quota|out of budget|quota exceeded|billing/i.test(
 			errorMessage,
@@ -2705,7 +2914,7 @@ export class AgentSession {
 	}
 
 	// =========================================================================
-	// 会话管理
+	// 会话信息与导出
 	// =========================================================================
 
 	/**
@@ -2715,10 +2924,6 @@ export class AgentSession {
 		this.sessionManager.appendSessionInfo(name);
 		this._emit({ type: "session_info_changed", name: this.sessionManager.getSessionName() });
 	}
-
-	// =========================================================================
-	// 树状导航
-	// =========================================================================
 
 	/**
 	 * 导航到会话树中的不同节点。
@@ -2937,6 +3142,7 @@ export class AgentSession {
 		return result;
 	}
 
+	/** 从消息内容中提取纯文本（支持 string 和 content 数组两种格式） */
 	private _extractUserMessageText(content: string | Array<{ type: string; text?: string }>): string {
 		if (typeof content === "string") return content;
 		if (Array.isArray(content)) {
@@ -2996,6 +3202,7 @@ export class AgentSession {
 		};
 	}
 
+	/** 计算当前 agent 状态的上下文窗口使用率 */
 	getContextUsage(): ContextUsage | undefined {
 		const model = this.model;
 		if (!model) return undefined;
@@ -3104,7 +3311,7 @@ export class AgentSession {
 	}
 
 	// =========================================================================
-	// 工具方法
+	// 辅助方法
 	// =========================================================================
 
 	/**
@@ -3136,10 +3343,12 @@ export class AgentSession {
 		return text.trim() || undefined;
 	}
 
-	// =========================================================================
-	// 扩展系统
-	// =========================================================================
-
+	/**
+	 * 创建"替换后的会话上下文"，用于 fork/switch 操作时的资源切换通知。
+	 *
+	 * 返回一个包含新旧 ResourceLoader 引用的快照对象，供 UI 层
+	 * 在 AgentSessionRuntime 替换 .session 时对比并做资源迁移。
+	 */
 	createReplacedSessionContext(): ReplacedSessionContext {
 		const context = Object.defineProperties(
 			{},

@@ -8,11 +8,6 @@
  * - 4 种自定义消息类型接口（BashExecutionMessage / CustomMessage / BranchSummaryMessage / CompactionSummaryMessage）
  * - 通过声明合并（declaration merging）将自定义类型注入 AgentMessage 联合类型
  * - convertToLlm() 转换器，将所有消息类型映射为 LLM 兼容的 Message 格式
- *
- * 调用链路：
- * - 被 agent 核心调用（transformToLlm 选项），用于将对话历史发送给 LLM
- * - 被 compaction（压缩）模块调用，用于生成摘要时的消息转换
- * - 被自定义扩展和工具调用，注入自定义消息到对话中
  */
 
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
