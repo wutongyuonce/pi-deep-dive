@@ -746,7 +746,7 @@ getTree() 获取会话的树状结构
 
 ## Session 读取链路（内存中从树到 LLM 消息数组）`buildSessionContext()`
 
-`buildSessionContext()` 是 session 存储和 Agent 运行时之间的桥梁。Agent 需要一个线性的消息数组来调用 LLM，而 session 是一棵树。这个函数的职责是：给定一个叶节点，沿 `parentId` 链回溯到根节点，收集路径上的消息，返回 `SessionContext`。
+`buildSessionContext()` 是 session 存储和 Agent 运行时之间的桥梁。Agent 需要一个线性的消息数组来调用 LLM，而 session 是一棵树。这个函数的职责是：给定一个叶节点，沿 `parentId` 链回溯到根节点，收集路径上的消息。
 
 *注意与 getBranch 区分，getBranch 是收集所有条目。*
 
@@ -796,17 +796,7 @@ const appendMessage = (entry: SessionEntry) => {
 
 `appendMessage` 是一个局部函数，它定义了"哪些 entry 类型产生 LLM 消息"的规则。注意 `CustomMessageEntry` 被转换成 `CustomMessage`（一种特殊的 user 消息），而 `BranchSummaryEntry` 被转换成 `BranchSummaryMessage`。这些转换由 `messages.ts` 中的工厂函数完成，确保消息格式符合 LLM API 的要求。
 
-返回的 `SessionContext` 包含三个字段：
-
-```typescript
-interface SessionContext {
-  messages: AgentMessage[];      // 发送给 LLM 的消息数组
-  thinkingLevel: string;         // 当前路径的 thinking level
-  model: { provider: string; modelId: string } | null;
-}
-```
-
-Agent 拿到 `SessionContext` 后，用 `messages` 调用 LLM，用 `thinkingLevel` 和 `model` 恢复当前配置。整个流程形成一条清晰的数据管线：**JSONL 文件 → entry 列表 → 树遍历 → 路径提取 → 消息数组 → LLM 调用**。
+Agent 拿到 `{messages, thinkingLevel, model}` 后，用 `messages` 调用 LLM，用 `thinkingLevel` 和 `model` 恢复当前配置。整个流程形成一条清晰的数据管线：**JSONL 文件 → entry 列表 → 树遍历 → 路径提取 → 消息数组 → LLM 调用**。
 
 ## Session 分支链路（内存中 JSONL 条目列表的分支）
 
