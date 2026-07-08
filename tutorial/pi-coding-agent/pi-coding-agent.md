@@ -719,7 +719,9 @@ main.ts
 #### `core/agent-session.ts` **产品层真正的核心对象**
 
 - 解决的是**运行问题**，关心“这轮对话怎么跑”
-- 真正负责 prompt、持久化消息、tool hooks、extension 扩展绑定、compaction、bash、tree navigation
+- 真正负责 prompt 进入队列、agent 事件订阅、持久化消息、tool hooks、extension 扩展绑定、自动压缩 compaction、retry、bash 执行、tree navigation、slash command / skill / prompt template / active tools
+
+
 
 ```ts
 export class AgentSession {
@@ -996,6 +998,36 @@ export class AgentSession {
     extensionRunner getter
 ```
 
+ ```typescript
+ // 最简用法 - 使用默认值
+ const { session } = await createAgentSession();
+ // 指定模型
+ import { getModel } from '@earendil-works/pi-ai';
+ const { session } = await createAgentSession({
+   model: getModel('anthropic', 'claude-opus-4-5'),
+   thinkingLevel: 'high',
+ });
+
+ // 继续之前的会话
+ const { session, modelFallbackMessage } = await createAgentSession({
+   continueSession: true,
+ });
+
+ // 完全控制
+ const loader = new DefaultResourceLoader({
+   cwd: process.cwd(),
+   agentDir: getAgentDir(),
+   settingsManager: SettingsManager.create(),
+ });
+ await loader.reload();
+ const { session } = await createAgentSession({
+   model: myModel,
+   tools: ["read", "bash"],
+   resourceLoader: loader,
+   sessionManager: SessionManager.inMemory(),
+ });
+ ```
+
 
 
 #### `core/agent-session-services.ts` **与 cwd 绑定的环境基础设施集合**
@@ -1042,7 +1074,7 @@ export class AgentSession {
 - 再重建一整套 runtime 结果
 - 最后替换当前 `session/services`
 
-## 二、AgentSession 注入模块（产品机制层）
+## 二、AgentSession 注入的模块（产品机制层）
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
@@ -1093,9 +1125,9 @@ export class AgentSession {
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
+哪些资源在 session 启动前装配，哪些会在运行中动态注入？
 
-
-### AgentSession 资源注入主线（全部经 ResourceLoader 统一加载后提供）
+### 资源注入主线（`core/resource-loader.ts` 统一加载）
 
 ```
 ResourceLoader (数据加载)
@@ -1114,6 +1146,8 @@ ResourceLoader (数据加载)
                       路径来自 SettingsManager 的 packages/
                       extensions/skills/prompts/themes 配置。
 ```
+
+如果没有它，`extensions / skills / prompts / themes / AGENTS.md / SYSTEM.md / packages` 都会各自有一套发现逻辑。现在它们被收束为统一装配入口，再被 `system-prompt.ts` 和 `AgentSession` 消费。
 
 怎样把 settings、packages、extensions、skills、prompts、themes、tools 装进一个统一运行时。
 
@@ -1148,7 +1182,7 @@ flowchart TD
     D --> N["tool registry / command registry / UI bindings"]
 ```
 
-#### 资源加载器 `core/resource-loader.ts`
+
 
 
 
@@ -1184,38 +1218,346 @@ await this.settingsManager.reload();
 
    DefaultPackageManager 内部通过 settingsManager.getPackages() 、 settingsManager.getExtensionPaths() 等 getter 拿到当前配置的包来源和资源路径，再去解析和发现具体的扩展、技能、主题文件。
 
-#### packageManager
 
-#### Extensions
 
-#### Skills
-
-#### prompt-templates
+`updateSkillsFromPaths()` 调用 `loadSkills()` (core/skills.ts)
 
 
 
-### 会话生命周期服务（构造函数直接注入 AgentSession，不走 ResourceLoader）
+#### ResourceLoader 接口
 
-#### sessionManager
+Resource Loader 的公共接口定义了消费者能做什么：
 
-完全无关。管理会话树，与资源发现无交集。
-
-#### settingsManager
-
-SettingsManager 传给 ResourceLoader 用于解析 package 路径，但本身不受 ResourceLoader 管理。
-
-[设置管理器 `core/settings-manager.ts`：全局、项目级 Settings.json](./settings-manager.md)
-
-#### modelRegistry
-
-完全无关。管理 API 密钥和模型元数据。
-provider/model 池
-
-
-
-#### AGENTS.md
-
+```typescript
+export interface ResourceLoader {
+	getExtensions(): LoadExtensionsResult;
+	getSkills(): { skills: Skill[]; diagnostics: ResourceDiagnostic[] };
+	getPrompts(): { prompts: PromptTemplate[]; diagnostics: ResourceDiagnostic[] };
+	getThemes(): { themes: Theme[]; diagnostics: ResourceDiagnostic[] };
+	getAgentsFiles(): { agentsFiles: Array<{ path: string; content: string }> };
+	getSystemPrompt(): string | undefined;
+	getAppendSystemPrompt(): string[];
+	extendResources(paths: ResourceExtensionPaths): void;
+	reload(): Promise<void>;
+}
 ```
+
+几个值得注意的设计点：
+
+* **每种资源的返回值都包含 `diagnostics`**。Resource Loader 不会因为一个资源加载失败就中止整个加载过程。它会继续加载其他资源，把错误收集到 `ResourceDiagnostic[]` 中。上层代码（比如 TUI）可以选择把这些诊断信息展示给用户，也可以忽略。
+* **`extendResources` 允许运行时动态扩展**。Extension 加载完成后，它可以向 Resource Loader 注册额外的 skill、prompt、theme 路径。这是 "Extension 可以提供 Skill" 的底层机制。
+* **`reload` 是异步的**。因为加载过程涉及文件系统读取、npm 包解析，这些操作是异步的。但 `getExtensions` 等取值方法是同步的 — 它们只是返回上一次 `reload` 的结果。
+
+#### `core/diagnostics.ts` 资源加载诊断类型定义
+
+* 被 `resource-loader.ts` 生产诊断数据
+* 被 `package-manager.ts` 包管理、CLI  启动流程和 UI 展示层消费
+
+```ts
+// 资源系统对外暴露的统一诊断项。承载资源加载期间的 warning、error 和 collision 结果。
+export interface ResourceDiagnostic {
+	type: "warning" | "error" | "collision"; // 诊断类型
+	message: string; // 诊断消息
+	path?: string; // 相关文件路径
+	collision?: ResourceCollision; // 如果类型为 collision，包含冲突的详细信息
+}
+
+// ResourceDiagnostic 中 collision 分支的详细资源冲突描述。
+// 记录同名资源竞争时的胜出方、落败方及来源信息，便于 UI 给出可追踪提示。
+export interface ResourceCollision {
+	resourceType: "extension" | "skill" | "prompt" | "theme"; // 资源类型
+	name: string; // 冲突资源的名称（技能名、命令/工具/标志名、提示词名、主题名）
+	winnerPath: string; // 优胜方的文件路径
+	loserPath: string; // 落败方的文件路径
+	winnerSource?: string; // 优胜方的来源标识，如 "npm:foo"、"git:..."、"local"
+	loserSource?: string; // 落败方的来源标识
+}
+```
+
+#### 包管理器模块 `core/package-manager.ts`
+
+文件定位：coding-agent 的资源包安装、解析和管理模块。
+
+功能概述：
+
+ - 管理扩展（extensions）、技能（skills）、提示模板（prompts）和主题（themes）的包源
+ - 支持三种包源类型：npm 包、git 仓库、本地路径
+ - 提供包的安装、卸载、更新和版本检查功能
+ - 从用户级（~/.pi/agent/）和项目级（.pi/）两个作用域解析资源
+ - 支持 pi manifest（package.json 中的 pi 字段）声明式资源管理
+ - 支持 glob 模式和覆盖模式（!排除、+强制包含、-强制排除）的资源过滤
+ - 自动发现本地目录中的资源文件（遵循目录约定）
+
+调用链路：
+
+* resource-loader.ts → DefaultResourceLoader.reload() → packageManager.resolve() → 资源路径列表
+* TUI /login 命令 → packageManager.install() → npm/git 安装
+* TUI /reload 命令 → packageManager.update() → 检查并更新已安装的包
+
+```ts
+├── 基础工具层
+│   ├── getEnv()         环境变量获取（处理 Flatpak 沙箱）
+│   ├── 常量定义          超时、并发数
+│   └── 导出类型          PathMetadata, ResolvedResource, ResolvedPaths 资源路径元数据和解析结果类型 ; ProgressEvent, PackageUpdate
+│
+├── 核心接口层 ★ 先读这里
+│   ├── ConfiguredPackage   已配置包的描述
+│   └── PackageManager      包管理器接口（所有对外 API 定义）
+│
+├── 内部类型与常量
+│   ├── NpmSource / GitSource / LocalSource  三种包源类型
+│   ├── PiManifest           package.json 中 pi 字段的结构
+│   └── RESOURCE_TYPES      四种资源：extensions/skills/prompts/themes
+│
+├── 文件收集与过滤引擎
+│   ├── collectFiles()      通用文件收集
+│   ├── collectSkillEntries() / collectAutoSkillEntries()
+│   ├── collectAutoPromptEntries() / collectAutoThemeEntries()
+│   ├── collectAutoExtensionEntries()
+│   └── applyPatterns()     模式匹配（!排除 +强制包含 -强制排除）
+│
+├── DefaultPackageManager 类 ~ 主实现 ★ 核心逻辑
+    ├── 构造函数 + 设置相关方法
+    ├── resolve()           解析所有包源 → 返回资源路径列表
+    ├── install()           安装 npm/git 包
+    ├── update()            检查并更新已安装的包
+    ├── remove()            卸载包
+    ├── 私有方法            parseSource(), installNpmPackage(), gitCloneOrPull(),
+    │                       isUpdateAvailable() 等
+    └── 工具方法            runCommand(), runCommandSync() 等
+```
+
+```ts
+/** 已解析的全部资源路径，按资源类型分组 */
+export interface ResolvedPaths {
+	extensions: ResolvedResource[]; // 扩展路径列表
+	skills: ResolvedResource[]; // 技能路径列表
+	prompts: ResolvedResource[]; // 提示模板路径列表
+	themes: ResolvedResource[]; // 主题路径列表
+}
+
+/** 已解析的资源路径，包含启用状态和元数据 */
+export interface ResolvedResource {
+	path: string; // 资源文件的绝对路径
+	enabled: boolean; // 该资源是否启用
+	metadata: PathMetadata; // 资源的来源元数据
+}
+
+/** 资源路径元数据，描述一个资源文件的来源、作用域和来源方式 */
+export interface PathMetadata {
+	source: string; // 来源标识（如 "local"、"auto"、npm 包名、git URL 等）
+	scope: SourceScope; // 作用域：用户级 / 项目级 / 临时
+	origin: "package" | "top-level"; // 来源方式：包 / 顶层配置
+	baseDir?: string; // 资源所在的基础目录
+}
+```
+
+| source 值 | 含义                                         | 来源                                                     |
+| --------- | -------------------------------------------- | -------------------------------------------------------- |
+| "local"   | 用户在配置中显式指定的文件路径               | settings 中写了 skills: ["/path/to/skill.md"] 等参数     |
+| "auto"    | pi 在标准目录下自动扫描发现                  | 扫描 ~/.pi/skills/、<project>/.pi/skills/ 等目录时找到   |
+| "cli"     | 通过 命令行参数 --extension / --skill 等传入 | reload() 中补写的临时来源                                |
+| 包标识符  | 来自 npm 包 ，source 是包的名称或标识符      | 如 @someone/pi-skill-foo 、 ./local-package 、git URL 等 |
+
+```ts
+// 计算资源的优先级排名（数值越小优先级越高）。
+function resourcePrecedenceRank(m: PathMetadata): number {
+	if (m.origin === "package") return 4;
+	const scopeBase = m.scope === "project" ? 0 : 2;
+	return scopeBase + (m.source === "local" ? 0 : 1);
+}
+```
+
+优先级（从高到低）：
+ *   0  项目级 + 设置条目（source: "local", scope: "project"）
+ *   1  项目级 + 自动发现（source: "auto", scope: "project"）
+ *   2  用户级 + 设置条目（source: "local", scope: "user"）
+ *   3  用户级 + 自动发现（source: "auto", scope: "user"）
+ *   4  包资源（origin: "package"）
+
+
+
+- source: "local" + origin: "top-level" → scope 根据路径落在用户目录还是项目目录判定为 "user" / "project" / "temporary"
+- source: "auto" + origin: "top-level" → scope 固定为 "user" 或 "project"
+- source: "cli" + origin: "top-level" + scope: "temporary" → 命令行临时资源
+- source: <包名> + origin: "package" → scope 由包安装来源决定（用户级或项目级）
+
+#### 资源来源信息的类型定义与创建工具 `core/source-info.ts`
+
+1、SourceScope / SourceOrigin 类型：来源的作用域和来源方式
+
+```ts
+/** 来源作用域：用户级（全局）/ 项目级 / 临时 */
+export type SourceScope = "user" | "project" | "temporary";
+/** 来源方式：来自包（npm/git） / 顶层直接配置 */
+export type SourceOrigin = "package" | "top-level";
+```
+
+2、SourceInfo 接口：完整的来源信息结构
+
+```ts
+/** 资源来源信息，描述一个资源文件从哪里来、属于哪个作用域 */
+export interface SourceInfo {
+	path: string; // 资源文件的绝对路径
+	source: string; // 来源标识（如包名、"local" 等）
+	scope: SourceScope; // 作用域：用户级 / 项目级 / 临时
+	origin: SourceOrigin; // 来源方式：包 / 顶层配置
+	baseDir?: string; // 资源所在的基础目录
+}
+```
+
+3、createSourceInfo()：从包管理器元数据创建来源信息
+
+```ts
+/**
+ * 定位：将包管理器阶段产生的路径元数据转换为统一的来源信息对象。
+ * 作用：把资源路径与 `PathMetadata` 拼成后续 UI、命令面板和诊断统一消费的 `SourceInfo`。
+ * 调用关系：由资源加载链路在拿到包解析结果后调用，再把结果传给技能、提示模板、扩展等展示层。
+ *
+ * @param path - 资源文件的绝对路径
+ * @param metadata - 包管理器提供的路径元数据
+ * @returns SourceInfo 来源信息对象
+ */
+export function createSourceInfo(path: string, metadata: PathMetadata): SourceInfo {
+	// 直接保留包管理阶段已经确定的来源字段，避免下游重复推断。
+	return {
+		path,
+		source: metadata.source,
+		scope: metadata.scope,
+		origin: metadata.origin,
+		baseDir: metadata.baseDir,
+	};
+}
+```
+
+4、createSyntheticSourceInfo()：手动合成来源信息（不依赖包管理器）
+
+```ts
+/**
+ * 定位：为不经过包管理器的资源补齐来源元数据。
+ * 作用：给直接从文件系统读取的技能、提示模板等对象生成可追溯的 `SourceInfo`。
+ * 调用关系：由本地扫描型加载逻辑调用，返回值继续传给斜杠命令、资源诊断和界面展示层。
+ *
+ * @param path - 资源文件的绝对路径
+ * @param options - 来源配置选项
+ * @param options.source - 来源标识
+ * @param options.scope - 作用域，默认 "temporary"
+ * @param options.origin - 来源方式，默认 "top-level"
+ * @param options.baseDir - 基础目录
+ * @returns SourceInfo 来源信息对象
+ */
+export function createSyntheticSourceInfo(
+	path: string,
+	options: {
+		source: string;
+		scope?: SourceScope;
+		origin?: SourceOrigin;
+		baseDir?: string;
+	},
+): SourceInfo {
+	// 对未显式指定的字段补默认值，保证下游始终拿到结构完整的来源信息。
+	return {
+		path,
+		source: options.source,
+		scope: options.scope ?? "temporary",
+		origin: options.origin ?? "top-level",
+		baseDir: options.baseDir,
+	};
+}
+```
+
+#### `AgentSession.bindExtensions()`：资源系统和运行时的交汇点
+
+`bindExtensions()` 是一个非常关键的方法，因为它标志着：
+
+> **扩展系统从“已加载”进入“已接入当前会话”。**
+
+这个阶段主要做四件事：
+
+1. 接受 UI / command / abort / shutdown / error 等 bindings
+2. 把这些 bindings 应用到当前 `ExtensionRunner`
+3. 发出 `session_start` 事件
+4. 触发 `resources_discover`，让 extension 追加 skill/prompt/theme 资源
+
+尤其是第 4 点特别重要。
+
+它意味着 extension 不只是“注册行为”，还可以**继续发现资源**。
+
+于是资源流从静态装配扩展成两阶段装配：
+
+```text
+阶段 1：ResourceLoader.reload()
+  先装全局 / 项目 / package / CLI 资源
+
+阶段 2：AgentSession.bindExtensions()
+  extension 通过 resources_discover 动态追加资源
+```
+
+这也是为什么 `AgentSession` 要在 bind extension 之后重建 base system prompt。
+
+#### 2、[skills 不是代码是文档 `core/skills.ts`](./skills.md)
+
+> **skills 不是代码插件，而是可被模型读取的能力文档。**
+
+`core/skills.ts` 的设计和 extension 完全不同。它没有执行代码的入口，没有 handler，也没有 runtime context。
+
+- extension 改的是系统行为
+- skill 改的是模型行为
+
+只负责两件事：
+
+1. `loadSkills()` 发现 skill 文件
+2. `formatSkillsForPrompt()` 把 skill 格式化成 prompt 中的 `<available_skills>`
+
+`ResourceLoader` 怎么用：reload 重载流程调用 `loadSkills()`，结果再进入系统提示和命令注册链路。
+
+
+
+#### prompt-templates：轻量级命令化文本模板
+
+`prompt-templates.ts` 在整层架构里常被低估。
+
+它的角色其实很清楚：
+
+> **给用户和 extension 提供一种比 skill 更即时、比 extension 更轻量的“文本能力包”。**
+
+它和 skill 的区别是：
+
+- skill 偏“工作流说明书”
+- prompt template 偏“命令化文本片段”
+
+典型用途是：
+
+- `/commit-message`
+- `/review`
+- `/plan`
+
+这类模板不会像 extension 那样接管生命周期，但会参与 slash command 生态和用户输入扩展。
+
+#### `themes`：资源系统里最偏 UI 的一类
+
+`themes` 的消费端几乎完全是 interactive mode。
+
+它们说明一件事：
+
+> `ResourceLoader` 不是“只给模型用”的系统，而是“给整个产品运行时用”的系统。
+
+也就是说，同一个资源入口同时服务于：
+
+- 模型侧
+  - system prompt
+  - skills
+  - prompt templates
+- UI 侧
+  - themes
+- 行为侧
+  - extensions
+
+这是 `coding-agent` 很产品化的一点。
+
+#### `AGENTS.md` / `SYSTEM.md`：规则文本不是附属物，而是第一等资源
+
+```text
 ┌────────────────────────────────────────────────────────────────────────┐
 │                        ResourceLoader.reload()                         │
 │  this.agentsFiles = loadProjectContextFiles({ cwd, agentDir })         │
@@ -1228,6 +1570,37 @@ provider/model 池
                                    │ getAgentsFiles()
                                    ▼
 ```
+
+很多系统会把这些文件视为“额外约定”。
+
+但在 `coding-agent` 里，它们是正式资源：
+
+- `AGENTS.md / CLAUDE.md`
+  - 通过 `loadProjectContextFiles()` 被发现
+  - 最终进入 `# Project Context`
+- `SYSTEM.md`
+  - 替换默认 system prompt
+- `APPEND_SYSTEM.md`
+  - 追加到基础 prompt 之后
+
+这件事的重要性在于：
+
+> 项目规则不是对话外的背景知识，而是运行时要明确注入模型上下文的正式输入。 
+
+### 会话生命周期服务（构造函数直接注入）
+
+#### [会话树 `core/session-manager.ts`](./session-manager.md)
+
+完全无关。管理会话树，与资源发现无交集。
+
+#### [设置管理器 `core/settings-manager.ts`：全局、项目级 Settings.json](./settings-manager.md)
+
+SettingsManager 传给 ResourceLoader 用于解析 package 路径，但本身不受 ResourceLoader 管理。
+
+#### modelRegistry
+
+完全无关。管理 API 密钥和模型元数据。
+provider/model 池
 
 
 
@@ -1320,8 +1693,6 @@ _buildRuntime()                                    ← AgentSession 内部方法
 
 
 
-
-
 ### AgentSession 如何构建 pi-ai 层所需 Context 上下文
 
 > 本质上是要构造 pi-ai 层的 Context（packages/ai/src/types.ts），包括三部分：
@@ -1331,9 +1702,11 @@ _buildRuntime()                                    ← AgentSession 内部方法
 > * messages：SessionManager.buildSessionContext() → this.agent.state.messages
 > * tools：→ this.agent.state.tools
 
-1、system-prompt.ts 是 ResourceLoader 的消费方，从 ResourceLoader 取数据（skills/contextFiles）做最终格式化。 → 对应 **静态上下文（技能、规则、工具描述），每轮不变，仅工具切换/资源重载时重建**
+**[System Prompt 装配流程 `core/system-prompt.ts`](./system-prompt.md)**
 
-```
+1、system-prompt.ts 是 ResourceLoader 的消费方，提供 `buildSystemPrompt()` 拼接方法，从 ResourceLoader 取数据后做最终的格式化。 → 对应 **静态上下文（技能、规则、工具描述），每轮不变，仅工具切换/资源重载时重建**
+
+```ts
 system-prompt.ts 在 AgentSession (agent-session.ts) 中有两个触发场景：
 │
 ├─ setActiveToolsByName(toolNames)       
@@ -1441,6 +1814,9 @@ AgentSession.prompt()                          agent-session.ts
                       │
                       ▼
                  Provider API (Anthropic / OpenAI)
+                 	  │
+                	  ├─ systemprompt 不同 provider 实现不同：OpenAI 将其作为 messages 数组的第一条消息，Anthropic 将其作为独立 params.system
+                	  └─ 将 Context.tools 转换为各家的原生 tool、function 格式
 ```
 
 
@@ -1450,6 +1826,111 @@ AgentSession.prompt()                          agent-session.ts
 
 
 ## 三、扩展与工具层 `extensions/`、`tools/`
+
+### `Extension`：最强、最危险、最像“代码插件”的资源
+
+`src/core/extensions/` 是 `coding-agent` 最厚的扩展面。
+
+#### 四个文件的分工
+
+| 文件         | 定位         | 作用                                        |
+| ------------ | ------------ | ------------------------------------------- |
+| `types.ts`   | 扩展协议总表 | 定义事件、上下文、工具定义、命令、UI API    |
+| `loader.ts`  | 发现与加载层 | 动态加载 TS/JS extension，创建 runtime stub |
+| `runner.ts`  | 运行器       | emit 事件、绑定核心行为、管理生命周期       |
+| `wrapper.ts` | 桥接层       | 把 extension 注册的工具包装成核心可执行工具 |
+
+这四层可以理解成：
+
+```text
+types.ts    定协议
+loader.ts   把 extension 代码载入进来
+runner.ts   让 extension 真正跑起来
+wrapper.ts  让 extension tool 接入核心工具系统
+```
+
+#### `Extension` 最根本的能力是什么
+
+不是 UI，不是命令，也不是 tool。
+
+真正的根能力是：
+
+> **订阅和干预 `AgentSession` 生命周期里的关键事件。**
+
+例如：
+
+- `tool_call`
+- `tool_result`
+- `input`
+- `context`
+- `session_start`
+- `session_before_compact`
+- `session_before_switch`
+- `resources_discover`
+
+这说明 extension 不是简单的“加一个按钮”，而是：
+
+> **在不改核心代码的前提下，参与当前 session 的运行逻辑。**
+
+#### 为什么 extension 要和 `AgentSession` 绑定，而不是和 CLI 绑定
+
+因为 extension 真正想扩展的是：
+
+- 当前的 tools
+- 当前的 prompt
+- 当前的消息流
+- 当前的会话树
+- 当前的资源发现
+
+这些都属于 `AgentSession` 视角，而不是 CLI 视角。
+
+所以 `bindExtensions()` 放在 `AgentSession` 上，而不是 `main.ts` 上，是非常合理的。
+
+### 工具系统：资源系统和 agent runtime 的另一个交点
+
+`src/core/tools/` 是第二个关键交点。
+
+#### `tools/index.ts` 在做什么
+
+它不是简单的 barrel file，而是工具注册入口：
+
+- 定义 `ToolName`
+- 定义 `ToolsOptions`
+- 提供 `createToolDefinition()`
+- 提供 `createTool()`
+- 提供 `createCodingTools()` / `createReadOnlyTools()`
+- 提供 `createAllToolDefinitions()`
+
+这说明 `coding-agent` 内部其实维护了两层工具抽象：
+
+1. `ToolDefinition`
+   - 结构化定义
+   - 带 schema、prompt snippet、guidelines、renderers
+2. `AgentTool`
+   - 底层 agent runtime 可执行工具
+
+#### 为什么要有两层工具抽象
+
+因为 `coding-agent` 的工具不只是“执行一下命令”。
+
+工具还有四层用途：
+
+1. 给模型看
+   - `description`
+   - `parameters`
+   - `promptSnippet`
+   - `promptGuidelines`
+2. 给 runtime 执行
+   - `execute`
+3. 给 TUI 渲染
+   - `renderCall`
+   - `renderResult`
+4. 给 extension 包装
+   - wrapper / hooks / interception
+
+如果只有 `AgentTool` 这一层，前面 1、3、4 都很难做好。
+
+所以 `ToolDefinition` 才是 `coding-agent` 这一层真正的工具主语。
 
 ## 四、运行模式层 `mode/`
 
@@ -1658,108 +2139,269 @@ const client = new RpcClient({  cwd: "/path/to/project",  provider: "anthropic",
 
 
 
-## 最关键的三个中枢
 
-如果只允许你先看三个点，我建议按这个顺序：
 
-### 1. `core/agent-session.ts`
 
-这是全包真正的心脏。
 
-它同时管：
+**2. Extensions（扩展）**
 
-- prompt 进入队列
-- agent 事件订阅
-- 消息持久化
-- tool hook
-- 自动压缩
-- retry
-- bash 执行
-- 扩展绑定
-- slash command / skill / prompt template / active tools
+`TypeScript`模块，可注册自定义工具、命令、事件处理器和`TUI`组件：
 
-也就是说，它不是"对 `Agent` 的薄封装"，而是**把 coding-agent 的产品行为真正加上去的地方**。
+```typescript
+import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import { Type } from "@sinclair/typebox";
 
-### 2. `core/session-manager.ts`
+export default function(pi: ExtensionAPI) {
+  // 注册自定义工具
+  pi.registerTool({
+    name: "deploy",
+    label: "Deploy",
+    description: "Deploy the application to the cluster",
+    parameters: Type.Object({
+      env: Type.String({ description: "Target environment" }),
+    }),
+    async execute(toolCallId, params, signal, onUpdate, ctx) {
+      return {
+        content: [{ type: "text", text: `Deployed to ${params.env}` }],
+        details: {},
+      };
+    },
+  });
 
-这是产品记忆层。
+  // 拦截工具调用
+  pi.on("tool_call", async (event, ctx) => {
+    if (event.toolName === "bash" && event.input.command?.includes("rm -rf")) {
+      const ok = await ctx.ui.confirm("Warning", "Allow rm -rf?");
+      if (!ok) return { block: true, reason: "Blocked by user" };
+    }
+  });
 
-`pi-agent-core` 维护的是当前内存状态；`coding-agent` 之所以能长期工作、可回溯、可分叉、可压缩，是因为这里把会话变成了：
+  // 注册自定义命令
+  pi.registerCommand("status", {
+    description: "Show cluster status",
+    handler: async (args, ctx) => {
+      ctx.ui.notify("Cluster: OK", "info");
+    },
+  });
+}
+```
 
-- append-only JSONL
-- tree 而不是 list
-- 同时容纳 message、model change、thinking change、compaction、branch summary、custom entry
+**3. Prompt Templates（提示词模板）**
 
-### 3. `core/resource-loader.ts`
+可复用的`Markdown`提示词文件，支持变量插值，通过`/template-name`触发：
 
-这是产品扩展层的统一入口。
+```markdown
+<!-- ~/.pi/agent/prompts/review.md -->
+Review this code for bugs, security issues, and performance problems.
+Focus on: {{focus}}
+```
 
-如果没有它，`extensions / skills / prompts / themes / AGENTS.md / SYSTEM.md / packages` 都会各自有一套发现逻辑。现在它们被收束为统一装配入口，再被 `system-prompt.ts` 和 `AgentSession` 消费。
+#### 3.3.4 Pi Packages
 
----
+将`Extensions`、`Skills`、`Prompt Templates`、`Themes`打包为`npm`或`git`包，便于团队共享：
 
-所以阅读它时，最值得关心的不是某个函数局部怎么写，而是这些问题：
+```bash
+pi install npm:@foo/pi-tools       # 从 npm 安装
+pi install git:github.com/user/repo # 从 git 安装
+pi list                             # 查看已安装包
+pi update                           # 更新所有包
+pi config                           # 启用/禁用各组件
+```
 
-- 哪些对象是"纯运行时"的，哪些是"可持久化"的？
-- 哪些机制属于 `Agent`，哪些是 `AgentSession` 额外加上去的？
-- 哪些资源在 session 启动前装配，哪些会在运行中动态注入？
-- 为什么 extension、skills、tools、prompts 最终都会流入同一个 `system prompt + active tools` 视图？
+#### 3.3.5 会话管理
 
-搞清这几个问题，整个 `coding-agent` 包的结构就不会再散。
+会话以`JSONL`格式存储，支持树状分支，所有历史保存在单个文件中：
 
-缺三块总览性内容：
+```bash
+pi -c                  # 继续最近的会话
+pi -r                  # 浏览历史会话并选择
+pi --no-session        # 临时模式（不保存会话）
+pi --session <path>    # 使用指定会话文件
+pi --fork <path>       # 从指定会话 fork 一个新会话
+```
 
-1. **整包分层图和源码地图**
-   - 整个 `packages/coding-agent` 到底有哪些层
-   - 每个目录的职责是什么
-   - 读源码该先看哪几个入口
+在交互模式中，`/tree`命令可以在会话树中导航、切换分支或从历史任意节点继续。`/compact`命令触发上下文压缩，保留近期消息并摘要旧内容，避免上下文窗口溢出。
 
-2. **启动与运行时装配链**
-   - `cli.ts -> main.ts -> runtime -> services -> session -> modes`
-   - interactive / print / rpc 三个 mode 如何共用同一个会话核心
+## 4 配置参考
 
-3. **资源、扩展、工具三套机制如何汇合**
-   - tools 如何进入 prompt
-   - extensions 如何绑定到 session
-   - skills/prompts/themes/packages 如何通过 resource loader 汇入运行时
+### 4.1 全局与项目级配置
 
-这也是本文和后续新增分册要补的部分。
+| 路径                        | 作用域             |
+| --------------------------- | ------------------ |
+| `~/.pi/agent/settings.json` | 全局（所有项目）   |
+| `.pi/settings.json`         | 项目级（覆盖全局） |
 
----
+### 4.2 主要配置项
 
-## 推荐阅读顺序
+#### 4.2.1 模型与思考
 
-如果你的目标是写一份"完整但不失真"的 `pi-coding-agent` 教程，我建议按下面的阅读链组织：
+| 配置项                 | 类型      | 默认值  | 说明                                                    |
+| ---------------------- | --------- | ------- | ------------------------------------------------------- |
+| `defaultProvider`      | `string`  | —       | 默认模型提供商（如`anthropic`）                         |
+| `defaultModel`         | `string`  | —       | 默认模型`ID`                                            |
+| `defaultThinkingLevel` | `string`  | `off`   | 思考级别：`off`/`minimal`/`low`/`medium`/`high`/`xhigh` |
+| `hideThinkingBlock`    | `boolean` | `false` | 是否隐藏思考模块输出                                    |
 
-### 第一组：整包骨架
+#### 4.2.2 上下文压缩
 
-1. 本文 `tutorial/pi-coding-agent.md`
-2. `tutorial/coding-agent/pi-startup-runtime-and-modes.md`
-3. `tutorial/coding-agent/pi-resources-extensions-tools.md`
+| 配置项                        | 类型      | 默认值  | 说明                       |
+| ----------------------------- | --------- | ------- | -------------------------- |
+| `compaction.enabled`          | `boolean` | `true`  | 是否启用自动压缩           |
+| `compaction.reserveTokens`    | `number`  | `16384` | 为`LLM`响应预留的`Token`数 |
+| `compaction.keepRecentTokens` | `number`  | `20000` | 不压缩的近期`Token`数      |
 
-### 第二组：会话与上下文主线
+#### 4.2.3 重试策略
 
-4. `tutorial/coding-agent/pi-session-tree.md`
-5. `tutorial/coding-agent/pi-compaction.md`
+| 配置项              | 类型      | 默认值  | 说明                       |
+| ------------------- | --------- | ------- | -------------------------- |
+| `retry.enabled`     | `boolean` | `true`  | 是否启用自动重试           |
+| `retry.maxRetries`  | `number`  | `3`     | 最大重试次数               |
+| `retry.baseDelayMs` | `number`  | `2000`  | 指数退避基础延迟（毫秒）   |
+| `retry.maxDelayMs`  | `number`  | `60000` | 超出此延迟直接报错而非等待 |
 
-### 第三组：规则与 prompt 主线
+**配置示例：**
 
-6. `tutorial/coding-agent/pi-config-layers.md`
-7. `tutorial/coding-agent/pi-system-prompt.md`
+```json
+{
+  "defaultProvider": "anthropic",
+  "defaultModel": "claude-sonnet-4-20250514",
+  "defaultThinkingLevel": "medium",
+  "compaction": {
+    "enabled": true,
+    "reserveTokens": 16384,
+    "keepRecentTokens": 20000
+  },
+  "retry": {
+    "enabled": true,
+    "maxRetries": 3,
+    "baseDelayMs": 2000,
+    "maxDelayMs": 60000
+  }
+}
+```
 
-### 第四组：外部资源与工具原理补充
+## 5 使用示例
 
-8. `tutorial/1/ch15-extensions.md`
-9. `tutorial/1/ch16-skills.md`
-10. `tutorial/1/ch17-resource-loader.md`
-11. `tutorial/1/ch19-tool-principles.md`
-12. `tutorial/1/ch20-edit-tool.md`
-13. `tutorial/1/ch21-read-tool.md`
-14. `tutorial/1/ch22-bash-tool.md`
-15. `tutorial/1/ch23-search-tools.md`
+### 5.1 最小化 SDK 集成
 
-换句话说：
+```typescript
+import { createAgentSession } from "@mariozechner/pi-coding-agent";
 
-- 本文和新增两篇分册，负责**搭骨架**
-- `session/config/prompt/compaction` 四篇，负责**讲产品机制**
-- 第 15/16/17/19/20/21/22/23 章，负责**给机制补专题级深描**
+const { session } = await createAgentSession();
+
+session.subscribe((event) => {
+  if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta") {
+    process.stdout.write(event.assistantMessageEvent.delta);
+  }
+});
+
+await session.prompt("What files are in the current directory?");
+```
+
+### 5.2 指定模型与自定义工具集
+
+```typescript
+import {
+  createAgentSession,
+  createCodingTools,
+  SessionManager,
+  AuthStorage,
+  ModelRegistry,
+} from "@mariozechner/pi-coding-agent";
+
+const authStorage = AuthStorage.create();
+const modelRegistry = ModelRegistry.create(authStorage);
+
+const cwd = "/path/to/project";
+
+const { session } = await createAgentSession({
+  cwd,
+  tools: createCodingTools(cwd),        // read/write/edit/bash，绑定到指定 cwd
+  sessionManager: SessionManager.inMemory(),
+  authStorage,
+  modelRegistry,
+});
+
+session.subscribe((event) => {
+  if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta") {
+    process.stdout.write(event.assistantMessageEvent.delta);
+  }
+});
+
+await session.prompt("Refactor the main.ts file to use async/await.");
+```
+
+### 5.3 直接使用 pi-agent-core 构建自定义 Agent
+
+```typescript
+import { Agent } from "@mariozechner/pi-agent-core";
+import { getModel, Type } from "@mariozechner/pi-ai";
+
+const agent = new Agent({
+  initialState: {
+    systemPrompt: "You are a code review assistant.",
+    model: getModel("anthropic", "claude-sonnet-4-20250514"),
+    thinkingLevel: "low",
+    tools: [
+      {
+        name: "read_file",
+        label: "Read File",
+        description: "Read the content of a file",
+        parameters: Type.Object({
+          path: Type.String({ description: "File path to read" }),
+        }),
+        async execute(toolCallId, params) {
+          const content = await fs.readFile(params.path, "utf-8");
+          return {
+            content: [{ type: "text", text: content }],
+            details: { path: params.path },
+          };
+        },
+      },
+    ],
+  },
+  convertToLlm: (messages) =>
+    messages.filter(
+      (m) => m.role === "user" || m.role === "assistant" || m.role === "toolResult"
+    ),
+  toolExecution: "parallel",
+});
+
+agent.subscribe((event) => {
+  if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta") {
+    process.stdout.write(event.assistantMessageEvent.delta);
+  }
+});
+
+await agent.prompt("Review the code in src/main.ts and identify potential bugs.");
+```
+
+### 5.4 RPC 模式集成（OpenClaw 的集成方式）
+
+`OpenClaw`通过启动`pi`的`RPC`子进程来嵌入编码`Agent`，外部通过`stdin/stdout`传递`JSON`协议消息：
+
+```bash
+pi --mode rpc --provider anthropic --model claude-sonnet-4-20250514
+```
+
+向`Agent`发送用户提示：
+
+```json
+{"id": "req-1", "type": "prompt", "message": "Read the README.md file"}
+```
+
+在`Agent`运行期间发送转向指令：
+
+```json
+{"type": "prompt", "message": "Actually, focus on CHANGELOG.md", "streamingBehavior": "steer"}
+```
+
+等`Agent`完成后追加跟进任务：
+
+```json
+{"type": "prompt", "message": "Summarize what you found", "streamingBehavior": "followUp"}
+```
+
+
+
+

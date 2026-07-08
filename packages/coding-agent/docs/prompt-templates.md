@@ -1,88 +1,88 @@
-> pi can create prompt templates. Ask it to build one for your workflow.
+> pi 可以创建提示词模板（prompt templates）。让它为你的工作流构建一个。
 
-# Prompt Templates
+# 提示词模板（Prompt Templates）
 
-Prompt templates are Markdown snippets that expand into full prompts. Type `/name` in the editor to invoke a template, where `name` is the filename without `.md`.
+提示词模板是扩展为完整提示词的 Markdown 片段。在编辑器中输入 `/name` 来调用模板，其中 `name` 是不带 `.md` 扩展名的文件名。
 
-## Locations
+## 位置
 
-Pi loads prompt templates from:
+Pi 从以下位置加载提示词模板：
 
-- Global: `~/.pi/agent/prompts/*.md`
-- Project: `.pi/prompts/*.md`
-- Packages: `prompts/` directories or `pi.prompts` entries in `package.json`
-- Settings: `prompts` array with files or directories
-- CLI: `--prompt-template <path>` (repeatable)
+- 全局：`~/.pi/agent/prompts/*.md`
+- 项目：`.pi/prompts/*.md`
+- 包（Packages）：`prompts/` 目录或 `package.json` 中的 `pi.prompts` 条目
+- 设置（Settings）：`prompts` 数组，包含文件或目录路径
+- 命令行（CLI）：`--prompt-template <path>`（可重复）
 
-Disable discovery with `--no-prompt-templates`.
+使用 `--no-prompt-templates` 禁用自动发现。
 
-## Format
+## 格式
 
 ```markdown
 ---
-description: Review staged git changes
+description: 审查暂存的 git 变更
 ---
-Review the staged changes (`git diff --cached`). Focus on:
-- Bugs and logic errors
-- Security issues
-- Error handling gaps
+审查已暂存的变更（`git diff --cached`）。重点关注：
+- Bug 和逻辑错误
+- 安全问题
+- 错误处理遗漏
 ```
 
-- The filename becomes the command name. `review.md` becomes `/review`.
-- `description` is optional. If missing, the first non-empty line is used.
-- `argument-hint` is optional. When set, the hint is displayed before the description in the autocomplete dropdown.
+- 文件名成为命令名称。`review.md` 变为 `/review`。
+- `description` 是可选的。如果缺失，则使用第一个非空行。
+- `argument-hint` 是可选的。设置后，提示会在自动完成下拉菜单中显示在描述之前。
 
-### Argument Hints
+### 参数提示
 
-Use `argument-hint` in frontmatter to show expected arguments in autocomplete. Use `<angle brackets>` for required arguments and `[square brackets]` for optional ones:
+在前置元数据中使用 `argument-hint` 来显示自动完成中的预期参数。使用 `<尖括号>` 表示必需参数，`[方括号]` 表示可选参数：
 
 ```markdown
 ---
-description: Review PRs from URLs with structured issue and code analysis
+description: 从 URL 审查 PR，进行结构化问题和代码分析
 argument-hint: "<PR-URL>"
 ---
 ```
 
-This renders in the autocomplete dropdown as:
+在自动完成下拉菜单中显示为：
 
 ```
-→ pr   <PR-URL>       — Review PRs from URLs with structured issue and code analysis
-  is   <issue>        — Analyze GitHub issues (bugs or feature requests)
-  wr   [instructions] — Finish the current task end-to-end
-  cl   — Audit changelog entries before release
+→ pr   <PR-URL>       — 从 URL 审查 PR，进行结构化问题和代码分析
+  is   <issue>        — 分析 GitHub issue（Bug 或功能请求）
+  wr   [instructions] — 端到端完成当前任务
+  cl   — 在发布前审计更新日志条目
 ```
 
-## Usage
+## 使用方法
 
-Type `/` followed by the template name in the editor. Autocomplete shows available templates with descriptions.
+在编辑器中输入 `/` 后跟模板名称。自动完成会显示可用模板及其描述。
 
 ```
-/review                           # Expands review.md
-/component Button                 # Expands with argument
-/component Button "click handler" # Multiple arguments
+/review                           # 展开 review.md
+/component Button                 # 带参数展开
+/component Button "click handler" # 多个参数
 ```
 
-## Arguments
+## 参数
 
-Templates support positional arguments and simple slicing:
+模板支持位置参数和简单切片：
 
-- `$1`, `$2`, ... positional args
-- `$@` or `$ARGUMENTS` for all args joined
-- `${@:N}` for args from the Nth position (1-indexed)
-- `${@:N:L}` for `L` args starting at N
+- `$1`、`$2`、... 位置参数
+- `$@` 或 `$ARGUMENTS` 所有参数拼接
+- `${@:N}` 从第 N 个位置开始的参数（从 1 开始计数）
+- `${@:N:L}` 从 N 开始的 L 个参数
 
-Example:
+示例：
 
 ```markdown
 ---
-description: Create a component
+description: 创建一个组件
 ---
-Create a React component named $1 with features: $@
+创建一个名为 $1 的 React 组件，功能：$@
 ```
 
-Usage: `/component Button "onClick handler" "disabled support"`
+用法：`/component Button "onClick handler" "disabled support"`
 
-## Loading Rules
+## 加载规则
 
-- Template discovery in `prompts/` is non-recursive.
-- If you want templates in subdirectories, add them explicitly via `prompts` settings or a package manifest.
+- `prompts/` 中的模板发现是非递归的。
+- 如果希望使用子目录中的模板，请通过 `prompts` 设置或包清单显式添加它们。

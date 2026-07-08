@@ -1,4 +1,4 @@
-# [pi-agent](https://github.com/badlogic/pi-mono/tree/main/packages/agent)
+# [pi-agent-core](https://github.com/badlogic/pi-mono/tree/main/packages/agent)
 
 整个 pi monorepo 的 **agent 引擎层**。
 

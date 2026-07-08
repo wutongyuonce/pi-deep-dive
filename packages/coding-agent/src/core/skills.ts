@@ -197,14 +197,6 @@ function validateDescription(description: string | undefined): string[] {
 	return errors;
 }
 
-/** 从目录加载技能的选项 */
-export interface LoadSkillsFromDirOptions {
-	/** 要扫描技能的目录 */
-	dir: string;
-	/** 来源标识（如 "user"、"project"、"path"） */
-	source: string;
-}
-
 /**
  * 根据来源标识创建技能的 SourceInfo
  * @param filePath SKILL.md 文件路径
@@ -238,6 +230,14 @@ function createSkillSourceInfo(filePath: string, baseDir: string, source: string
 			// 兜底分支保留原始 source 字符串，方便未来扩展新的来源类型。
 			return createSyntheticSourceInfo(filePath, { source, baseDir });
 	}
+}
+
+/** 从目录加载技能的选项 */
+export interface LoadSkillsFromDirOptions {
+	/** 要扫描技能的目录 */
+	dir: string;
+	/** 来源标识（如 "user"、"project"、"path"） */
+	source: string;
 }
 
 /**
@@ -423,7 +423,7 @@ function loadSkillFromFile(
 			diagnostics.push({ type: "warning", message: error, path: filePath });
 		}
 
-		// 描述完全缺失时视为无效技能；其余 warning 仅进入诊断，不阻断加载。
+		// 描述完全缺失时视为无效技能；其余 warning 仅进入诊断。
 		if (!frontmatter.description || frontmatter.description.trim() === "") {
 			// 模型需要 description 来判断技能适用场景，因此这里不能继续生成 Skill 对象。
 			return { skill: null, diagnostics };
@@ -535,10 +535,10 @@ export function loadSkills(options: LoadSkillsOptions): LoadSkillsResult {
 	function addSkills(result: LoadSkillsResult) {
 		allDiagnostics.push(...result.diagnostics);
 		for (const skill of result.skills) {
-			// Resolve symlinks to detect duplicate files
+			// 解析符号链接以检测重复文件。
 			const realPath = canonicalizePath(skill.filePath);
 
-			// Skip silently if we've already loaded this exact file (via symlink)
+			// 如果已经加载过同一个文件（通过符号链接），静默跳过。
 			if (realPathSet.has(realPath)) {
 				// 真实路径去重比字符串路径去重更稳，能覆盖软链接和不同相对路径写法。
 				continue;
@@ -604,6 +604,7 @@ export function loadSkills(options: LoadSkillsOptions): LoadSkillsResult {
 		}
 
 		try {
+			// statSync 获取文件元数据，据此判断路径是目录还是文件，决定后续加载策略。
 			const stats = statSync(resolvedPath);
 			const source = getSource(resolvedPath);
 			if (stats.isDirectory()) {

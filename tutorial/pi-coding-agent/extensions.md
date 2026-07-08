@@ -1,4 +1,4 @@
-# Extension 系统 — 让产品长出新器官 `core/extensions`
+# Extensions 系统 — 让产品长出新器官 `core/extensions`
 
 本章解析 pi 的 extension 系统如何在不修改核心代码的前提下扩展产品能力。
 

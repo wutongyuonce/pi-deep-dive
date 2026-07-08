@@ -1,14 +1,14 @@
-> pi can create TUI components. Ask it to build one for your use case.
+> pi 可以创建 TUI 组件。请让它为你的用例构建一个。
 
-# TUI Components
+# TUI 组件
 
-Extensions and custom tools can render custom TUI components for interactive user interfaces. This page covers the component system and available building blocks.
+扩展和自定义工具可以渲染自定义 TUI 组件以提供交互式用户界面。本文档介绍组件系统及可用的构建块。
 
-**Source:** [`@earendil-works/pi-tui`](https://github.com/earendil-works/pi-mono/tree/main/packages/tui)
+**源码：** [`@earendil-works/pi-tui`](https://github.com/earendil-works/pi-mono/tree/main/packages/tui)
 
-## Component Interface
+## 组件接口
 
-All components implement:
+所有组件都实现：
 
 ```typescript
 interface Component {
@@ -19,44 +19,44 @@ interface Component {
 }
 ```
 
-| Method | Description |
+| 方法 | 描述 |
 |--------|-------------|
-| `render(width)` | Return array of strings (one per line). Each line **must not exceed `width`**. |
-| `handleInput?(data)` | Receive keyboard input when component has focus. |
-| `wantsKeyRelease?` | If true, component receives key release events (Kitty protocol). Default: false. |
-| `invalidate()` | Clear cached render state. Called on theme changes. |
+| `render(width)` | 返回字符串数组（每行一个字符串）。每行**不得超过 `width`**。 |
+| `handleInput?(data)` | 当组件获得焦点时接收键盘输入。 |
+| `wantsKeyRelease?` | 如果为 true，组件将接收按键释放事件（Kitty 协议）。默认值：false。 |
+| `invalidate()` | 清除缓存的渲染状态。在主题变更时调用。 |
 
-The TUI appends a full SGR reset and OSC 8 reset at the end of each rendered line. Styles do not carry across lines. If you emit multi-line text with styling, reapply styles per line or use `wrapTextWithAnsi()` so styles are preserved for each wrapped line.
+TUI 会在每个渲染行的末尾追加一个完整的 SGR 重置和 OSC 8 重置。样式不会跨行延续。如果你输出带样式的多行文本，需要逐行重新应用样式，或者使用 `wrapTextWithAnsi()` 来确保每行包裹后的样式得以保留。
 
-## Focusable Interface (IME Support)
+## 可聚焦接口（IME 支持）
 
-Components that display a text cursor and need IME (Input Method Editor) support should implement the `Focusable` interface:
+需要显示文本光标并支持 IME（输入法编辑器）的组件应实现 `Focusable` 接口：
 
 ```typescript
 import { CURSOR_MARKER, type Component, type Focusable } from "@earendil-works/pi-tui";
 
 class MyInput implements Component, Focusable {
-  focused: boolean = false;  // Set by TUI when focus changes
+  focused: boolean = false;  // 由 TUI 在焦点变化时设置
   
   render(width: number): string[] {
     const marker = this.focused ? CURSOR_MARKER : "";
-    // Emit marker right before the fake cursor
+    // 在虚拟光标前输出标记
     return [`> ${beforeCursor}${marker}\x1b[7m${atCursor}\x1b[27m${afterCursor}`];
   }
 }
 ```
 
-When a `Focusable` component has focus, TUI:
-1. Sets `focused = true` on the component
-2. Scans rendered output for `CURSOR_MARKER` (a zero-width APC escape sequence)
-3. Positions the hardware terminal cursor at that location
-4. Shows the hardware cursor
+当 `Focusable` 组件获得焦点时，TUI 会：
+1. 在组件上设置 `focused = true`
+2. 扫描渲染输出中的 `CURSOR_MARKER`（一个零宽度的 APC 转义序列）
+3. 将硬件终端光标定位到该位置
+4. 显示硬件光标
 
-This enables IME candidate windows to appear at the correct position for CJK input methods. The `Editor` and `Input` built-in components already implement this interface.
+这使得 IME 候选窗口能够在中日韩输入法的正确位置显示。内置的 `Editor` 和 `Input` 组件已经实现了此接口。
 
-### Container Components with Embedded Inputs
+### 包含内嵌输入的容器组件
 
-When a container component (dialog, selector, etc.) contains an `Input` or `Editor` child, the container must implement `Focusable` and propagate the focus state to the child. Otherwise, the hardware cursor won't be positioned correctly for IME input.
+当容器组件（对话框、选择器等）包含 `Input` 或 `Editor` 子组件时，该容器必须实现 `Focusable` 并将焦点状态传播给子组件。否则，硬件光标将无法正确定位以供 IME 输入。
 
 ```typescript
 import { Container, type Focusable, Input } from "@earendil-works/pi-tui";
@@ -64,7 +64,7 @@ import { Container, type Focusable, Input } from "@earendil-works/pi-tui";
 class SearchDialog extends Container implements Focusable {
   private searchInput: Input;
 
-  // Focusable implementation - propagate to child input for IME cursor positioning
+  // Focusable 实现 - 传播给子输入组件以支持 IME 光标定位
   private _focused = false;
   get focused(): boolean {
     return this._focused;
@@ -82,21 +82,21 @@ class SearchDialog extends Container implements Focusable {
 }
 ```
 
-Without this propagation, typing with an IME (Chinese, Japanese, Korean, etc.) will show the candidate window in the wrong position on screen.
+如果没有这种传播，使用 IME（中文、日文、韩文等）输入时，候选窗口将显示在屏幕上的错误位置。
 
-## Using Components
+## 使用组件
 
-**In extensions** via `ctx.ui.custom()`:
+**在扩展中**通过 `ctx.ui.custom()`：
 
 ```typescript
 pi.on("session_start", async (_event, ctx) => {
   const handle = ctx.ui.custom(myComponent);
-  // handle.requestRender() - trigger re-render
-  // handle.close() - restore normal UI
+  // handle.requestRender() - 触发重新渲染
+  // handle.close() - 恢复正常 UI
 });
 ```
 
-**In custom tools** via `pi.ui.custom()`:
+**在自定义工具中**通过 `pi.ui.custom()`：
 
 ```typescript
 async execute(toolCallId, params, onUpdate, ctx, signal) {
@@ -106,9 +106,9 @@ async execute(toolCallId, params, onUpdate, ctx, signal) {
 }
 ```
 
-## Overlays
+## 覆盖层
 
-Overlays render components on top of existing content without clearing the screen. Pass `{ overlay: true }` to `ctx.ui.custom()`:
+覆盖层在不清除屏幕的情况下，在现有内容之上渲染组件。向 `ctx.ui.custom()` 传入 `{ overlay: true }`：
 
 ```typescript
 const result = await ctx.ui.custom<string | null>(
@@ -117,7 +117,7 @@ const result = await ctx.ui.custom<string | null>(
 );
 ```
 
-For positioning and sizing, use `overlayOptions`:
+关于定位和大小的设置，使用 `overlayOptions`：
 
 ```typescript
 const result = await ctx.ui.custom<string | null>(
@@ -125,61 +125,61 @@ const result = await ctx.ui.custom<string | null>(
   {
     overlay: true,
     overlayOptions: {
-      // Size: number or percentage string
-      width: "50%",          // 50% of terminal width
-      minWidth: 40,          // minimum 40 columns
-      maxHeight: "80%",      // max 80% of terminal height
+      // 大小：数字或百分比字符串
+      width: "50%",          // 终端宽度的 50%
+      minWidth: 40,          // 最小 40 列
+      maxHeight: "80%",      // 最大终端高度的 80%
 
-      // Position: anchor-based (default: "center")
-      anchor: "right-center", // 9 positions: center, top-left, top-center, etc.
-      offsetX: -2,            // offset from anchor
+      // 位置：基于锚点（默认值："center"）
+      anchor: "right-center", // 9 个位置：center、top-left、top-center 等
+      offsetX: -2,            // 距锚点的偏移量
       offsetY: 0,
 
-      // Or percentage/absolute positioning
-      row: "25%",            // 25% from top
-      col: 10,               // column 10
+      // 或者使用百分比/绝对定位
+      row: "25%",            // 距顶部 25%
+      col: 10,               // 第 10 列
 
-      // Margins
-      margin: 2,             // all sides, or { top, right, bottom, left }
+      // 边距
+      margin: 2,             // 所有边，或 { top, right, bottom, left }
 
-      // Responsive: hide on narrow terminals
+      // 响应式：在窄终端上隐藏
       visible: (termWidth, termHeight) => termWidth >= 80,
     },
-    // Get handle for programmatic visibility control
+    // 获取句柄以编程方式控制可见性
     onHandle: (handle) => {
-      // handle.setHidden(true/false) - toggle visibility
-      // handle.hide() - permanently remove
+      // handle.setHidden(true/false) - 切换可见性
+      // handle.hide() - 永久移除
     },
   }
 );
 ```
 
-### Overlay Lifecycle
+### 覆盖层生命周期
 
-Overlay components are disposed when closed. Don't reuse references - create fresh instances:
+覆盖层组件在关闭时会被释放。不要复用引用——请每次都创建新的实例：
 
 ```typescript
-// Wrong - stale reference
+// 错误 - 过期的引用
 let menu: MenuComponent;
 await ctx.ui.custom((_, __, ___, done) => {
   menu = new MenuComponent(done);
   return menu;
 }, { overlay: true });
-setActiveComponent(menu);  // Disposed
+setActiveComponent(menu);  // 已释放
 
-// Correct - re-call to re-show
+// 正确 - 重新调用以重新显示
 const showMenu = () => ctx.ui.custom((_, __, ___, done) => 
   new MenuComponent(done), { overlay: true });
 
-await showMenu();  // First show
-await showMenu();  // "Back" = just call again
+await showMenu();  // 第一次显示
+await showMenu();  // "返回" = 再次调用即可
 ```
 
-See [overlay-qa-tests.ts](../examples/extensions/overlay-qa-tests.ts) for comprehensive examples covering anchors, margins, stacking, responsive visibility, and animation.
+参见 [overlay-qa-tests.ts](../examples/extensions/overlay-qa-tests.ts) 获取涵盖锚点、边距、堆叠、响应式可见性和动画的完整示例。
 
-## Built-in Components
+## 内置组件
 
-Import from `@earendil-works/pi-tui`:
+从 `@earendil-works/pi-tui` 导入：
 
 ```typescript
 import { Text, Box, Container, Spacer, Markdown } from "@earendil-works/pi-tui";
@@ -187,35 +187,35 @@ import { Text, Box, Container, Spacer, Markdown } from "@earendil-works/pi-tui";
 
 ### Text
 
-Multi-line text with word wrapping.
+支持自动换行的多行文本。
 
 ```typescript
 const text = new Text(
-  "Hello World",    // content
-  1,                // paddingX (default: 1)
-  1,                // paddingY (default: 1)
-  (s) => bgGray(s)  // optional background function
+  "Hello World",    // 内容
+  1,                // 水平内边距（默认值：1）
+  1,                // 垂直内边距（默认值：1）
+  (s) => bgGray(s)  // 可选的背景函数
 );
-text.setText("Updated");
+text.setText("已更新");
 ```
 
 ### Box
 
-Container with padding and background color.
+带内边距和背景颜色的容器。
 
 ```typescript
 const box = new Box(
-  1,                // paddingX
-  1,                // paddingY
-  (s) => bgGray(s)  // background function
+  1,                // 水平内边距
+  1,                // 垂直内边距
+  (s) => bgGray(s)  // 背景函数
 );
-box.addChild(new Text("Content", 0, 0));
+box.addChild(new Text("内容", 0, 0));
 box.setBgFn((s) => bgBlue(s));
 ```
 
 ### Container
 
-Groups child components vertically.
+将子组件垂直分组。
 
 ```typescript
 const container = new Container();
@@ -226,42 +226,42 @@ container.removeChild(component1);
 
 ### Spacer
 
-Empty vertical space.
+空的垂直空间。
 
 ```typescript
-const spacer = new Spacer(2);  // 2 empty lines
+const spacer = new Spacer(2);  // 2 个空行
 ```
 
 ### Markdown
 
-Renders markdown with syntax highlighting.
+渲染带语法高亮的 markdown。
 
 ```typescript
 const md = new Markdown(
-  "# Title\n\nSome **bold** text",
-  1,        // paddingX
-  1,        // paddingY
-  theme     // MarkdownTheme (see below)
+  "# 标题\n\n这是**粗体**文本",
+  1,        // 水平内边距
+  1,        // 垂直内边距
+  theme     // MarkdownTheme（见下文）
 );
-md.setText("Updated markdown");
+md.setText("已更新的 markdown");
 ```
 
 ### Image
 
-Renders images in supported terminals (Kitty, iTerm2, Ghostty, WezTerm).
+在支持的终端（Kitty、iTerm2、Ghostty、WezTerm）中渲染图像。
 
 ```typescript
 const image = new Image(
-  base64Data,   // base64-encoded image
-  "image/png",  // MIME type
+  base64Data,   // base64 编码的图像
+  "image/png",  // MIME 类型
   theme,        // ImageTheme
   { maxWidthCells: 80, maxHeightCells: 24 }
 );
 ```
 
-## Keyboard Input
+## 键盘输入
 
-Use `matchesKey()` for key detection:
+使用 `matchesKey()` 进行按键检测：
 
 ```typescript
 import { matchesKey, Key } from "@earendil-works/pi-tui";
@@ -279,33 +279,33 @@ handleInput(data: string) {
 }
 ```
 
-**Key identifiers** (use `Key.*` for autocomplete, or string literals):
-- Basic keys: `Key.enter`, `Key.escape`, `Key.tab`, `Key.space`, `Key.backspace`, `Key.delete`, `Key.home`, `Key.end`
-- Arrow keys: `Key.up`, `Key.down`, `Key.left`, `Key.right`
-- With modifiers: `Key.ctrl("c")`, `Key.shift("tab")`, `Key.alt("left")`, `Key.ctrlShift("p")`
-- String format also works: `"enter"`, `"ctrl+c"`, `"shift+tab"`, `"ctrl+shift+p"`
+**按键标识符**（使用 `Key.*` 进行自动补全，或直接使用字符串字面量）：
+- 基本按键：`Key.enter`、`Key.escape`、`Key.tab`、`Key.space`、`Key.backspace`、`Key.delete`、`Key.home`、`Key.end`
+- 方向键：`Key.up`、`Key.down`、`Key.left`、`Key.right`
+- 带修饰键：`Key.ctrl("c")`、`Key.shift("tab")`、`Key.alt("left")`、`Key.ctrlShift("p")`
+- 字符串格式同样有效：`"enter"`、`"ctrl+c"`、`"shift+tab"`、`"ctrl+shift+p"`
 
-## Line Width
+## 行宽
 
-**Critical:** Each line from `render()` must not exceed the `width` parameter.
+**关键：** `render()` 返回的每一行都不得超过 `width` 参数。
 
 ```typescript
 import { visibleWidth, truncateToWidth } from "@earendil-works/pi-tui";
 
 render(width: number): string[] {
-  // Truncate long lines
+  // 截断过长的行
   return [truncateToWidth(this.text, width)];
 }
 ```
 
-Utilities:
-- `visibleWidth(str)` - Get display width (ignores ANSI codes)
-- `truncateToWidth(str, width, ellipsis?)` - Truncate with optional ellipsis
-- `wrapTextWithAnsi(str, width)` - Word wrap preserving ANSI codes
+工具函数：
+- `visibleWidth(str)` - 获取显示宽度（忽略 ANSI 码）
+- `truncateToWidth(str, width, ellipsis?)` - 截断并可选添加省略号
+- `wrapTextWithAnsi(str, width)` - 自动换行并保留 ANSI 码
 
-## Creating Custom Components
+## 创建自定义组件
 
-Example: Interactive selector
+示例：交互式选择器
 
 ```typescript
 import {
@@ -360,20 +360,20 @@ class MySelector {
 }
 ```
 
-Usage in an extension:
+在扩展中的使用：
 
 ```typescript
 pi.registerCommand("pick", {
-  description: "Pick an item",
+  description: "选择一个选项",
   handler: async (args, ctx) => {
-    const items = ["Option A", "Option B", "Option C"];
+    const items = ["选项 A", "选项 B", "选项 C"];
     const selector = new MySelector(items);
     
     let handle: { close: () => void; requestRender: () => void };
     
     await new Promise<void>((resolve) => {
       selector.onSelect = (item) => {
-        ctx.ui.notify(`Selected: ${item}`, "info");
+        ctx.ui.notify(`已选择: ${item}`, "info");
         handle.close();
         resolve();
       };
@@ -387,42 +387,42 @@ pi.registerCommand("pick", {
 });
 ```
 
-## Theming
+## 主题
 
-Components accept theme objects for styling.
+组件接受主题对象以进行样式设置。
 
-**In `renderCall`/`renderResult`**, use the `theme` parameter:
+**在 `renderCall`/`renderResult` 中**，使用 `theme` 参数：
 
 ```typescript
 renderResult(result, options, theme, context) {
-  // Use theme.fg() for foreground colors
-  return new Text(theme.fg("success", "Done!"), 0, 0);
+  // 使用 theme.fg() 设置前景色
+  return new Text(theme.fg("success", "完成!"), 0, 0);
   
-  // Use theme.bg() for background colors
-  const styled = theme.bg("toolPendingBg", theme.fg("accent", "text"));
+  // 使用 theme.bg() 设置背景色
+  const styled = theme.bg("toolPendingBg", theme.fg("accent", "文本"));
 }
 ```
 
-**Foreground colors** (`theme.fg(color, text)`):
+**前景色**（`theme.fg(color, text)`）：
 
-| Category | Colors |
+| 分类 | 颜色 |
 |----------|--------|
-| General | `text`, `accent`, `muted`, `dim` |
-| Status | `success`, `error`, `warning` |
-| Borders | `border`, `borderAccent`, `borderMuted` |
-| Messages | `userMessageText`, `customMessageText`, `customMessageLabel` |
-| Tools | `toolTitle`, `toolOutput` |
-| Diffs | `toolDiffAdded`, `toolDiffRemoved`, `toolDiffContext` |
-| Markdown | `mdHeading`, `mdLink`, `mdLinkUrl`, `mdCode`, `mdCodeBlock`, `mdCodeBlockBorder`, `mdQuote`, `mdQuoteBorder`, `mdHr`, `mdListBullet` |
-| Syntax | `syntaxComment`, `syntaxKeyword`, `syntaxFunction`, `syntaxVariable`, `syntaxString`, `syntaxNumber`, `syntaxType`, `syntaxOperator`, `syntaxPunctuation` |
-| Thinking | `thinkingOff`, `thinkingMinimal`, `thinkingLow`, `thinkingMedium`, `thinkingHigh`, `thinkingXhigh` |
-| Modes | `bashMode` |
+| 通用 | `text`、`accent`、`muted`、`dim` |
+| 状态 | `success`、`error`、`warning` |
+| 边框 | `border`、`borderAccent`、`borderMuted` |
+| 消息 | `userMessageText`、`customMessageText`、`customMessageLabel` |
+| 工具 | `toolTitle`、`toolOutput` |
+| 差异 | `toolDiffAdded`、`toolDiffRemoved`、`toolDiffContext` |
+| Markdown | `mdHeading`、`mdLink`、`mdLinkUrl`、`mdCode`、`mdCodeBlock`、`mdCodeBlockBorder`、`mdQuote`、`mdQuoteBorder`、`mdHr`、`mdListBullet` |
+| 语法 | `syntaxComment`、`syntaxKeyword`、`syntaxFunction`、`syntaxVariable`、`syntaxString`、`syntaxNumber`、`syntaxType`、`syntaxOperator`、`syntaxPunctuation` |
+| 思考 | `thinkingOff`、`thinkingMinimal`、`thinkingLow`、`thinkingMedium`、`thinkingHigh`、`thinkingXhigh` |
+| 模式 | `bashMode` |
 
-**Background colors** (`theme.bg(color, text)`):
+**背景色**（`theme.bg(color, text)`）：
 
-`selectedBg`, `userMessageBg`, `customMessageBg`, `toolPendingBg`, `toolSuccessBg`, `toolErrorBg`
+`selectedBg`、`userMessageBg`、`customMessageBg`、`toolPendingBg`、`toolSuccessBg`、`toolErrorBg`
 
-**For Markdown**, use `getMarkdownTheme()`:
+**对于 Markdown**，使用 `getMarkdownTheme()`：
 
 ```typescript
 import { getMarkdownTheme } from "@earendil-works/pi-coding-agent";
@@ -434,7 +434,7 @@ renderResult(result, options, theme, context) {
 }
 ```
 
-**For custom components**, define your own theme interface:
+**对于自定义组件**，定义自己的主题接口：
 
 ```typescript
 interface MyTheme {
@@ -443,17 +443,17 @@ interface MyTheme {
 }
 ```
 
-## Debug logging
+## 调试日志
 
-Set `PI_TUI_WRITE_LOG` to capture the raw ANSI stream written to stdout.
+设置 `PI_TUI_WRITE_LOG` 来捕获写入 stdout 的原始 ANSI 流。
 
 ```bash
 PI_TUI_WRITE_LOG=/tmp/tui-ansi.log npx tsx packages/tui/test/chat-simple.ts
 ```
 
-## Performance
+## 性能
 
-Cache rendered output when possible:
+尽可能缓存渲染输出：
 
 ```typescript
 class CachedComponent {
@@ -464,7 +464,7 @@ class CachedComponent {
     if (this.cachedLines && this.cachedWidth === width) {
       return this.cachedLines;
     }
-    // ... compute lines ...
+    // ... 计算行内容 ...
     this.cachedWidth = width;
     this.cachedLines = lines;
     return lines;
@@ -477,17 +477,17 @@ class CachedComponent {
 }
 ```
 
-Call `invalidate()` when state changes, then `handle.requestRender()` to trigger re-render.
+状态变化时调用 `invalidate()`，然后调用 `handle.requestRender()` 触发重新渲染。
 
-## Invalidation and Theme Changes
+## 失效与主题变更
 
-When the theme changes, the TUI calls `invalidate()` on all components to clear their caches. Components must properly implement `invalidate()` to ensure theme changes take effect.
+当主题变更时，TUI 会在所有组件上调用 `invalidate()` 以清除其缓存。组件必须正确实现 `invalidate()` 以确保主题变更生效。
 
-### The Problem
+### 问题
 
-If a component pre-bakes theme colors into strings (via `theme.fg()`, `theme.bg()`, etc.) and caches them, the cached strings contain ANSI escape codes from the old theme. Simply clearing the render cache isn't enough if the component stores the themed content separately.
+如果组件将主题颜色预烘焙到字符串中（通过 `theme.fg()`、`theme.bg()` 等）并缓存了它们，则缓存的字符串包含旧主题的 ANSI 转义码。仅清除渲染缓存是不够的，如果组件另外存储了主题化内容的话。
 
-**Wrong approach** (theme colors won't update):
+**错误方法**（主题颜色不会更新）：
 
 ```typescript
 class BadComponent extends Container {
@@ -495,18 +495,18 @@ class BadComponent extends Container {
 
   constructor(message: string, theme: Theme) {
     super();
-    // Pre-baked theme colors stored in Text component
+    // 预烘焙的主题颜色存储在 Text 组件中
     this.content = new Text(theme.fg("accent", message), 1, 0);
     this.addChild(this.content);
   }
-  // No invalidate override - parent's invalidate only clears
-  // child render caches, not the pre-baked content
+  // 没有重写 invalidate - 父类的 invalidate 仅清除
+  // 子组件的渲染缓存，不会清除预烘焙的内容
 }
 ```
 
-### The Solution
+### 解决方案
 
-Components that build content with theme colors must rebuild that content when `invalidate()` is called:
+使用主题颜色构建内容的组件必须在调用 `invalidate()` 时重建该内容：
 
 ```typescript
 class GoodComponent extends Container {
@@ -522,20 +522,20 @@ class GoodComponent extends Container {
   }
 
   private updateDisplay(): void {
-    // Rebuild content with current theme
+    // 使用当前主题重建内容
     this.content.setText(theme.fg("accent", this.message));
   }
 
   override invalidate(): void {
-    super.invalidate();  // Clear child caches
-    this.updateDisplay(); // Rebuild with new theme
+    super.invalidate();  // 清除子缓存
+    this.updateDisplay(); // 使用新主题重建
   }
 }
 ```
 
-### Pattern: Rebuild on Invalidate
+### 模式：失效时重建
 
-For components with complex content:
+对于包含复杂内容的组件：
 
 ```typescript
 class ComplexComponent extends Container {
@@ -548,10 +548,10 @@ class ComplexComponent extends Container {
   }
 
   private rebuild(): void {
-    this.clear();  // Remove all children
+    this.clear();  // 移除所有子组件
 
-    // Build UI with current theme
-    this.addChild(new Text(theme.fg("accent", theme.bold("Title")), 1, 0));
+    // 使用当前主题构建 UI
+    this.addChild(new Text(theme.fg("accent", theme.bold("标题")), 1, 0));
     this.addChild(new Spacer(1));
 
     for (const item of this.data.items) {
@@ -567,27 +567,27 @@ class ComplexComponent extends Container {
 }
 ```
 
-### When This Matters
+### 何时需要此模式
 
-This pattern is needed when:
+此模式在以下情况时需要：
 
-1. **Pre-baking theme colors** - Using `theme.fg()` or `theme.bg()` to create styled strings stored in child components
-2. **Syntax highlighting** - Using `highlightCode()` which applies theme-based syntax colors
-3. **Complex layouts** - Building child component trees that embed theme colors
+1. **预烘焙主题颜色** - 使用 `theme.fg()` 或 `theme.bg()` 创建存储在子组件中的样式化字符串
+2. **语法高亮** - 使用 `highlightCode()`，它会应用基于主题的语法颜色
+3. **复杂布局** - 构建内嵌主题颜色的子组件树
 
-This pattern is NOT needed when:
+此模式在以下情况时不需要：
 
-1. **Using theme callbacks** - Passing functions like `(text) => theme.fg("accent", text)` that are called during render
-2. **Simple containers** - Just grouping other components without adding themed content
-3. **Stateless render** - Computing themed output fresh in every `render()` call (no caching)
+1. **使用主题回调** - 传递函数如 `(text) => theme.fg("accent", text)`，在渲染时调用
+2. **简单容器** - 仅组合其他组件，不添加主题化内容
+3. **无状态渲染** - 在每次 `render()` 调用时重新计算主题化输出（无缓存）
 
-## Common Patterns
+## 常见模式
 
-These patterns cover the most common UI needs in extensions. **Copy these patterns instead of building from scratch.**
+以下模式涵盖了扩展中最常见的 UI 需求。**直接复制这些模式，无需从头构建。**
 
-### Pattern 1: Selection Dialog (SelectList)
+### 模式 1：选择对话框（SelectList）
 
-For letting users pick from a list of options. Use `SelectList` from `@earendil-works/pi-tui` with `DynamicBorder` for framing.
+用于让用户从选项列表中选择。使用 `@earendil-works/pi-tui` 的 `SelectList`，配合 `DynamicBorder` 进行边框装饰。
 
 ```typescript
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -597,21 +597,21 @@ import { Container, type SelectItem, SelectList, Text } from "@earendil-works/pi
 pi.registerCommand("pick", {
   handler: async (_args, ctx) => {
     const items: SelectItem[] = [
-      { value: "opt1", label: "Option 1", description: "First option" },
-      { value: "opt2", label: "Option 2", description: "Second option" },
-      { value: "opt3", label: "Option 3" },  // description is optional
+      { value: "opt1", label: "选项 1", description: "第一个选项" },
+      { value: "opt2", label: "选项 2", description: "第二个选项" },
+      { value: "opt3", label: "选项 3" },  // description 是可选的
     ];
 
     const result = await ctx.ui.custom<string | null>((tui, theme, _kb, done) => {
       const container = new Container();
 
-      // Top border
+      // 顶部边框
       container.addChild(new DynamicBorder((s: string) => theme.fg("accent", s)));
 
-      // Title
-      container.addChild(new Text(theme.fg("accent", theme.bold("Pick an Option")), 1, 0));
+      // 标题
+      container.addChild(new Text(theme.fg("accent", theme.bold("选择一个选项")), 1, 0));
 
-      // SelectList with theme
+      // 带主题的 SelectList
       const selectList = new SelectList(items, Math.min(items.length, 10), {
         selectedPrefix: (t) => theme.fg("accent", t),
         selectedText: (t) => theme.fg("accent", t),
@@ -623,10 +623,10 @@ pi.registerCommand("pick", {
       selectList.onCancel = () => done(null);
       container.addChild(selectList);
 
-      // Help text
-      container.addChild(new Text(theme.fg("dim", "↑↓ navigate • enter select • esc cancel"), 1, 0));
+      // 帮助文本
+      container.addChild(new Text(theme.fg("dim", "↑↓ 导航 • enter 选择 • esc 取消"), 1, 0));
 
-      // Bottom border
+      // 底部边框
       container.addChild(new DynamicBorder((s: string) => theme.fg("accent", s)));
 
       return {
@@ -637,17 +637,17 @@ pi.registerCommand("pick", {
     });
 
     if (result) {
-      ctx.ui.notify(`Selected: ${result}`, "info");
+      ctx.ui.notify(`已选择: ${result}`, "info");
     }
   },
 });
 ```
 
-**Examples:** [preset.ts](../examples/extensions/preset.ts), [tools.ts](../examples/extensions/tools.ts)
+**示例：** [preset.ts](../examples/extensions/preset.ts)、[tools.ts](../examples/extensions/tools.ts)
 
-### Pattern 2: Async Operation with Cancel (BorderedLoader)
+### 模式 2：带取消的异步操作（BorderedLoader）
 
-For operations that take time and should be cancellable. `BorderedLoader` shows a spinner and handles escape to cancel.
+用于需要时间且应可取消的操作。`BorderedLoader` 显示旋转指示器并处理 escape 键来取消。
 
 ```typescript
 import { BorderedLoader } from "@earendil-works/pi-coding-agent";
@@ -655,10 +655,10 @@ import { BorderedLoader } from "@earendil-works/pi-coding-agent";
 pi.registerCommand("fetch", {
   handler: async (_args, ctx) => {
     const result = await ctx.ui.custom<string | null>((tui, theme, _kb, done) => {
-      const loader = new BorderedLoader(tui, theme, "Fetching data...");
+      const loader = new BorderedLoader(tui, theme, "正在获取数据...");
       loader.onAbort = () => done(null);
 
-      // Do async work
+      // 执行异步工作
       fetchData(loader.signal)
         .then((data) => done(data))
         .catch(() => done(null));
@@ -667,7 +667,7 @@ pi.registerCommand("fetch", {
     });
 
     if (result === null) {
-      ctx.ui.notify("Cancelled", "info");
+      ctx.ui.notify("已取消", "info");
     } else {
       ctx.ui.setEditorText(result);
     }
@@ -675,11 +675,11 @@ pi.registerCommand("fetch", {
 });
 ```
 
-**Examples:** [qna.ts](../examples/extensions/qna.ts), [handoff.ts](../examples/extensions/handoff.ts)
+**示例：** [qna.ts](../examples/extensions/qna.ts)、[handoff.ts](../examples/extensions/handoff.ts)
 
-### Pattern 3: Settings/Toggles (SettingsList)
+### 模式 3：设置/开关（SettingsList）
 
-For toggling multiple settings. Use `SettingsList` from `@earendil-works/pi-tui` with `getSettingsListTheme()`.
+用于切换多个设置。使用 `@earendil-works/pi-tui` 的 `SettingsList`，配合 `getSettingsListTheme()`。
 
 ```typescript
 import { getSettingsListTheme } from "@earendil-works/pi-coding-agent";
@@ -688,24 +688,24 @@ import { Container, type SettingItem, SettingsList, Text } from "@earendil-works
 pi.registerCommand("settings", {
   handler: async (_args, ctx) => {
     const items: SettingItem[] = [
-      { id: "verbose", label: "Verbose mode", currentValue: "off", values: ["on", "off"] },
-      { id: "color", label: "Color output", currentValue: "on", values: ["on", "off"] },
+      { id: "verbose", label: "详细模式", currentValue: "off", values: ["on", "off"] },
+      { id: "color", label: "彩色输出", currentValue: "on", values: ["on", "off"] },
     ];
 
     await ctx.ui.custom((_tui, theme, _kb, done) => {
       const container = new Container();
-      container.addChild(new Text(theme.fg("accent", theme.bold("Settings")), 1, 1));
+      container.addChild(new Text(theme.fg("accent", theme.bold("设置")), 1, 1));
 
       const settingsList = new SettingsList(
         items,
         Math.min(items.length + 2, 15),
         getSettingsListTheme(),
         (id, newValue) => {
-          // Handle value change
+          // 处理值变更
           ctx.ui.notify(`${id} = ${newValue}`, "info");
         },
-        () => done(undefined),  // On close
-        { enableSearch: true }, // Optional: enable fuzzy search by label
+        () => done(undefined),  // 关闭时
+        { enableSearch: true }, // 可选：启用按标签的模糊搜索
       );
       container.addChild(settingsList);
 
@@ -719,31 +719,31 @@ pi.registerCommand("settings", {
 });
 ```
 
-**Examples:** [tools.ts](../examples/extensions/tools.ts)
+**示例：** [tools.ts](../examples/extensions/tools.ts)
 
-### Pattern 4: Persistent Status Indicator
+### 模式 4：持久化状态指示器
 
-Show status in the footer that persists across renders. Good for mode indicators.
+在页脚显示跨渲染持久化的状态。适用于模式指示器。
 
 ```typescript
-// Set status (shown in footer)
-ctx.ui.setStatus("my-ext", ctx.ui.theme.fg("accent", "● active"));
+// 设置状态（显示在页脚）
+ctx.ui.setStatus("my-ext", ctx.ui.theme.fg("accent", "● 活跃"));
 
-// Clear status
+// 清除状态
 ctx.ui.setStatus("my-ext", undefined);
 ```
 
-**Examples:** [status-line.ts](../examples/extensions/status-line.ts), [plan-mode.ts](../examples/extensions/plan-mode.ts), [preset.ts](../examples/extensions/preset.ts)
+**示例：** [status-line.ts](../examples/extensions/status-line.ts)、[plan-mode.ts](../examples/extensions/plan-mode.ts)、[preset.ts](../examples/extensions/preset.ts)
 
-### Pattern 4b: Working Indicator Customization
+### 模式 4b：工作指示器自定义
 
-Customize the inline working indicator shown while pi is streaming a response.
+自定义 pi 流式输出回复时显示的内联工作指示器。
 
 ```typescript
-// Static indicator
+// 静态指示器
 ctx.ui.setWorkingIndicator({ frames: [ctx.ui.theme.fg("accent", "●")] });
 
-// Custom animated indicator
+// 自定义动画指示器
 ctx.ui.setWorkingIndicator({
   frames: [
     ctx.ui.theme.fg("dim", "·"),
@@ -754,29 +754,29 @@ ctx.ui.setWorkingIndicator({
   intervalMs: 120,
 });
 
-// Hide the indicator entirely
+// 完全隐藏指示器
 ctx.ui.setWorkingIndicator({ frames: [] });
 
-// Restore pi's default spinner
+// 恢复 pi 的默认旋转器
 ctx.ui.setWorkingIndicator();
 ```
 
-This only affects the normal streaming working indicator. Compaction and retry loaders keep their built-in styling. Custom frames are rendered verbatim, so extensions must add their own colors when needed.
+这仅影响正常的流式工作指示器。压缩和重试加载器保持其内置样式。自定义帧会按原样渲染，因此扩展在需要时必须自行添加颜色。
 
-**Examples:** [working-indicator.ts](../examples/extensions/working-indicator.ts)
+**示例：** [working-indicator.ts](../examples/extensions/working-indicator.ts)
 
-### Pattern 5: Widgets Above/Below Editor
+### 模式 5：编辑器上方/下方的组件
 
-Show persistent content above or below the input editor. Good for todo lists, progress.
+在输入编辑器上方或下方显示持久化内容。适用于待办列表、进度等。
 
 ```typescript
-// Simple string array (above editor by default)
-ctx.ui.setWidget("my-widget", ["Line 1", "Line 2"]);
+// 简单字符串数组（默认在编辑器上方）
+ctx.ui.setWidget("my-widget", ["第 1 行", "第 2 行"]);
 
-// Render below the editor
-ctx.ui.setWidget("my-widget", ["Line 1", "Line 2"], { placement: "belowEditor" });
+// 在编辑器下方渲染
+ctx.ui.setWidget("my-widget", ["第 1 行", "第 2 行"], { placement: "belowEditor" });
 
-// Or with theme
+// 或者带主题
 ctx.ui.setWidget("my-widget", (_tui, theme) => {
   const lines = items.map((item, i) =>
     item.done
@@ -789,15 +789,15 @@ ctx.ui.setWidget("my-widget", (_tui, theme) => {
   };
 });
 
-// Clear
+// 清除
 ctx.ui.setWidget("my-widget", undefined);
 ```
 
-**Examples:** [plan-mode.ts](../examples/extensions/plan-mode.ts)
+**示例：** [plan-mode.ts](../examples/extensions/plan-mode.ts)
 
-### Pattern 6: Custom Footer
+### 模式 6：自定义页脚
 
-Replace the footer. `footerData` exposes data not otherwise accessible to extensions.
+替换页脚。`footerData` 暴露扩展通常无法访问的数据。
 
 ```typescript
 ctx.ui.setFooter((tui, theme, footerData) => ({
@@ -805,21 +805,21 @@ ctx.ui.setFooter((tui, theme, footerData) => ({
   render(width: number): string[] {
     // footerData.getGitBranch(): string | null
     // footerData.getExtensionStatuses(): ReadonlyMap<string, string>
-    return [`${ctx.model?.id} (${footerData.getGitBranch() || "no git"})`];
+    return [`${ctx.model?.id} (${footerData.getGitBranch() || "无 git"})`];
   },
-  dispose: footerData.onBranchChange(() => tui.requestRender()), // reactive
+  dispose: footerData.onBranchChange(() => tui.requestRender()), // 响应式
 }));
 
-ctx.ui.setFooter(undefined); // restore default
+ctx.ui.setFooter(undefined); // 恢复默认
 ```
 
-Token stats available via `ctx.sessionManager.getBranch()` and `ctx.model`.
+Token 统计可通过 `ctx.sessionManager.getBranch()` 和 `ctx.model` 获取。
 
-**Examples:** [custom-footer.ts](../examples/extensions/custom-footer.ts)
+**示例：** [custom-footer.ts](../examples/extensions/custom-footer.ts)
 
-### Pattern 7: Custom Editor (vim mode, etc.)
+### 模式 7：自定义编辑器（vim 模式等）
 
-Replace the main input editor with a custom implementation. Useful for modal editing (vim), different keybindings (emacs), or specialized input handling.
+将主输入编辑器替换为自定义实现。适用于模态编辑（vim）、不同的键绑定（emacs）或专门的输入处理。
 
 ```typescript
 import { CustomEditor, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -831,43 +831,43 @@ class VimEditor extends CustomEditor {
   private mode: Mode = "insert";
 
   handleInput(data: string): void {
-    // Escape: switch to normal mode, or pass through for app handling
+    // Escape：切换到普通模式，或传递给应用处理
     if (matchesKey(data, "escape")) {
       if (this.mode === "insert") {
         this.mode = "normal";
         return;
       }
-      // In normal mode, escape aborts agent (handled by CustomEditor)
+      // 在普通模式下，escape 中止 agent（由 CustomEditor 处理）
       super.handleInput(data);
       return;
     }
 
-    // Insert mode: pass everything to CustomEditor
+    // 插入模式：将所有内容传递给 CustomEditor
     if (this.mode === "insert") {
       super.handleInput(data);
       return;
     }
 
-    // Normal mode: vim-style navigation
+    // 普通模式：vim 风格导航
     switch (data) {
       case "i": this.mode = "insert"; return;
-      case "h": super.handleInput("\x1b[D"); return; // Left
-      case "j": super.handleInput("\x1b[B"); return; // Down
-      case "k": super.handleInput("\x1b[A"); return; // Up
-      case "l": super.handleInput("\x1b[C"); return; // Right
+      case "h": super.handleInput("\x1b[D"); return; // 左
+      case "j": super.handleInput("\x1b[B"); return; // 下
+      case "k": super.handleInput("\x1b[A"); return; // 上
+      case "l": super.handleInput("\x1b[C"); return; // 右
     }
-    // Pass unhandled keys to super (ctrl+c, etc.), but filter printable chars
+    // 将未处理的按键传递给 super（ctrl+c 等），但过滤可打印字符
     if (data.length === 1 && data.charCodeAt(0) >= 32) return;
     super.handleInput(data);
   }
 
   render(width: number): string[] {
     const lines = super.render(width);
-    // Add mode indicator to bottom border (use truncateToWidth for ANSI-safe truncation)
+    // 在底部边框添加模式指示器（使用 truncateToWidth 进行 ANSI 安全的截断）
     if (lines.length > 0) {
       const label = this.mode === "normal" ? " NORMAL " : " INSERT ";
       const lastLine = lines[lines.length - 1]!;
-      // Pass "" as ellipsis to avoid adding "..." when truncating
+      // 传入 "" 作为省略号，避免截断时添加 "..."
       lines[lines.length - 1] = truncateToWidth(lastLine, width - label.length, "") + label;
     }
     return lines;
@@ -876,7 +876,7 @@ class VimEditor extends CustomEditor {
 
 export default function (pi: ExtensionAPI) {
   pi.on("session_start", (_event, ctx) => {
-    // Factory receives theme and keybindings from the app
+    // 工厂函数接收应用的主题和键绑定
     ctx.ui.setEditorComponent((tui, theme, keybindings) =>
       new VimEditor(theme, keybindings)
     );
@@ -884,35 +884,35 @@ export default function (pi: ExtensionAPI) {
 }
 ```
 
-**Key points:**
+**关键要点：**
 
-- **Extend `CustomEditor`** (not base `Editor`) to get app keybindings (escape to abort, ctrl+d to exit, model switching, etc.)
-- **Call `super.handleInput(data)`** for keys you don't handle
-- **Factory pattern**: `setEditorComponent` receives a factory function that gets `tui`, `theme`, and `keybindings`
-- **Pass `undefined`** to restore the default editor: `ctx.ui.setEditorComponent(undefined)`
+- **继承 `CustomEditor`**（而不是基础 `Editor`），以获取应用的键绑定（escape 中止、ctrl+d 退出、模型切换等）
+- **调用 `super.handleInput(data)`** 处理你不处理的按键
+- **工厂模式**：`setEditorComponent` 接收一个工厂函数，该函数获取 `tui`、`theme` 和 `keybindings`
+- **传入 `undefined`** 恢复默认编辑器：`ctx.ui.setEditorComponent(undefined)`
 
-**Examples:** [modal-editor.ts](../examples/extensions/modal-editor.ts)
+**示例：** [modal-editor.ts](../examples/extensions/modal-editor.ts)
 
-## Key Rules
+## 关键规则
 
-1. **Always use theme from callback** - Don't import theme directly. Use `theme` from the `ctx.ui.custom((tui, theme, keybindings, done) => ...)` callback.
+1. **始终从回调中获取 theme** - 不要直接导入 theme。使用 `ctx.ui.custom((tui, theme, keybindings, done) => ...)` 回调中的 `theme`。
 
-2. **Always type DynamicBorder color param** - Write `(s: string) => theme.fg("accent", s)`, not `(s) => theme.fg("accent", s)`.
+2. **始终为 DynamicBorder 的颜色参数添加类型** - 写 `(s: string) => theme.fg("accent", s)`，而不是 `(s) => theme.fg("accent", s)`。
 
-3. **Call tui.requestRender() after state changes** - In `handleInput`, call `tui.requestRender()` after updating state.
+3. **状态变化后调用 tui.requestRender()** - 在 `handleInput` 中，更新状态后调用 `tui.requestRender()`。
 
-4. **Return the three-method object** - Custom components need `{ render, invalidate, handleInput }`.
+4. **返回三个方法的对象** - 自定义组件需要 `{ render, invalidate, handleInput }`。
 
-5. **Use existing components** - `SelectList`, `SettingsList`, `BorderedLoader` cover 90% of cases. Don't rebuild them.
+5. **使用现有组件** - `SelectList`、`SettingsList`、`BorderedLoader` 覆盖了 90% 的用例。不要重复造轮子。
 
-## Examples
+## 示例
 
-- **Selection UI**: [examples/extensions/preset.ts](../examples/extensions/preset.ts) - SelectList with DynamicBorder framing
-- **Async with cancel**: [examples/extensions/qna.ts](../examples/extensions/qna.ts) - BorderedLoader for LLM calls
-- **Settings toggles**: [examples/extensions/tools.ts](../examples/extensions/tools.ts) - SettingsList for tool enable/disable
-- **Status indicators**: [examples/extensions/plan-mode.ts](../examples/extensions/plan-mode.ts) - setStatus and setWidget
-- **Working indicator**: [examples/extensions/working-indicator.ts](../examples/extensions/working-indicator.ts) - setWorkingIndicator
-- **Custom footer**: [examples/extensions/custom-footer.ts](../examples/extensions/custom-footer.ts) - setFooter with stats
-- **Custom editor**: [examples/extensions/modal-editor.ts](../examples/extensions/modal-editor.ts) - Vim-like modal editing
-- **Snake game**: [examples/extensions/snake.ts](../examples/extensions/snake.ts) - Full game with keyboard input, game loop
-- **Custom tool rendering**: [examples/extensions/todo.ts](../examples/extensions/todo.ts) - renderCall and renderResult
+- **选择 UI**：[examples/extensions/preset.ts](../examples/extensions/preset.ts) - 带 DynamicBorder 边框的 SelectList
+- **带取消的异步操作**：[examples/extensions/qna.ts](../examples/extensions/qna.ts) - 用于 LLM 调用的 BorderedLoader
+- **设置开关**：[examples/extensions/tools.ts](../examples/extensions/tools.ts) - 用于工具启用/禁用的 SettingsList
+- **状态指示器**：[examples/extensions/plan-mode.ts](../examples/extensions/plan-mode.ts) - setStatus 和 setWidget
+- **工作指示器**：[examples/extensions/working-indicator.ts](../examples/extensions/working-indicator.ts) - setWorkingIndicator
+- **自定义页脚**：[examples/extensions/custom-footer.ts](../examples/extensions/custom-footer.ts) - 带统计信息的 setFooter
+- **自定义编辑器**：[examples/extensions/modal-editor.ts](../examples/extensions/modal-editor.ts) - 类 Vim 的模态编辑
+- **贪吃蛇游戏**：[examples/extensions/snake.ts](../examples/extensions/snake.ts) - 带键盘输入、游戏循环的完整游戏
+- **自定义工具渲染**：[examples/extensions/todo.ts](../examples/extensions/todo.ts) - renderCall 和 renderResult

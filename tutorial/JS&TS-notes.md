@@ -1057,6 +1057,36 @@ console.log(chalk.blue.bold("蓝色加粗"));     // 链式组
 - fix ：自动修复一部分可修复问题
 - import /代码整理：部分版本里也提供辅助整理能力
 
+## Node.js
+
+Node.js 是一个 JavaScript 运行时，让 JS 可以在浏览器之外（服务器、命令行等）运行。
+
+pi 项目主要用它提供的：
+
+| 类别            | 具体内容                                                     | pi 中的使用                                   |
+| --------------- | ------------------------------------------------------------ | --------------------------------------------- |
+| **文件系统**    | `fs` 模块（`readFileSync`、`statSync`、`readdirSync`、`existsSync` 等） | 读取 skill 文件、扫描目录、检查路径是否存在   |
+| **路径处理**    | `path` 模块（`resolve`、`join`、`dirname`、`relative` 等）   | 路径规范化、相对路径计算                      |
+| **包管理**      | `npm` 生态                                                   | 用户通过 npm 安装 skill/extension 包          |
+| **模块系统**    | ESM / `import` / `export`                                    | 项目所有 `.ts` 文件的组织方式                 |
+| **进程/环境**   | `process.env`、`process.cwd()`                               | 读取环境变量（`PI_OFFLINE` 等）、获取工作目录 |
+| **Buffer/编码** | `Buffer`、UTF-8 编解码                                       | `readFileSync(file, "utf-8")`                 |
+| **网络**        | HTTP 客户端（间接通过 OpenAI SDK/Anthropic SDK）             | 调 LLM API                                    |
+
+简单说：Node.js 提供了操作系统层的系统调用封装，pi 用它来**读写文件、遍历目录、处理路径**这些本地操作。调 LLM API 的网络请求则由上层 SDK 处理。
+
+statSync 是 Node.js fs 模块的同步方法，返回一个 fs.Stats 对象，描述文件/目录的元信息。
+
+```ts
+import { statSync } from "node:fs";
+```
+
+常用属性：
+
+* stats.isFile() 是否是普通文件 
+* stats.isDirectory() 是否是目录 
+* stats.isSymbolicLink() 是否是符号链接（注意： statSync 会追踪链接，用 lstatSync 才能拿到链接自身）
+
 
 
 

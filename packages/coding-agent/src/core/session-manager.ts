@@ -178,15 +178,15 @@ export interface LabelEntry extends SessionEntryBase {
 
 /** 会话条目联合类型——通过 id/parentId 形成树结构（SessionManager 的读取方法返回此类型） */
 export type SessionEntry =
-	| SessionMessageEntry      // 对话消息（user/assistant/toolResult）
+	| SessionMessageEntry // 对话消息（user/assistant/toolResult）
 	| ThinkingLevelChangeEntry // 思考级别变更
-	| ModelChangeEntry         // 模型切换
-	| CompactionEntry          // 上下文压缩摘要
-	| BranchSummaryEntry       // 分支摘要
-	| CustomEntry              // extension 数据（不进 LLM context）
-	| CustomMessageEntry       // extension 消息（进 LLM context）
-	| LabelEntry               // 用户书签
-	| SessionInfoEntry;        // 会话元数据（显示名称）
+	| ModelChangeEntry // 模型切换
+	| CompactionEntry // 上下文压缩摘要
+	| BranchSummaryEntry // 分支摘要
+	| CustomEntry // extension 数据（不进 LLM context）
+	| CustomMessageEntry // extension 消息（进 LLM context）
+	| LabelEntry // 用户书签
+	| SessionInfoEntry; // 会话元数据（显示名称）
 
 /** 原始文件条目（包含文件头） */
 export type FileEntry = SessionHeader | SessionEntry;
@@ -372,7 +372,6 @@ export function parseSessionEntries(content: string): FileEntry[] {
 			// 跳过格式错误的行
 		}
 	}
-
 	return entries;
 }
 
@@ -527,18 +526,7 @@ export function loadEntriesFromFile(filePath: string): FileEntry[] {
 	if (!existsSync(resolvedFilePath)) return [];
 
 	const content = readFileSync(resolvedFilePath, "utf8");
-	const entries: FileEntry[] = [];
-	const lines = content.trim().split("\n");
-
-	for (const line of lines) {
-		if (!line.trim()) continue;
-		try {
-			const entry = JSON.parse(line) as FileEntry;
-			entries.push(entry);
-		} catch {
-			// 跳过格式错误的行
-		}
-	}
+	const entries = parseSessionEntries(content);
 
 	// 验证会话头
 	if (entries.length === 0) return entries;
@@ -671,17 +659,7 @@ function getSessionModifiedDate(entries: FileEntry[], header: SessionHeader, sta
 async function buildSessionInfo(filePath: string): Promise<SessionInfo | null> {
 	try {
 		const content = await readFile(filePath, "utf8");
-		const entries: FileEntry[] = [];
-		const lines = content.trim().split("\n");
-
-		for (const line of lines) {
-			if (!line.trim()) continue;
-			try {
-				entries.push(JSON.parse(line) as FileEntry);
-			} catch {
-				// Skip malformed lines
-			}
-		}
+		const entries = parseSessionEntries(content);
 
 		if (entries.length === 0) return null;
 		const header = entries[0];
@@ -879,7 +857,8 @@ export class SessionManager {
 		this.cwd = resolvePath(cwd);
 		this.sessionDir = normalizePath(sessionDir);
 		this.persist = persist;
-		if (persist && this.sessionDir && !existsSync(this.sessionDir)) { // 同步检查路径是否存在
+		if (persist && this.sessionDir && !existsSync(this.sessionDir)) {
+			// 同步检查路径是否存在
 			mkdirSync(this.sessionDir, { recursive: true }); // 同步创建目录， recursive: true 表示会递归创建父目录
 		}
 
@@ -1296,13 +1275,13 @@ export class SessionManager {
 	 */
 	getBranch(fromId?: string): SessionEntry[] {
 		const path: SessionEntry[] = [];
-		const startId = fromId ?? this.leafId;     // 起点：显式指定 → 当前叶子
+		const startId = fromId ?? this.leafId; // 起点：显式指定 → 当前叶子
 		let current = startId ? this.byId.get(startId) : undefined;
 		while (current) {
-			path.unshift(current);                   // 头插法：子 → 父 → ... → root
+			path.unshift(current); // 头插法：子 → 父 → ... → root
 			current = current.parentId ? this.byId.get(current.parentId) : undefined; // 沿 parentId 链向上
 		}
-		return path;                                 // 从根到叶的顺序
+		return path; // 从根到叶的顺序
 	}
 
 	/**

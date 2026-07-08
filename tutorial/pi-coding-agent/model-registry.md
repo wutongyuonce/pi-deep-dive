@@ -1,4 +1,4 @@
-# 第 18 章：Model Registry — 模型不只是一个 ID
+# Model Registry — 模型不只是一个 ID
 
 > **定位**：本章解析模型选择背后的配置系统和动态注册机制。
 > 前置依赖：第 4 章（Provider Registry）、第 13 章（配置覆盖）。

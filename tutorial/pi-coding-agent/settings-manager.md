@@ -576,9 +576,9 @@ private persistScopedSettings(
 
 ##### Settings 的 Reload 机制：从文件热重载到内存
 
-```
+```ts
 reload()
-  → await this.writeQueue                  // 等写入排空
+  → await this.writeQueue  // 等写入排空
   → loadFromStorage(storage, "global")
     → storage.withLock("global", cb)
       → readFileSync → JSON.parse → migrateSettings

@@ -14,7 +14,7 @@
 
 [Pi](https://pi.dev) 是一个基于 TypeScript 构建的自扩展编程 Agent，采用 npm workspace monorepo 架构，核心包含四层：
 
-```json
+```
 pi-tui (终端渲染库)  ← 零内部依赖，纯 UI / 渲染层
 
 pi-ai  (LLM 统一 API) — 模型、provider、流式事件、成本/usage	 ← 零内部依赖，纯 AI 层
@@ -204,3 +204,173 @@ plan-mode
 ## 许可证
 
 MIT
+
+## 指南
+
+详见[README](https://github.com/badlogic/pi-mono/tree/main/packages/coding-agent#readme)
+
+### 编辑器
+
+（指的是输入框）
+
+| 功能      | 用法                                                         |
+| :-------- | :----------------------------------------------------------- |
+| 文件引用  | 输入 `@` 可模糊搜索项目文件                                  |
+| 路径补全  | 按 `Tab` 自动补全路径                                        |
+| 多行输入  | `Shift+Enter`（Windows Terminal 下也可用 `Ctrl+Enter`）      |
+| 图片      | `Ctrl+V` 粘贴（Windows 下可用 `Alt+V`），或直接拖到终端      |
+| Bash 命令 | `!command` 执行并把输出发给模型，`!!command` 执行但不发送输出 |
+
+删除单词、撤销等使用标准编辑快捷键。详见 [此处](https://github.com/badlogic/pi-mono/blob/main/packages/coding-agent/docs/keybindings.md)。
+
+### 命令
+
+在编辑器里输入 `/` 可触发命令。[扩展](https://github.com/badlogic/pi-mono/tree/main/packages/coding-agent#extensions)可注册自定义命令，[技能](https://github.com/badlogic/pi-mono/tree/main/packages/coding-agent#skills)可用 `/skill:name` 调用，[提示词模板](https://github.com/badlogic/pi-mono/tree/main/packages/coding-agent#prompt-templates)可通过 `/templatename` 展开。
+
+| 命令                | 说明                                                   |
+| :------------------ | :----------------------------------------------------- |
+| `/login`,`/logout`  | OAuth 登录/退出                                        |
+| `/model`            | 切换模型                                               |
+| `/scoped-models`    | 启用/禁用 `Ctrl+P` 轮换可选模型                        |
+| `/settings`         | 设置思考等级、主题、消息投递、传输方式                 |
+| `/resume`           | 从历史会话中恢复                                       |
+| `/new`              | 新建会话                                               |
+| `/name <name>`      | 设置会话显示名称                                       |
+| `/session`          | 显示会话信息（路径、Token、费用）                      |
+| `/tree`             | 跳转到会话任意节点并从那继续                           |
+| `/fork`             | 从当前分支创建新会话                                   |
+| `/compact [prompt]` | 手动压缩上下文，可自定义压缩提示                       |
+| `/copy`             | 复制助手上一条回复到剪贴板                             |
+| `/export [file]`    | 导出会话为 HTML 文件                                   |
+| `/share`            | 上传为私有 GitHub Gist，并生成可分享 HTML 链接         |
+| `/reload`           | 重载扩展、技能、提示词、上下文文件（主题会自动热更新） |
+| `/hotkeys`          | 显示全部快捷键                                         |
+| `/changelog`        | 显示版本更新记录                                       |
+| `/quit`,`/exit`     | 退出 pi                                                |
+
+### 消息队列
+
+智能体工作时，你也可以继续发消息：
+
+- **Enter**：排入一条*引导消息*，会在当前工具执行完后立即送达（并中断后续未执行工具）
+- **Alt+Enter**：排入一条*跟进消息*，只会在代理完成全部工作后送达
+- **Escape**：中止当前过程，并把已排队消息恢复到编辑器
+- **Alt+Up**：把队列中的消息取回到编辑器
+
+可在 [settings](https://github.com/badlogic/pi-mono/blob/main/packages/coding-agent/docs/settings.md) 配置投递方式：`steeringMode` 和 `followUpMode` 可设为 `"one-at-a-time"`（默认，收到回复后再发下一条）或 `"all"`（一次性发送队列全部消息）。`transport` 用于选择支持多传输的提供方通道偏好（`"sse"`、`"websocket"` 或 `"auto"`）。
+
+### 会话
+
+会话以 JSONL 树结构保存。每条记录都有 `id` 和 `parentId`，所以可以在同一个文件里直接分支，不必新建文件。文件格式见 [此处](https://github.com/badlogic/pi-mono/blob/main/packages/coding-agent/docs/session.md)。
+
+### 管理
+
+会话会自动保存到 `~/.pi/agent/sessions/`，并按工作目录（cwd）分组。
+
+- `pi -c`：继续最近一次会话
+- `pi -r`：浏览并选择历史会话
+- `pi --no-session`：临时模式（不保存会话）
+- `pi --session <path>`：使用指定会话文件或会话 ID
+
+### 分支
+
+**`/tree`**：在当前会话文件内浏览会话树。你可以选中任意历史节点，从那继续，并在不同分支间切换。所有历史都保留会话文件中。
+
+![tree-view](img/fef44c9acaf8a1487a3d89bfc8e4ee9db9483049.png)
+
+- 输入关键词可搜索，`←/→` 翻页
+- 过滤模式（Ctrl+O）：default → no-tools → user-only → labeled-only → all
+- 按 `l` 可给条目标记书签
+
+**`/fork`**：从当前分支创建一个新的会话文件。系统会打开选择器，复制到所选节点为止的历史，并把该节点消息放入编辑器，方便你继续修改。
+
+### 设置
+
+使用 `/settings` 修改常用选项，或直接编辑 JSON 文件：
+
+| 位置                        | 范围 |
+| :-------------------------- | :--- |
+| `~/.pi/agent/settings.json` | 全局 |
+| `.pi/settings.json`         | 项目 |
+
+详见[此处](https://github.com/badlogic/pi-mono/blob/main/packages/coding-agent/docs/settings.md)。
+
+### 项目上下文
+
+Pi 在启动时会从以下位置加载 `AGENTS.md`（或 `CLAUDE.md`）：
+
+- `~/.pi/agent/AGENTS.md` (全局)
+- 父目录（从当前工作目录向上查找）
+- 当前目录
+
+用于项目说明、约束和常用命令封装。所有匹配的md文件将被拼接在一起。
+
+#### 系统提示
+
+用 `.pi/SYSTEM.md`（项目）或 `~/.pi/agent/SYSTEM.md`（全局）替换系统提示词或通过 `APPEND_SYSTEM.md` 追加在系统提示词末尾。
+
+### 自定义
+
+这部分的内容都可以封装为[pi package](https://github.com/badlogic/pi-mono/tree/main/packages/coding-agent#pi-packages)。
+
+这里整理了公开的 Pi 包
+
+[Packages - pi.dev](https://pi.dev/packages)
+
+#### 提示词模板
+
+将提示词封装为Markdown文件，输入`/文件名`展开。
+
+```markdown
+<!-- ~/.pi/agent/prompts/review.md --> 
+Review this code for bugs, security issues, and performance problems. Focus on: {{focus}}
+```
+
+放置在 `~/.pi/agent/prompts/`（全局）, `.pi/prompts/`（项目）或封装为 [pi package](https://github.com/badlogic/pi-mono/tree/main/packages/coding-agent#pi-packages) 分享给别人.
+
+#### 技能
+
+按需加载的技能包，遵循 [Agent Skills 标准](https://agentskills.io/)。可通过输入/skill:name 调用，也可让 Agent 自动加载。
+
+```markdown
+<!-- ~/.pi/agent/skills/my-skill/SKILL.md --> 
+# My Skill Use this skill when the user asks about X. 
+
+## Steps 
+1. Do this 
+2. Then that
+```
+
+安装路径：
+
+全局
+
+- `~/.pi/agent/skills/`
+- `~/.agents/skills/`
+
+项目
+
+- `.pi/skills/`
+- `.agents/skills/`（从当前工作目录向上逐级查找父目录）
+
+或封装为 [pi package](https://github.com/badlogic/pi-mono/tree/main/packages/coding-agent#pi-packages)。
+
+详见[此处](https://github.com/badlogic/pi-mono/blob/main/packages/coding-agent/docs/skills.md).
+
+pi作者维护的[技能包](https://github.com/badlogic/pi-skills)，包含浏览器控制，brave搜索等技能，pi和其它支持skill的项目都能直接使用。
+
+#### 扩展
+
+放入 `~/.pi/agent/extensions/`（全局）、`.pi/extensions/`（项目）或封装为 [pi package](https://github.com/badlogic/pi-mono/tree/main/packages/coding-agent#pi-packages) 分享给别人。
+
+参见[文档](https://github.com/badlogic/pi-mono/blob/main/packages/coding-agent/docs/extensions.md)和[例子](https://github.com/badlogic/pi-mono/blob/main/packages/coding-agent/examples/extensions)。
+
+#### 主题
+
+内置暗色与明亮，修改主题配置后可热重载。
+
+放入`~/.pi/agent/themes/`（全局），`.pi/themes/`（项目）或封装为 [pi package](https://github.com/badlogic/pi-mono/tree/main/packages/coding-agent#pi-packages) 分享给别人。
+
+详见[此处](https://github.com/badlogic/pi-mono/blob/main/packages/coding-agent/docs/themes.md)。
+
+**通过扩展与主题系统可以极大增强我们的使用体验！！！** 直接对模型说出需求即可，因为pi的系统提示词中包含了pi的文档路径。

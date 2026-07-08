@@ -626,9 +626,12 @@ export class DefaultResourceLoader implements ResourceLoader {
 
 		// 2. 自动发现的 skill 目录若存在 `SKILL.md`，实际应映射到这个文件。
 		const mapSkillPath = (resource: { path: string; metadata: PathMetadata }): string => {
+			// 非自动发现、非 package 来源的 skill 不做路径映射，直接返回原路径。
 			if (resource.metadata.source !== "auto" && resource.metadata.origin !== "package") {
 				return resource.path;
 			}
+			// 检查 resource.path 是否为目录：不是目录则直接返回原路径。
+			// statSync 可能因权限等原因抛异常，此时也安全降级为原路径。
 			try {
 				const stats = statSync(resource.path);
 				if (!stats.isDirectory()) {
@@ -637,13 +640,16 @@ export class DefaultResourceLoader implements ResourceLoader {
 			} catch {
 				return resource.path;
 			}
+			// 目录存在时，尝试查找其下的 SKILL.md 作为实际技能入口文件。
 			const skillFile = join(resource.path, "SKILL.md");
 			if (existsSync(skillFile)) {
+				// 将目录的 metadata 关联到 SKILL.md，保证 sourceInfo 推断正确。
 				if (!metadataByPath.has(skillFile)) {
 					metadataByPath.set(skillFile, resource.metadata);
 				}
 				return skillFile;
 			}
+			// 目录下没有 SKILL.md，回退到原路径。
 			return resource.path;
 		};
 

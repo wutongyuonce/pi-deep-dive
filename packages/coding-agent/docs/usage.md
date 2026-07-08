@@ -1,227 +1,227 @@
-# Using Pi
+# 使用 Pi
 
-This page collects day-to-day usage details that do not fit on the quickstart page.
+本页收集了快速开始页面中未涵盖的日常使用细节。
 
-## Interactive Mode
+## 交互模式
 
-<p align="center"><img src="images/interactive-mode.png" alt="Interactive Mode" width="600"></p>
+<p align="center"><img src="../images/interactive-mode.png" alt="交互模式" width="600"></p>
 
-The interface has four main areas:
+界面分为四个主要区域：
 
-- **Startup header** - shortcuts, loaded context files, prompt templates, skills, and extensions
-- **Messages** - user messages, assistant responses, tool calls, tool results, notifications, errors, and extension UI
-- **Editor** - where you type; border color indicates the current thinking level
-- **Footer** - working directory, session name, token/cache usage, cost, context usage, and current model
+- **启动头** - 快捷键、已加载的上下文文件、提示模板、技能和扩展
+- **消息区** - 用户消息、助手回复、工具调用、工具结果、通知、错误和扩展 UI
+- **编辑器** - 输入区域；边框颜色表示当前思考级别
+- **底栏** - 工作目录、会话名称、令牌/缓存用量、费用、上下文用量和当前模型
 
-The editor can be replaced temporarily by built-in UI such as `/settings` or by custom extension UI.
+编辑器可被内置 UI（如 `/settings`）或自定义扩展 UI 临时替换。
 
-### Editor Features
+### 编辑器功能
 
-| Feature | How |
+| 功能 | 操作方式 |
 |---------|-----|
-| File reference | Type `@` to fuzzy-search project files |
-| Path completion | Press Tab to complete paths |
-| Multi-line input | Shift+Enter, or Ctrl+Enter on Windows Terminal |
-| Images | Paste with Ctrl+V, Alt+V on Windows, or drag into the terminal |
-| Shell command | `!command` runs and sends output to the model |
-| Hidden shell command | `!!command` runs without sending output to the model |
-| External editor | Ctrl+G opens `$VISUAL` or `$EDITOR` |
+| 文件引用 | 输入 `@` 模糊搜索项目文件 |
+| 路径补全 | 按 Tab 补全路径 |
+| 多行输入 | Shift+Enter，或在 Windows Terminal 中使用 Ctrl+Enter |
+| 图片 | 使用 Ctrl+V 粘贴，Windows 上使用 Alt+V，或拖入终端 |
+| Shell 命令 | `!command` 运行并将输出发送给模型 |
+| 隐藏 Shell 命令 | `!!command` 运行但不将输出发送给模型 |
+| 外部编辑器 | Ctrl+G 打开 `$VISUAL` 或 `$EDITOR` |
 
-See [Keybindings](keybindings.md) for all shortcuts and customization.
+所有快捷键及自定义请参阅[键绑定](zh/keybindings.md)。
 
-## Slash Commands
+## 斜杠命令
 
-Type `/` in the editor to open command completion. Extensions can register custom commands, skills are available as `/skill:name`, and prompt templates expand via `/templatename`.
+在编辑器中输入 `/` 打开命令补全。扩展可以注册自定义命令，技能可通过 `/skill:name` 使用，提示模板通过 `/templatename` 展开。
 
-| Command | Description |
+| 命令 | 描述 |
 |---------|-------------|
-| `/login`, `/logout` | Manage API-key credentials |
-| `/model` | Switch models |
-| `/scoped-models` | Enable/disable models for Ctrl+P cycling |
-| `/settings` | Thinking level, theme, message delivery, transport |
-| `/resume` | Pick from previous sessions |
-| `/new` | Start a new session |
-| `/name <name>` | Set session display name |
-| `/session` | Show session file, ID, messages, tokens, and cost |
-| `/tree` | Jump to any point in the session and continue from there |
-| `/fork` | Create a new session from a previous user message |
-| `/clone` | Duplicate the current active branch into a new session |
-| `/compact [prompt]` | Manually compact context, optionally with custom instructions |
-| `/copy` | Copy last assistant message to clipboard |
-| `/export [file]` | Export session to HTML |
-| `/share` | Upload as private GitHub gist with shareable HTML link |
-| `/reload` | Reload keybindings, extensions, skills, prompts, and context files |
-| `/hotkeys` | Show all keyboard shortcuts |
-| `/changelog` | Display version history |
-| `/quit` | Quit pi |
+| `/login`, `/logout` | 管理 API 密钥凭据 |
+| `/model` | 切换模型 |
+| `/scoped-models` | 启用/禁用用于 Ctrl+P 循环的模型 |
+| `/settings` | 思考级别、主题、消息投递、传输方式 |
+| `/resume` | 从之前的会话中选择 |
+| `/new` | 开始新会话 |
+| `/name <name>` | 设置会话显示名称 |
+| `/session` | 显示会话文件、ID、消息、令牌和费用 |
+| `/tree` | 跳转到会话中的任意节点并从中继续 |
+| `/fork` | 从之前的用户消息创建新会话 |
+| `/clone` | 将当前活动分支复制到新会话中 |
+| `/compact [prompt]` | 手动压缩上下文，可选自定义指令 |
+| `/copy` | 将最后一条助手消息复制到剪贴板 |
+| `/export [file]` | 将会话导出为 HTML |
+| `/share` | 上传为私有 GitHub Gist，附带可分享的 HTML 链接 |
+| `/reload` | 重新加载键绑定、扩展、技能、提示和上下文文件 |
+| `/hotkeys` | 显示所有键盘快捷键 |
+| `/changelog` | 显示版本历史 |
+| `/quit` | 退出 pi |
 
-## Message Queue
+## 消息队列
 
-You can submit messages while the agent is still working:
+你可以在代理仍在工作时提交消息：
 
-- **Enter** queues a steering message, delivered after the current assistant turn finishes executing its tool calls.
-- **Alt+Enter** queues a follow-up message, delivered after the agent finishes all work.
-- **Escape** aborts and restores queued messages to the editor.
-- **Alt+Up** retrieves queued messages back to the editor.
+- **Enter** 排队一条引导消息，在当前助手轮次完成工具调用后投递。
+- **Alt+Enter** 排队一条后续消息，在代理完成所有工作后投递。
+- **Escape** 中止并将排队消息恢复到编辑器中。
+- **Alt+Up** 将排队消息取回编辑器。
 
-On Windows Terminal, Alt+Enter is fullscreen by default. Remap it as described in [Terminal setup](terminal-setup.md) if you want pi to receive the shortcut.
+在 Windows Terminal 上，Alt+Enter 默认为全屏。如果希望 pi 接收该快捷键，请按照[终端设置](zh/terminal-setup.md)中的说明重新映射。
 
-Configure delivery in [Settings](settings.md) with `steeringMode` and `followUpMode`.
+在[设置](zh/settings.md)中通过 `steeringMode` 和 `followUpMode` 配置投递方式。
 
-## Sessions
+## 会话
 
-Sessions are saved automatically to `~/.pi/agent/sessions/`, organized by working directory.
+会话会自动保存到 `~/.pi/agent/sessions/`，按工作目录组织。
 
 ```bash
-pi -c                  # Continue most recent session
-pi -r                  # Browse and select a session
-pi --no-session        # Ephemeral mode; do not save
-pi --session <path|id> # Use a specific session file or session ID
-pi --fork <path|id>    # Fork a session into a new session file
+pi -c                  # 继续最近一次会话
+pi -r                  # 浏览并选择一个会话
+pi --no-session        # 临时模式；不保存
+pi --session <path|id> # 使用特定的会话文件或会话 ID
+pi --fork <path|id>    # 将会话分支到新的会话文件
 ```
 
-Useful session commands:
+有用的会话命令：
 
-- `/session` shows the current session file and ID.
-- `/tree` navigates the in-file session tree and can summarize abandoned branches.
-- `/fork` creates a new session from an earlier user message.
-- `/clone` duplicates the current active branch into a new session file.
-- `/compact` summarizes older messages to free context.
+- `/session` 显示当前会话文件和 ID。
+- `/tree` 导航文件内会话树，并可汇总已放弃的分支。
+- `/fork` 从早期用户消息创建新会话。
+- `/clone` 将当前活动分支复制到新的会话文件中。
+- `/compact` 汇总较旧的消息以释放上下文空间。
 
-See [Sessions](sessions.md) and [Compaction](compaction.md) for details.
+详情请参阅[会话](zh/sessions.md)和[压缩](zh/compaction.md)。
 
-## Context Files
+## 上下文文件
 
-Pi loads `AGENTS.md` or `CLAUDE.md` at startup from:
+Pi 启动时会从以下位置加载 `AGENTS.md` 或 `CLAUDE.md`：
 
-- `~/.pi/agent/AGENTS.md` for global instructions
-- parent directories, walking up from the current working directory
-- the current directory
+- `~/.pi/agent/AGENTS.md` 用于全局指令
+- 父目录，从当前工作目录向上遍历
+- 当前目录
 
-Use context files for project conventions, commands, safety rules, and preferences. Disable loading with `--no-context-files` or `-nc`.
+使用上下文文件设置项目约定、命令、安全规则和偏好。使用 `--no-context-files` 或 `-nc` 禁用加载。
 
-### System Prompt Files
+### 系统提示文件
 
-Replace the default system prompt with:
+使用以下文件替换默认系统提示：
 
-- `.pi/SYSTEM.md` for a project
-- `~/.pi/agent/SYSTEM.md` globally
+- 项目级：`.pi/SYSTEM.md`
+- 全局：`~/.pi/agent/SYSTEM.md`
 
-Append to the default prompt without replacing it with `APPEND_SYSTEM.md` in either location.
+在以上任一位置使用 `APPEND_SYSTEM.md` 可在不替换默认提示的情况下追加内容。
 
-## Exporting and Sharing Sessions
+## 导出和分享会话
 
-Use `/export [file]` to write a session to HTML.
+使用 `/export [file]` 将会话导出为 HTML。
 
-Use `/share` to upload a private GitHub gist with a shareable HTML link.
+使用 `/share` 上传为私有 GitHub Gist，附带可分享的 HTML 链接。
 
-If you use pi for open source work and want to publish sessions for model, prompt, tool, and evaluation research, see [`badlogic/pi-share-hf`](https://github.com/badlogic/pi-share-hf). It publishes sessions to Hugging Face datasets.
+如果你将 pi 用于开源工作，并希望发布会话用于模型、提示、工具和评估研究，请参阅 [`badlogic/pi-share-hf`](https://github.com/badlogic/pi-share-hf)。它将会话发布到 Hugging Face 数据集。
 
-## CLI Reference
+## CLI 参考
 
 ```bash
 pi [options] [@files...] [messages...]
 ```
 
-### Package Commands
+### 包命令
 
 ```bash
-pi install <source> [-l]     # Install package, -l for project-local
-pi remove <source> [-l]      # Remove package
-pi uninstall <source> [-l]   # Alias for remove
-pi update [source|self|pi]   # Update pi and packages; reconcile pinned git refs
-pi update --extensions       # Update packages only; reconcile pinned git refs
-pi update --self             # Update pi only
-pi update --extension <src>  # Update one package
-pi list                      # List installed packages
-pi config                    # Enable/disable package resources
+pi install <source> [-l]     # 安装包，-l 表示项目本地安装
+pi remove <source> [-l]      # 移除包
+pi uninstall <source> [-l]   # remove 的别名
+pi update [source|self|pi]   # 更新 pi 和包；同步固定的 git 引用
+pi update --extensions       # 仅更新包；同步固定的 git 引用
+pi update --self             # 仅更新 pi
+pi update --extension <src>  # 更新单个包
+pi list                      # 列出已安装的包
+pi config                    # 启用/禁用包资源
 ```
 
-These commands manage pi packages, not the pi CLI installation. To uninstall pi itself, see [Quickstart](quickstart.md#uninstall).
+这些命令管理 pi 包，而非 pi CLI 安装本身。要卸载 pi 本身，请参阅[快速开始](zh/quickstart.md#卸载)。
 
-See [Pi Packages](packages.md) for package sources and security notes.
+包来源和安全说明请参阅 [Pi 包](zh/packages.md)。
 
-### Modes
+### 模式
 
-| Flag | Description |
+| 标志 | 描述 |
 |------|-------------|
-| default | Interactive mode |
-| `-p`, `--print` | Print response and exit |
-| `--mode json` | Output all events as JSON lines; see [JSON mode](json.md) |
-| `--mode rpc` | RPC mode over stdin/stdout; see [RPC mode](rpc.md) |
-| `--export <in> [out]` | Export a session to HTML |
+| 默认 | 交互模式 |
+| `-p`, `--print` | 打印回复并退出 |
+| `--mode json` | 将所有事件输出为 JSON 行；参见 [JSON 模式](zh/json.md) |
+| `--mode rpc` | 通过 stdin/stdout 的 RPC 模式；参见 [RPC 模式](zh/rpc.md) |
+| `--export <in> [out]` | 将会话导出为 HTML |
 
-In print mode, pi also reads piped stdin and merges it into the initial prompt:
+在打印模式下，pi 也会读取通过管道传入的 stdin 并将其合并到初始提示中：
 
 ```bash
 cat README.md | pi -p "Summarize this text"
 ```
 
-### Model Options
+### 模型选项
 
-| Option | Description |
+| 选项 | 描述 |
 |--------|-------------|
-| `--provider <name>` | Provider, such as `anthropic`, `openai`, or `google` |
-| `--model <pattern>` | Model pattern or ID; supports `provider/id` and optional `:<thinking>` |
-| `--api-key <key>` | API key, overriding environment variables |
-| `--thinking <level>` | `off`, `minimal`, `low`, `medium`, `high`, `xhigh` |
-| `--models <patterns>` | Comma-separated patterns for Ctrl+P cycling |
-| `--list-models [search]` | List available models |
+| `--provider <name>` | 提供商，如 `anthropic`、`openai` 或 `google` |
+| `--model <pattern>` | 模型模式或 ID；支持 `provider/id` 和可选的 `:<thinking>` |
+| `--api-key <key>` | API 密钥，覆盖环境变量 |
+| `--thinking <level>` | `off`、`minimal`、`low`、`medium`、`high`、`xhigh` |
+| `--models <patterns>` | 逗号分隔的模式，用于 Ctrl+P 循环切换 |
+| `--list-models [search]` | 列出可用模型 |
 
-### Session Options
+### 会话选项
 
-| Option | Description |
+| 选项 | 描述 |
 |--------|-------------|
-| `-c`, `--continue` | Continue the most recent session |
-| `-r`, `--resume` | Browse and select a session |
-| `--session <path\|id>` | Use a specific session file or partial UUID |
-| `--fork <path\|id>` | Fork a session file or partial UUID into a new session |
-| `--session-dir <dir>` | Custom session storage directory |
-| `--no-session` | Ephemeral mode; do not save |
+| `-c`, `--continue` | 继续最近一次会话 |
+| `-r`, `--resume` | 浏览并选择一个会话 |
+| `--session <path\|id>` | 使用特定的会话文件或部分 UUID |
+| `--fork <path\|id>` | 将会话文件或部分 UUID 分支到新会话 |
+| `--session-dir <dir>` | 自定义会话存储目录 |
+| `--no-session` | 临时模式；不保存 |
 
-### Tool Options
+### 工具选项
 
-| Option | Description |
+| 选项 | 描述 |
 |--------|-------------|
-| `--tools <list>`, `-t <list>` | Allowlist specific built-in, extension, and custom tools |
-| `--no-builtin-tools`, `-nbt` | Disable built-in tools but keep extension/custom tools enabled |
-| `--no-tools`, `-nt` | Disable all tools |
+| `--tools <list>`, `-t <list>` | 仅允许特定的内置、扩展和自定义工具 |
+| `--no-builtin-tools`, `-nbt` | 禁用内置工具，但保留扩展/自定义工具 |
+| `--no-tools`, `-nt` | 禁用所有工具 |
 
-Built-in tools: `read`, `bash`, `edit`, `write`, `grep`, `find`, `ls`.
+内置工具：`read`、`bash`、`edit`、`write`、`grep`、`find`、`ls`。
 
-### Resource Options
+### 资源选项
 
-| Option | Description |
+| 选项 | 描述 |
 |--------|-------------|
-| `-e`, `--extension <source>` | Load an extension from path, npm, or git; repeatable |
-| `--no-extensions` | Disable extension discovery |
-| `--skill <path>` | Load a skill; repeatable |
-| `--no-skills` | Disable skill discovery |
-| `--prompt-template <path>` | Load a prompt template; repeatable |
-| `--no-prompt-templates` | Disable prompt template discovery |
-| `--theme <path>` | Load a theme; repeatable |
-| `--no-themes` | Disable theme discovery |
-| `--no-context-files`, `-nc` | Disable `AGENTS.md` and `CLAUDE.md` discovery |
+| `-e`, `--extension <source>` | 从路径、npm 或 git 加载扩展；可重复 |
+| `--no-extensions` | 禁用扩展发现 |
+| `--skill <path>` | 加载技能；可重复 |
+| `--no-skills` | 禁用技能发现 |
+| `--prompt-template <path>` | 加载提示模板；可重复 |
+| `--no-prompt-templates` | 禁用提示模板发现 |
+| `--theme <path>` | 加载主题；可重复 |
+| `--no-themes` | 禁用主题发现 |
+| `--no-context-files`, `-nc` | 禁用 `AGENTS.md` 和 `CLAUDE.md` 发现 |
 
-Combine `--no-*` with explicit flags to load exactly what you need, ignoring settings. Example:
+将 `--no-*` 与显式标志结合使用，可以精确加载所需内容，忽略设置中的配置。示例：
 
 ```bash
 pi --no-extensions -e ./my-extension.ts
 ```
 
-### Other Options
+### 其他选项
 
-| Option | Description |
+| 选项 | 描述 |
 |--------|-------------|
-| `--system-prompt <text>` | Replace default prompt; context files and skills are still appended |
-| `--append-system-prompt <text>` | Append to system prompt |
-| `--verbose` | Force verbose startup |
-| `-h`, `--help` | Show help |
-| `-v`, `--version` | Show version |
+| `--system-prompt <text>` | 替换默认提示；上下文文件和技能仍会附加 |
+| `--append-system-prompt <text>` | 附加到系统提示之后 |
+| `--verbose` | 强制显示详细启动信息 |
+| `-h`, `--help` | 显示帮助 |
+| `-v`, `--version` | 显示版本 |
 
-### File Arguments
+### 文件参数
 
-Prefix files with `@` to include them in the message:
+在文件名前加 `@` 以将其包含在消息中：
 
 ```bash
 pi @prompt.md "Answer this"
@@ -229,51 +229,51 @@ pi -p @screenshot.png "What's in this image?"
 pi @code.ts @test.ts "Review these files"
 ```
 
-### Examples
+### 示例
 
 ```bash
-# Interactive with initial prompt
+# 交互模式，带初始提示
 pi "List all .ts files in src/"
 
-# Non-interactive
+# 非交互模式
 pi -p "Summarize this codebase"
 
-# Non-interactive with piped stdin
+# 非交互模式，带管道 stdin
 cat README.md | pi -p "Summarize this text"
 
-# Different model
+# 使用不同模型
 pi --provider openai --model gpt-4o "Help me refactor"
 
-# Model with provider prefix
+# 带提供商前缀的模型
 pi --model openai/gpt-4o "Help me refactor"
 
-# Model with thinking level shorthand
+# 带思考级别简写的模型
 pi --model sonnet:high "Solve this complex problem"
 
-# Limit model cycling
+# 限制模型循环范围
 pi --models "claude-*,gpt-4o"
 
-# Read-only mode
+# 只读模式
 pi --tools read,grep,find,ls -p "Review the code"
 ```
 
-### Environment Variables
+### 环境变量
 
-| Variable | Description |
+| 变量 | 描述 |
 |----------|-------------|
-| `PI_CODING_AGENT_DIR` | Override config directory; default is `~/.pi/agent` |
-| `PI_CODING_AGENT_SESSION_DIR` | Override session storage directory; overridden by `--session-dir` |
-| `PI_PACKAGE_DIR` | Override package directory, useful for Nix/Guix store paths |
-| `PI_OFFLINE` | Disable startup network operations, including update checks, package update checks, and install/update telemetry |
-| `PI_SKIP_VERSION_CHECK` | Skip the Pi version update check at startup. This prevents the `pi.dev` latest-version request |
-| `PI_TELEMETRY` | Override install/update telemetry: `1`/`true`/`yes` or `0`/`false`/`no`. This does not disable update checks |
-| `PI_CACHE_RETENTION` | Set to `long` for extended prompt cache where supported |
-| `VISUAL`, `EDITOR` | External editor for Ctrl+G |
+| `PI_CODING_AGENT_DIR` | 覆盖配置目录；默认为 `~/.pi/agent` |
+| `PI_CODING_AGENT_SESSION_DIR` | 覆盖会话存储目录；被 `--session-dir` 覆盖 |
+| `PI_PACKAGE_DIR` | 覆盖包目录，适用于 Nix/Guix 存储路径 |
+| `PI_OFFLINE` | 禁用启动时的网络操作，包括更新检查、包更新检查和安装/更新遥测 |
+| `PI_SKIP_VERSION_CHECK` | 跳过启动时的 Pi 版本更新检查。阻止向 `pi.dev` 发起最新版本请求 |
+| `PI_TELEMETRY` | 覆盖安装/更新遥测：`1`/`true`/`yes` 或 `0`/`false`/`no`。不禁用更新检查 |
+| `PI_CACHE_RETENTION` | 设置为 `long` 可在支持的情况下启用扩展提示缓存 |
+| `VISUAL`, `EDITOR` | Ctrl+G 使用的外部编辑器 |
 
-## Design Principles
+## 设计原则
 
-Pi keeps the core small and pushes workflow-specific behavior into extensions, skills, prompt templates, and packages.
+Pi 保持核心小巧，将工作流特定行为推入扩展、技能、提示模板和包中。
 
-It intentionally does not include built-in MCP, sub-agents, permission popups, plan mode, to-dos, or background bash. You can build or install those workflows as extensions or packages, or use external tools such as containers and tmux.
+它有意不包含内置的 MCP、子代理、权限弹窗、计划模式、待办事项或后台 bash。你可以将此类工作流构建或安装为扩展或包，或使用外部工具（如容器和 tmux）。
 
-For the full rationale, read the [blog post](https://mariozechner.at/posts/2025-11-30-pi-coding-agent/).
+完整的设计理念请阅读[博客文章](https://mariozechner.at/posts/2025-11-30-pi-coding-agent/)。

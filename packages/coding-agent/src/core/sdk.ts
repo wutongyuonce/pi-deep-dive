@@ -181,38 +181,6 @@ function getAttributionHeaders(
  * 定位：core 层创建 `AgentSession` 的总工厂函数。
  * 作用：组装认证、模型、设置、资源、工具与扩展运行时，并返回可直接运行的会话对象。
  * 调用关系：被 SDK 消费方和运行时工厂调用，是会话构建链路的最后收口点。
- *
- * @example
- * ```typescript
- * // 最简用法 - 使用默认值
- * const { session } = await createAgentSession();
- *
- * // 指定模型
- * import { getModel } from '@earendil-works/pi-ai';
- * const { session } = await createAgentSession({
- *   model: getModel('anthropic', 'claude-opus-4-5'),
- *   thinkingLevel: 'high',
- * });
- *
- * // 继续之前的会话
- * const { session, modelFallbackMessage } = await createAgentSession({
- *   continueSession: true,
- * });
- *
- * // 完全控制
- * const loader = new DefaultResourceLoader({
- *   cwd: process.cwd(),
- *   agentDir: getAgentDir(),
- *   settingsManager: SettingsManager.create(),
- * });
- * await loader.reload();
- * const { session } = await createAgentSession({
- *   model: myModel,
- *   tools: ["read", "bash"],
- *   resourceLoader: loader,
- *   sessionManager: SessionManager.inMemory(),
- * });
- * ```
  */
 export async function createAgentSession(options: CreateAgentSessionOptions = {}): Promise<CreateAgentSessionResult> {
 	// 步骤 1：先确定 cwd、agentDir 和基础服务实例，保证后续组件共享同一组路径语义。
