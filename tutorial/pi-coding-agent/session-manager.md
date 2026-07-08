@@ -1,18 +1,19 @@
-# 会话树 `core/session-manager.ts`
+# 会话树管理器 `core/session-manager.ts`
 
-**Coding agent 的会话为什么不是线性的？**
+coding-agent 的核心会话持久化与管理模块。
 
-聊天机器人的会话是线性的 — 一问一答，从头到尾。但 coding agent 的工作流本质上是非线性的：
+> **聊天机器人的会话是线性的** — 一问一答，从头到尾。但 **coding agent 的会话工作流本质上是非线性的**：
+>
+> - 用户让 agent 重构一段代码，agent 改了 5 个文件。用户发现改错了，想**回到改之前**，用不同的方式重试
+> - agent 执行了一个 bash 命令，结果不对。用户想**从那个命令之前**重新开始，换个命令
+> - 用户在第 20 轮发现第 5 轮的一个决策不对，想**跳回第 5 轮**创建一个新分支
+>
+> 如果用线性列表存储，这些操作要么不可能（无法回溯），要么需要复制整个会话历史（浪费存储）。
+>
+> pi 的解决方案是**会话树** — 每条消息有一个 `parentId`，指向它的前驱消息。分支就是同一个父节点下的多个子节点。
+>
 
-- 用户让 agent 重构一段代码，agent 改了 5 个文件。用户发现改错了，想**回到改之前**，用不同的方式重试
-- agent 执行了一个 bash 命令，结果不对。用户想**从那个命令之前**重新开始，换个命令
-- 用户在第 20 轮发现第 5 轮的一个决策不对，想**跳回第 5 轮**创建一个新分支
-
-如果用线性列表存储，这些操作要么不可能（无法回溯），要么需要复制整个会话历史（浪费存储）。
-
-pi 的解决方案是**会话树** — 每条消息有一个 `parentId`，指向它的前驱消息。分支就是同一个父节点下的多个子节点。
-
-## Session 追加链路（内存中 JSONL 条目列表的构建与文件持久化）
+## 一、Session 追加链路（内存中 JSONL 条目列表的构建与文件持久化）
 
 ### 会话树文件 JSONL 中的 Header 和 Entry 条目
 
@@ -360,7 +361,7 @@ _persist(entry: SessionEntry): void {
 
 JSONL 文件只有 append 操作。之前的 Entry 无法被修改或删除。分支操作的"成本"是不包含复制共用的 Entry，只需 append 新 entry。这就是 `parentId` 树结构的核心价值：**分支是零拷贝的**。
 
-## Session 创建 / 打开链路（从 JSONL 文件到 SessionManager）
+## 二、Session 创建 / 打开链路（从 JSONL 文件到 SessionManager）
 
 ### SessionManager 会话管理器类
 
@@ -686,7 +687,7 @@ static inMemory(cwd: string = process.cwd()): SessionManager {
 }
 ```
 
-## Session 查询链路（内存中从 JSONL 条目列表到树）
+## 三、Session 查询链路（内存中从 JSONL 条目列表到树）
 
 ### Entry 条目相关查询
 
@@ -742,7 +743,7 @@ getTree() 获取会话的树状结构
 
 注意 `getTree()` 返回的是"防御性浅拷贝" — `entry` 对象是原始引用，但树结构（`children` 数组）是新建的。这意味着调用者可以安全地遍历树，而不会意外修改 `SessionManager` 的内部状态。
 
-## Session 读取链路（内存中从树到 LLM 消息数组）`buildSessionContext()`
+## 四、Session 读取链路（内存中从树到 LLM 消息数组）`buildSessionContext()`
 
 `buildSessionContext()` 是 session 存储和 Agent 运行时之间的桥梁。Agent 需要一个线性的消息数组来调用 LLM，而 session 是一棵树。这个函数的职责是：给定一个叶节点，沿 `parentId` 链回溯到根节点，收集路径上的消息，返回 `SessionContext`。
 
@@ -808,7 +809,7 @@ export interface SessionContext {
 
 Agent 拿到 `SessionContext` 后，用 `messages` 调用 LLM，用 `thinkingLevel` 和 `model` 恢复当前配置。整个流程形成一条清晰的数据管线：**JSONL 文件 → entry 列表 → 树遍历 → 路径提取 → 消息数组 → LLM 调用**。
 
-## Session 分支链路（内存中 JSONL 条目列表的分支）
+## 五、Session 分支链路（内存中 JSONL 条目列表的分支）
 
 ### `branch` 简单分支
 
@@ -877,7 +878,7 @@ SessionManager.forkFrom(sourcePath, targetCwd, sessionDir?)
   → return new SessionManager(targetCwd, dir, newSessionFile, true)
 ```
 
-## Session 列表链路
+## 六、Session 列表链路
 
 ```ts
 /** Session 列表链路查询返回的会话摘要信息 */

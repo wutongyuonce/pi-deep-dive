@@ -1,4 +1,4 @@
-### 设置管理器 `core/settings-manager.ts`：全局、项目级 Settings.json
+# 设置管理器 `core/settings-manager.ts`：全局、项目级 Settings.json
 
 文件定位：coding-agent 的设置持久化层，负责从文件系统或内存加载 settings.json
 
@@ -9,14 +9,7 @@
 * FileSettingsStorage / InMemorySettingsStorage：文件和内存两种存储后端
 * deepMergeSettings()：递归合并全局和项目设置（项目级优先）
 
-调用链路：
-
-* 被 agent 启动时创建，加载并合并全局/项目设置
-* 被 TUI/CLI 各模块调用，获取/修改各项配置
-* 调用 config.ts 获取 agent 目录和配置目录名
-* 使用 proper-lockfile 实现文件锁，防止并发写入冲突
-
-#### `Settings` 接口：完整的可配置维度
+## `Settings` 接口：完整的可配置维度
 
 `settings.json` 存储结构化配置。Settings 接口定义了 pi 所有可配置的维度：
 
@@ -212,7 +205,7 @@ export type PackageSource =
 
 * 每一层的默认值都经过精心选择。比如 `retry.baseDelayMs = 2000` 配合指数退避产生 2s → 4s → 8s 的重试间隔 — 既不会因为太频繁而被 API 限流，也不会因为等太久而影响用户体验。`compaction.keepRecentTokens = 20000` 大约相当于 10-15 轮对话，足以保留足够的近期上下文。
 
-#### `SettingsStorage` 存储后端接口和 `SettingsError` 操作错误记录接口
+## `SettingsStorage` 存储后端接口和 `SettingsError` 操作错误记录接口
 
 ```ts
 /** 设置的作用域：全局或项目级 */
@@ -250,7 +243,7 @@ export class FileSettingsStorage implements SettingsStorage {
 }
 ```
 
-#### `deepMergeSettings` 设置对象的深度合并工具
+## `deepMergeSettings` 设置对象的深度合并工具
 
 作用：以全局设置为底，把项目级或临时覆盖递归叠加上去。
 
@@ -295,7 +288,7 @@ function deepMergeSettings(base: Settings, overrides: Settings): Settings {
 - **数组**（packages, extensions, skills 等）：项目值**完全替换**全局值（不是追加）
 - **嵌套对象**（compaction, retry, terminal 等）：浅层合并
 
-#### `SettingsManager` 设置管理器：读取、写入、合并 全局和项目级设置
+## `SettingsManager` 设置管理器：读取、写入、合并 全局和项目级设置
 
 ```ts
 export class SettingsManager {
@@ -318,9 +311,26 @@ export class SettingsManager {
 	/** 异步写入队列，保证写操作顺序执行 */
 	private writeQueue: Promise<void> = Promise.resolve();
 	private errors: SettingsError[];
+    
+    private constructor(
+        storage: SettingsStorage,
+        initialGlobal: Settings,
+        initialProject: Settings,
+        globalLoadError: Error | null = null,
+        projectLoadError: Error | null = null,
+        initialErrors: SettingsError[] = [],
+    ) {
+        this.storage = storage;
+        this.globalSettings = initialGlobal;
+        this.projectSettings = initialProject;
+        this.globalSettingsLoadError = globalLoadError;
+        this.projectSettingsLoadError = projectLoadError;
+        this.errors = [...initialErrors];
+        this.settings = deepMergeSettings(this.globalSettings, this.projectSettings); // 深度合并
+    }
 ```
 
-##### Settings 的两级加载
+### Settings 的两级加载
 
 `create` 从文件系统创建 SettingsManager，调用 `fromStorage()` 分别加载 global 和 project 两级配置，最终通过 `constructor` 构造函数创建了合并后的 `this.settings` 深度合并。
 
@@ -352,26 +362,7 @@ static fromStorage(storage: SettingsStorage): SettingsManager {
         initialErrors,
     );
 }
-
-private constructor(
-    storage: SettingsStorage,
-    initialGlobal: Settings,
-    initialProject: Settings,
-    globalLoadError: Error | null = null,
-    projectLoadError: Error | null = null,
-    initialErrors: SettingsError[] = [],
-) {
-    this.storage = storage;
-    this.globalSettings = initialGlobal;
-    this.projectSettings = initialProject;
-    this.globalSettingsLoadError = globalLoadError;
-    this.projectSettingsLoadError = projectLoadError;
-    this.errors = [...initialErrors];
-    this.settings = deepMergeSettings(this.globalSettings, this.projectSettings); // 深度合并
-}
 ```
-
-
 
 文件路径固定：
 
@@ -409,7 +400,7 @@ private static loadFromStorage(storage: SettingsStorage, scope: SettingsScope): 
 }
 ```
 
-###### Settings 迁移
+#### Settings 迁移
 
 pi 的配置格式会随版本演进而变化。`migrateSettings` 函数处理旧格式的自动迁移：
 
@@ -435,7 +426,7 @@ static migrateSettings(settings): Settings {
 
 迁移在**每次加载时**自动执行，但不会立即回写文件。只有当用户下次修改设置时，新格式才会被持久化。这避免了无谓的文件写入。
 
-###### 运行时 Settings 覆盖
+#### 运行时 Settings 覆盖
 
 除了全局和项目两级，`SettingsManager` 还支持运行时覆盖：
 
@@ -447,7 +438,7 @@ applyOverrides(overrides: Partial<Settings>): void {
 
 这用于 CLI 参数等临时性的配置。比如 `pi --model gpt-4o` 会在运行时覆盖 `defaultModel`，但不会写入任何配置文件。这构成了实际上的第四级配置：CLI 参数 > 项目 settings > 全局 settings > 默认值。
 
-##### Settings 的读取：Getter 中的默认值
+### Settings 的读取：Getter 中的默认值
 
 SettingsManager 为每个配置项提供 getter 方法，默认值在 getter 中硬编码而非在 Settings 对象中：
 
@@ -468,7 +459,7 @@ getRetrySettings() {
 
 为什么不在构造时填入默认值？因为这样保持了 `globalSettings` 和 `projectSettings` 的"原始状态" — 它们只包含用户显式设置的字段。这对于后续的 `persistScopedSettings` 很重要：保存时只写入用户修改过的字段，不会把默认值写入文件。如果默认值将来改变，用户的配置文件不需要手动更新。
 
-##### Settings 的写入和持久化链路：从内存写入文件
+### Settings 的写入和持久化链路：从内存写入文件
 
 ```typescript
 setter
@@ -574,7 +565,7 @@ private persistScopedSettings(
 
 **Settings 的持久化使用了存储后端接口 `FileSettingsStorage` 的文件锁来防止并发写入**：保存时不是简单地覆盖文件，而是读取当前文件内容，只合并本次会话中修改过的字段（通过 `modifiedFields` 追踪），再写回。这意味着如果用户在另一个 pi 实例中修改了 settings，本实例不会覆盖那些更改。
 
-##### Settings 的 Reload 机制：从文件热重载到内存
+### Settings 的 Reload 机制：从文件热重载到内存
 
 ```ts
 reload()
@@ -627,7 +618,7 @@ async reload(): Promise<void> {
 }
 ```
 
-#### 优点
+## 优点
 
 **1、零配置启动**。不创建任何配置文件，pi 用内建默认值就能工作。所有 Settings 字段都是 optional，默认值在 getter 中硬编码。
 

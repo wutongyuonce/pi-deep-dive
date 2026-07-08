@@ -1,6 +1,6 @@
 ## `ResourceLoader`：所有外部资源的统一入口
 
-`src/core/resource-loader.ts` 是这一块的总枢纽。
+
 
 它的公共接口已经非常说明问题：
 

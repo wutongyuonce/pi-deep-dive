@@ -495,7 +495,7 @@ await session.prompt("帮我阅读当前项目的入口并解释启动流程");
 
 * vitest.config.ts - Vitest 测试框架的配置文件，设置测试环境、超时时间、依赖处理和路径别名。路径别名让测试可以直接引用源代码，便于调试和开发。手写。
 
-## 一、主调用链（产品外壳层、会话运行时层）
+## 主调用链（产品外壳层、会话运行时层）
 
 从 `pi` 命令启动到进入交互模式，主调用链路本质上是在**启动一个可切换、可恢复、可扩展的 session runtime**，然后再给这个 runtime 套上 interactive / print / rpc 三种外壳：
 
@@ -894,7 +894,6 @@ export class AgentSession {
 			includeAllExtensionTools: true,
 		});
 	}
-
 ```
 
 ```ts
@@ -1028,6 +1027,45 @@ export class AgentSession {
  });
  ```
 
+##### `_buildRuntime()` 中完成整合（构造时 + reload 时）
+
+这是核心整合入口，发生在[构造函数#L471](file:///Users/a/Desktop/WorkSpace/ALL/我的Github项目/pi-deep-dive/packages/coding-agent/src/core/agent-session.ts#L471) 和 [`/reload`](file:///Users/a/Desktop/WorkSpace/ALL/我的Github项目/pi-deep-dive/packages/coding-agent/src/core/agent-session.ts#L2677-L2684) 时：
+
+```mermaid
+flowchart TB
+    subgraph Settings
+        SM[SettingsManager]
+    end
+    
+    subgraph Resources
+        RL[ResourceLoader]
+        RL-->|skills| SP[System Prompt]
+        RL-->|context files| SP
+        RL-->|extensions| EX[ExtensionRunner]
+        RL-->|prompt templates| PT
+    end
+    
+    subgraph Session
+        SMgr[SessionManager]
+        SMgr-->|history| Agent
+    end
+    
+    subgraph Runtime [_buildRuntime]
+        Agent[Agent = LLM engine]
+        EX-->|register tools| Agent
+        SP-->|system prompt| Agent
+        PT-->|slash commands| UI
+    end
+    
+    subgraph ToolPipeline
+        T[Tool Definitions]
+        T-->|from settings| read/bash/edit/write
+        T-->|from extensions| ext-tools
+        T-->|from SDK| custom-tools
+        T-->|merged by| Registry
+    end
+```
+
 
 
 #### `core/agent-session-services.ts` **与 cwd 绑定的环境基础设施集合**
@@ -1074,78 +1112,92 @@ export class AgentSession {
 - 再重建一整套 runtime 结果
 - 最后替换当前 `session/services`
 
-## 二、AgentSession 注入的模块（产品机制层）
+## AgentSession 与产品机制层
 
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│                       AgentSession 构造函数                          │
-│                          (sdk.ts:420)                               │
-│                                                                     │
-│   注入的模块分为两类：                                                │
-│                                                                     │
-│   ┌─────────────────────────┐    ┌──────────────────────────────┐   │
-│   │  会话生命周期服务        │    │  资源注入主线                 │   │
-│   │  (独立注入，不走         │    │  (全部经 ResourceLoader       │   │
-│   │   ResourceLoader)       │    │   统一加载后提供)              │   │
-│   │                         │    │                              │   │
-│   │  ● sessionManager       │    │  ResourceLoader.reload()      │   │
-│   │    (会话树/持久化)       │    │    │                          │   │
-│   │                         │    │    ├─ packageManager          │   │
-│   │  ● settingsManager      │    │    │  解析 package 来源       │   │
-│   │    (配置合并/持久化)     │    │    │   → 返回路径列表         │   │
-│   │                         │    │    │                          │   │
-│   │  ● modelRegistry        │    │    ├─ loadExtensions()        │   │
-│   │    (API密钥/模型池)      │    │    │  → extensions/loader.ts  │   │
-│   │                         │    │    │                          │   │
-│   └─────────────────────────┘    │    ├─ loadSkills()            │   │
-│                                  │    │  → skills.ts             │   │
-│                                  │    │                          │   │
-│                                  │    ├─ loadPromptTemplates()   │   │
-│                                  │    │  → prompt-templates.ts   │   │
-│                                  │    │                          │   │
-│                                  │    ├─ loadProjectContextFiles │   │
-│                                  │    │  → AGENTS.md / CLAUDE.md │   │
-│                                  │    │                          │   │
-│                                  │    ├─ discoverSystemPromptFile│   │
-│                                  │    │  → SYSTEM.md             │   │
-│                                  │    │                          │   │
-│                                  │    └─ loadThemes()            │   │
-│                                  │       → modes/interactive/    │   │
-│                                  │         theme/                │   │
-│                                  └──────────────────────────────┘   │
-│                                                                     │
-│   ┌──────────────────────────────────────────────────────────────┐  │
-│   │                   tools/* (第三条路径)                         │  │
-│   │                                                              │  │
-│   │  不走 ResourceLoader，在 AgentSession._buildRuntime() 中      │  │
-│   │  直接调用 createAllToolDefinitions() 编程式构建。              │  │
-│   │  输入是 SettingsManager 的 shell/image 设置，                │  │
-│   │  与 ResourceLoader 完全无关。                                 │  │
-│   └──────────────────────────────────────────────────────────────┘  │
-└─────────────────────────────────────────────────────────────────────┘
+AgentSession 是一个 会话级运行时编排器 ，它以 agent 为执行核心，以 sessionManager/settingsManager/modelRegistry/resourceLoader 为底座，通过 _buildRuntime() 把工具、扩展、系统提示词和会话上下文装配起来，再通过事件驱动机制推进每一轮 agent 交互，并在需要时提供压缩、重试、分支导航和 bash 执行等高级能力。
+
+
+
+### 基础服务注入线
+
+**构造函数直接注入：**
+
+- agent
+- sessionManager
+- settingsManager
+- modelRegistry
+- resourceLoader
+
+作用：**提供 LLM 执行、会话持久化、设置读取、模型鉴权、资源查询五类底座能力。**
+
+```typescript
+// 三大服务（只读持有）
+this.agent            = config.agent;          // LLM 调用引擎
+this.sessionManager   = config.sessionManager; // 会话持久化
+this.settingsManager  = config.settingsManager;// 设置管理
+
+// 资源与模型
+this._resourceLoader  = config.resourceLoader; // 资源加载器
+this._modelRegistry   = config.modelRegistry;  // 模型注册表
 ```
 
-哪些资源在 session 启动前装配，哪些会在运行中动态注入？
 
-### 资源注入主线（`core/resource-loader.ts` 统一加载）
 
-```
-ResourceLoader (数据加载)
-                      ════════════════════════
-                      加载用户可配置的外部资源：
-                      
-                      ● extensions  →  d.ts/js 插件代码
-                      ● skills      →  SKILL.md 技能文件  
-                      ● prompts     →  prompt 模板文件
-                      ● themes      →  主题 CSS/配置
-                      ● AGENTS.md   →  项目级规则上下文
-                      ● SYSTEM.md   →  用户自定义 system prompt
-                      
-                      这些资源的共同特征：
-                      都是"用户/项目自行提供的文件"，
-                      路径来自 SettingsManager 的 packages/
-                      extensions/skills/prompts/themes 配置。
-```
+#### [会话树管理器 `core/session-manager.ts`](./session-manager.md)
+
+完全无关。管理会话树，与资源发现无交集。
+
+SessionManager 通过 AgentSessionConfig 注入 AgentSession 的构造函数。
+
+调用链路：
+
+* 写入：前端交互 → SessionManager.appendMessage() → _persist() → JSONL 文件
+
+  ```
+  Agent 发出 message_end 事件
+      → _handleAgentEvent()
+      → sessionManager.appendMessage(event.message)
+      → JSONL 文件写入
+  ```
+
+
+* 读取：LLM 请求 → SessionManager.buildSessionContext() → 会话消息列表
+
+#### [设置管理器 `core/settings-manager.ts`：全局、项目级 Settings.json](./settings-manager.md)
+
+SettingsManager 传给 ResourceLoader 用于解析 package 路径，但本身不受 ResourceLoader 管理。
+
+
+
+
+
+
+#### [模型注册表 `core/model-registry.ts`](./model-registry.ts)
+
+完全无关。管理 API 密钥和模型元数据。
+
+provider/model 池
+
+
+
+### 资源消费与系统提示词构建线
+
+围绕 ResourceLoader 消费外部资源，并把资源转成会话运行时需要的 prompt/context。
+
+关键函数：
+
+- _rebuildSystemPrompt()
+- extendResourcesFromExtensions()
+- reload()
+
+
+作用：
+
+- 读取 skills / context files / system prompt / append system prompt
+- 合并工具 snippets / guidelines
+- 生成 agent.state.systemPrompt
+
+
 
 如果没有它，`extensions / skills / prompts / themes / AGENTS.md / SYSTEM.md / packages` 都会各自有一套发现逻辑。现在它们被收束为统一装配入口，再被 `system-prompt.ts` 和 `AgentSession` 消费。
 
@@ -1184,69 +1236,67 @@ flowchart TD
 
 
 
+```typescript
+async reload(): Promise<void> {
+    // 先保存当前扩展运行时中的 flag 值，重建 runtime 后再恢复，避免 reload 丢失运行态开关。
+    const previousFlagValues = this._extensionRunner.getFlagValues();
+    // 向旧扩展运行时发送 session_shutdown 事件，让扩展有机会在重载前清理资源。
+    await emitSessionShutdownEvent(this._extensionRunner, { type: "session_shutdown", reason: "reload" });
+    // 重新加载 settings.json 等配置源，刷新本轮会话使用的设置快照。
+    await this.settingsManager.reload();
+    // pi-ai 层，清空 provider 注册表缓存，确保后续按最新设置重新注册 API provider。
+    resetApiProviders(); 
+    // 重新扫描并加载 skills/prompts/themes/extensions/context files 等外部资源。
+    await this._resourceLoader.reload();
+    // 基于“当前激活工具 + 上一轮 flag 值 + 最新 settings/resources”重建整个运行时。
+    this._buildRuntime({
+        // 保留当前激活的工具集合，避免 reload 后退回默认工具集。
+        activeToolNames: this.getActiveToolNames(),
+        // 恢复刚才保存的扩展 flag 值，保持扩展运行态配置连续。
+        flagValues: previousFlagValues,
+        // 重建时把所有扩展工具重新纳入工具注册表。
+        includeAllExtensionTools: true,
+    });
 
+    // 检查当前是否已经绑定了 UI、命令、shutdown、error 等扩展上下文。
+    const hasBindings =
+        this._extensionUIContext ||
+        this._extensionCommandContextActions ||
+        this._extensionShutdownHandler ||
+        this._extensionErrorListener;
+    if (hasBindings) {
+        // 如果扩展上下文仍然存在，则向新运行时发送一次 session_start(reload) 事件。
+        await this._extensionRunner.emit({ type: "session_start", reason: "reload" });
+        // 让扩展在 reload 后重新声明其动态资源，并据此再次刷新系统提示词等状态。
+        await this.extendResourcesFromExtensions("reload");
+    }
+}
+```
 
-**怎么用 SettingsManager**
-
-两处：
-
-1. 构造时创建或注入：
-
-  ```ts
-this.settingsManager = options.settingsManager ?? SettingsManager.create(this.cwd, this.agentDir);
-  ```
-
-  如果外部没传，就自己 create() 一个，这时 this.settings 已经合并好了。
-
-2. 在 reload() 开头刷新设置：
+AgentSession 的 reload() 在开头刷新设置：
 
   ```ts
 await this.settingsManager.reload();
   ```
 
-  在加载所有资源之前，先把设置从磁盘重新读一遍，保证后续 packageManager.resolve() 拿到的 packages 、 extensions 、 skills 等路径是最新的。
+在加载所有资源之前，先把设置从磁盘重新读一遍，保证后续 packageManager.resolve() 拿到的 packages 、 extensions 、 skills 等路径是最新的。
 
-3. 传给 DefaultPackageManager：
+调用 _resourceLoader.reload() 
 
-   ```ts
-   this.packageManager = new DefaultPackageManager({
-     cwd: this.cwd,
-     agentDir: this.agentDir,
-     settingsManager: this.settingsManager,  // ← 传给包管理器
-   });
-   ```
-
-   DefaultPackageManager 内部通过 settingsManager.getPackages() 、 settingsManager.getExtensionPaths() 等 getter 拿到当前配置的包来源和资源路径，再去解析和发现具体的扩展、技能、主题文件。
-
-
-
-`updateSkillsFromPaths()` 调用 `loadSkills()` (core/skills.ts)
-
-
-
-#### ResourceLoader 接口
-
-Resource Loader 的公共接口定义了消费者能做什么：
-
-```typescript
-export interface ResourceLoader {
-	getExtensions(): LoadExtensionsResult;
-	getSkills(): { skills: Skill[]; diagnostics: ResourceDiagnostic[] };
-	getPrompts(): { prompts: PromptTemplate[]; diagnostics: ResourceDiagnostic[] };
-	getThemes(): { themes: Theme[]; diagnostics: ResourceDiagnostic[] };
-	getAgentsFiles(): { agentsFiles: Array<{ path: string; content: string }> };
-	getSystemPrompt(): string | undefined;
-	getAppendSystemPrompt(): string[];
-	extendResources(paths: ResourceExtensionPaths): void;
-	reload(): Promise<void>;
-}
+```ts
+reload()                                ← 应用启动时 / /reload 命令触发
+     └─ packageManager.resolve()            ← 解析所有包来源的资源路径
+     └─ loadExtensions()                    ← 加载扩展（tools/commands/flags）
+     └─ loadExtensionFactories()            ← 加载内联扩展工厂
+     └─ detectExtensionConflicts()          ← 检测扩展间同名工具/标志冲突
+     └─ updateSkillsFromPaths()             ← 调用 `loadSkills()` (core/skills.ts) 加载技能
+     └─ updatePromptsFromPaths()            ← 加载提示词模板
+     └─ updateThemesFromPaths()             ← 加载主题
+     └─ loadProjectContextFiles()           ← 加载 AGENTS.md 上下文
+     └─ resolvePromptInput()               ← 解析 system prompt
 ```
 
-几个值得注意的设计点：
 
-* **每种资源的返回值都包含 `diagnostics`**。Resource Loader 不会因为一个资源加载失败就中止整个加载过程。它会继续加载其他资源，把错误收集到 `ResourceDiagnostic[]` 中。上层代码（比如 TUI）可以选择把这些诊断信息展示给用户，也可以忽略。
-* **`extendResources` 允许运行时动态扩展**。Extension 加载完成后，它可以向 Resource Loader 注册额外的 skill、prompt、theme 路径。这是 "Extension 可以提供 Skill" 的底层机制。
-* **`reload` 是异步的**。因为加载过程涉及文件系统读取、npm 包解析，这些操作是异步的。但 `getExtensions` 等取值方法是同步的 — 它们只是返回上一次 `reload` 的结果。
 
 #### `core/diagnostics.ts` 资源加载诊断类型定义
 
@@ -1325,6 +1375,22 @@ export interface ResourceCollision {
     ├── 私有方法            parseSource(), installNpmPackage(), gitCloneOrPull(),
     │                       isUpdateAvailable() 等
     └── 工具方法            runCommand(), runCommandSync() 等
+```
+
+```ts
+export class DefaultPackageManager implements PackageManager {
+	private cwd: string;
+	private agentDir: string;
+	private settingsManager: SettingsManager;
+	private globalNpmRoot: string | undefined;
+	private globalNpmRootCommandKey: string | undefined;
+	private progressCallback: ProgressCallback | undefined;
+
+	constructor(options: PackageManagerOptions) {
+		this.cwd = resolvePath(options.cwd);
+		this.agentDir = resolvePath(options.agentDir);
+		this.settingsManager = options.settingsManager;
+	}
 ```
 
 ```ts
@@ -1587,26 +1653,26 @@ export function createSyntheticSourceInfo(
 
 > 项目规则不是对话外的背景知识，而是运行时要明确注入模型上下文的正式输入。 
 
-### 会话生命周期服务（构造函数直接注入）
-
-#### [会话树 `core/session-manager.ts`](./session-manager.md)
-
-完全无关。管理会话树，与资源发现无交集。
-
-#### [设置管理器 `core/settings-manager.ts`：全局、项目级 Settings.json](./settings-manager.md)
-
-SettingsManager 传给 ResourceLoader 用于解析 package 路径，但本身不受 ResourceLoader 管理。
-
-#### modelRegistry
-
-完全无关。管理 API 密钥和模型元数据。
-provider/model 池
 
 
+### 工具运行时构建线
+围绕 _buildRuntime() 组装一套真实可运行的工具系统。
 
-### tools/* 第三条路径（AgentSession._buildRuntime() 编程式构建）
+关键函数：
 
-完全无关。内建工具是硬编码的，不来自外部文件。
+- _buildRuntime()
+- _refreshToolRegistry()
+- setActiveToolsByName()
+- _installAgentToolHooks()
+
+
+作用：
+
+- 构建内置工具
+- 合并扩展工具
+- 合并 SDK custom tools
+- 应用 allowlist / override / active tools
+- 最终写入 agent.state.tools
 
 ```
 _buildRuntime()                                    ← AgentSession 内部方法
@@ -1691,7 +1757,83 @@ _buildRuntime()                                    ← AgentSession 内部方法
 | 扩展重载                              | `_refreshToolRegistry()`                            |
 | 用户 `/tools` 命令切换工具集          | `setActiveToolsByName()` (只改激活集，不重建注册表) |
 
+### Extensions 扩展桥接线
+AgentSession 是扩展系统和核心运行时之间的桥。
 
+关键字段：
+
+- _extensionRunner
+- _extensionRunnerRef
+- _extensionUIContext
+- _extensionCommandContextActions
+
+
+关键函数：
+
+- _bindExtensionCore()
+- _applyExtensionBindings()
+- bindExtensions()
+- _emitExtensionEvent()
+- extendResourcesFromExtensions()
+
+
+作用：
+
+- 创建 ExtensionRunner
+- 将 session/resource/model/tool 能力暴露给扩展
+- 让扩展反向注册工具、命令、UI、资源
+
+```typescript
+this._extensionRunner = new ExtensionRunner(
+    extensionsResult.extensions,
+    extensionsResult.runtime,
+    this._cwd,
+    this.sessionManager,       // ← 注入给扩展
+    this._modelRegistry,
+);
+```
+
+扩展可以通过 `agent.addCustomMessage()` → `AgentSession.appendCustomMessageEntry()` → `sessionManager.appendCustomMessageEntry()` 向会话历史注入自定义消息。
+
+### 对话执行编排线
+这是实际驱动一轮轮 agent 交互的主链路。
+
+关键函数：
+
+- prompt()
+- sendUserMessage()
+- _runAgentPrompt()
+- _handleAgentEvent()
+- _handlePostAgentRun()
+
+
+作用：
+
+- 接收用户输入
+- 送入 agent
+- 监听 token/message/tool/turn/agent 事件
+- 持久化消息
+- 驱动后处理逻辑
+
+### 高级能力与恢复线
+围绕复杂场景的增强与恢复。
+
+关键函数：
+
+- compact()
+- _checkCompaction()
+- _runAutoCompaction()
+- _prepareRetry()
+- navigateTree()
+- executeBash()
+
+
+作用：
+
+- 自动/手动压缩上下文
+- provider 错误自动重试
+- 会话树导航与分支摘要
+- Bash 执行与消息回灌
 
 ### AgentSession 如何构建 pi-ai 层所需 Context 上下文
 
@@ -2401,7 +2543,6 @@ pi --mode rpc --provider anthropic --model claude-sonnet-4-20250514
 ```json
 {"type": "prompt", "message": "Summarize what you found", "streamingBehavior": "followUp"}
 ```
-
 
 
 

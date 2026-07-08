@@ -19,10 +19,6 @@
  * 调用链路：
  *   写入：前端交互 → SessionManager.appendMessage() → _persist() → JSONL 文件
  *   读取：LLM 请求 → SessionManager.buildSessionContext() → 会话消息列表
- *
- *   注：resource-loader 和 SessionManager 是平行关系，各自提供 LLM 上下文的一部分，在 LLM 请求层合并：
- *     (1) SessionManager → 会话历史（读取链路）
- *     (2) resource-loader.ts → loadProjectContextFiles() → AGENTS.md 等项目上下文
  */
 
 import { type AgentMessage, uuidv7 } from "@earendil-works/pi-agent-core";

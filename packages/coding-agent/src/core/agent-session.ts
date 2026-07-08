@@ -2672,24 +2672,36 @@ export class AgentSession {
 	 * 调用关系：被 `/reload` 之类的重载流程调用。
 	 */
 	async reload(): Promise<void> {
+		// 先保存当前扩展运行时中的 flag 值，重建 runtime 后再恢复，避免 reload 丢失运行态开关。
 		const previousFlagValues = this._extensionRunner.getFlagValues();
+		// 向旧扩展运行时发送 session_shutdown 事件，让扩展有机会在重载前清理资源。
 		await emitSessionShutdownEvent(this._extensionRunner, { type: "session_shutdown", reason: "reload" });
+		// 重新加载 settings.json 等配置源，刷新本轮会话使用的设置快照。
 		await this.settingsManager.reload();
+		// 清空 provider 注册表缓存，确保后续按最新设置重新注册 API provider。
 		resetApiProviders();
+		// 重新扫描并加载 skills/prompts/themes/extensions/context files 等外部资源。
 		await this._resourceLoader.reload();
+		// 基于“当前激活工具 + 上一轮 flag 值 + 最新 settings/resources”重建整个运行时。
 		this._buildRuntime({
+			// 保留当前激活的工具集合，避免 reload 后退回默认工具集。
 			activeToolNames: this.getActiveToolNames(),
+			// 恢复刚才保存的扩展 flag 值，保持扩展运行态配置连续。
 			flagValues: previousFlagValues,
+			// 重建时把所有扩展工具重新纳入工具注册表。
 			includeAllExtensionTools: true,
 		});
 
+		// 检查当前是否已经绑定了 UI、命令、shutdown、error 等扩展上下文。
 		const hasBindings =
 			this._extensionUIContext ||
 			this._extensionCommandContextActions ||
 			this._extensionShutdownHandler ||
 			this._extensionErrorListener;
 		if (hasBindings) {
+			// 如果扩展上下文仍然存在，则向新运行时发送一次 session_start(reload) 事件。
 			await this._extensionRunner.emit({ type: "session_start", reason: "reload" });
+			// 让扩展在 reload 后重新声明其动态资源，并据此再次刷新系统提示词等状态。
 			await this.extendResourcesFromExtensions("reload");
 		}
 	}

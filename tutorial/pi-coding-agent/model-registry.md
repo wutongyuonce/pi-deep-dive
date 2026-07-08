@@ -1,8 +1,27 @@
-# Model Registry — 模型不只是一个 ID
+# 模型注册表 `core/model-registry.ts`
 
-> **定位**：本章解析模型选择背后的配置系统和动态注册机制。
-> 前置依赖：第 4 章（Provider Registry）、第 13 章（配置覆盖）。
-> 适用场景：当你想理解 pi 如何管理模型列表，或者想添加自定义模型。
+模型注册表（Model Registry）—— 管理内置模型与自定义模型，提供 API key 解析。
+
+文件定位：coding-agent 的模型管理层，负责从 pi-ai 内置模型和 models.json 自定义配置中
+
+加载所有可用模型，处理模型覆盖（override）合并，以及通过 AuthStorage 解析 API key 和请求头。
+
+提供：
+
+* ModelRegistry 类：模型的注册、查询、刷新，以及请求认证信息的解析
+* ProviderConfigInput 接口：扩展注册 provider 的输入格式
+* 自定义模型/覆盖的 JSON Schema 定义（通过 typebox 编译校验）
+* models.json 配置文件的加载、校验、解析流程
+
+调用链路：
+
+* 被 agent 启动时创建，加载内置 + 自定义模型
+* 被 model-resolver.ts 调用，查询可用模型列表、查找特定模型
+* 被扩展（extensions）通过 registerProvider() 动态注册 provider 和模型
+* 调用 resolve-config-value.ts 解析 apiKey / headers 中的环境变量和 shell 命令
+* 调用 auth-storage.ts 查询已存储的认证状态
+
+
 
 ## 选模型 = 选 provider + 选 api + 选参数
 
@@ -202,30 +221,36 @@ function applyModelOverride(model: Model<Api>,
 `ModelRegistry` 是管理模型的中心：
 
 ```typescript
-// file: packages/coding-agent/src/core/model-registry.ts:255-275
+/**
+ * 模型注册表——加载和管理模型，通过 AuthStorage 解析 API key。
+ *
+ * 主要职责：
+ * 1. 加载 pi-ai 内置模型，应用 models.json 中的 provider/model 级覆盖
+ * 2. 加载 models.json 中定义的自定义模型
+ * 3. 支持扩展（extensions）动态注册/注销 provider
+ * 4. 解析每个模型的 API key 和请求头（支持环境变量和 shell 命令）
+ */
 export class ModelRegistry {
-  private models: Model<Api>[] = [];
-  private providerRequestConfigs:
-    Map<string, ProviderRequestConfig> = new Map();
-  private modelRequestHeaders:
-    Map<string, Record<string, string>> = new Map();
-  private registeredProviders:
-    Map<string, ProviderConfigInput> = new Map();
-  private loadError: string | undefined = undefined;
+	private models: Model<Api>[] = [];
+	private providerRequestConfigs: Map<string, ProviderRequestConfig> = new Map();
+	private modelRequestHeaders: Map<string, Record<string, string>> = new Map();
+	/** 已通过扩展注册的 provider 配置（用于 refresh 时重建） */
+	private registeredProviders: Map<string, ProviderConfigInput> = new Map();
+	private loadError: string | undefined = undefined;
+	readonly authStorage: AuthStorage;
+	/** models.json 文件路径，undefined 表示纯内存模式（不加载文件） */
+	private modelsJsonPath: string | undefined;
 
-  private constructor(
-    readonly authStorage: AuthStorage,
-    private modelsJsonPath: string | undefined,
-  ) {
-    this.loadModels();
-  }
+	private constructor(authStorage: AuthStorage, modelsJsonPath: string | undefined) {
+		this.authStorage = authStorage;
+		this.modelsJsonPath = modelsJsonPath ? normalizePath(modelsJsonPath) : undefined;
+		this.loadModels();
+	}
 
-  static create(authStorage: AuthStorage,
-    modelsJsonPath: string =
-      join(getAgentDir(), "models.json")): ModelRegistry {
-    return new ModelRegistry(authStorage, modelsJsonPath);
-  }
-}
+	/** 创建 ModelRegistry 实例，加载 models.json 文件 */
+	static create(authStorage: AuthStorage, modelsJsonPath: string = join(getAgentDir(), "models.json")): ModelRegistry {
+		return new ModelRegistry(authStorage, modelsJsonPath);
+	}
 ```
 
 注意构造函数是 private — 只能通过 `create` 或 `inMemory` 工厂方法创建。`inMemory` 版本用于测试，不读取任何磁盘文件。
