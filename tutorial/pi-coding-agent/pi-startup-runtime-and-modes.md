@@ -1,12 +1,3 @@
-
-而 `AgentSession` 内部又会继续调用：
-
-- `sessionManager`
-- `settingsManager`
-- `resourceLoader`
-- `modelRegistry`
-- 底层 `agent`
-
 # pi-coding-agent：启动、运行时与三种 Mode
 
 ## 总启动图
