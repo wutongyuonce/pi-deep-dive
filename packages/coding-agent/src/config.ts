@@ -316,14 +316,14 @@ function getGlobalPackageRoots(method: InstallMethod, _packageName: string, npmC
  * @returns 规范化后的路径；若路径不存在则返回 undefined
  */
 function normalizeExistingPathForComparison(path: string, resolveSymlinks: boolean): string | undefined {
-	const resolvedPath = resolve(path);
+	const resolvedPath = resolve(path); // 把一个路径字符串变成“规范的绝对路径”
 	if (!existsSync(resolvedPath)) {
 		return undefined;
 	}
 	let normalizedPath = resolvedPath;
 	if (resolveSymlinks) {
 		try {
-			normalizedPath = realpathSync(resolvedPath);
+			normalizedPath = realpathSync(resolvedPath); // 解析符号链接（symlink）
 		} catch {
 			return undefined;
 		}
