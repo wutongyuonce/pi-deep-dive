@@ -44,8 +44,7 @@ config.ts
        -> ENV_AGENT_DIR
        -> ENV_SESSION_DIR
 
-  -> 5、通用路径辅助与分享 URL
-       -> expandTildePath()
+  -> 5、分享 URL
        -> getShareViewerUrl()
 
   -> 6、用户配置目录路径
@@ -67,6 +66,21 @@ config.ts
 - `getAgentDir()` 统一回答“当前用户 agent 配置目录在哪里”，用户世界的根
 
 后面几乎所有路径函数，都是从这两个根再往下推导。
+
+## 被谁调用
+
+- `main.ts`
+  - 会用 `getAgentDir()`、`getPackageDir()`、`VERSION`、`ENV_SESSION_DIR`
+- 资源和主题相关逻辑
+  - 会用 `getThemesDir()`、`getInteractiveAssetsDir()`
+- 导出功能
+  - 会用 `getExportTemplateDir()`
+- 自更新和包管理逻辑
+  - 会用 `detectInstallMethod()`、`getSelfUpdateCommand()`、`getUpdateInstruction()`
+- 各种用户配置与数据存取模块
+  - 会用 `getModelsPath()`、`getAuthPath()`、`getSettingsPath()`、`getSessionsDir()`
+
+这也是为什么后面的 `main.ts`、`migrations.ts`、包管理、自更新、主题系统、session 系统几乎都会 import 它。
 
 ---
 
@@ -420,11 +434,11 @@ getUpdateInstruction(packageName)
 
 > **随包分发的静态资源，在 Bun 二进制、Node dist、tsx src 三种形态下分别在哪？**
 
-### 1、主入口：`getPackageDir()`
+### 主入口：`getPackageDir()` 找到当前包的根目录
 
 这是整个“包内路径系统”的根函数。
 
-```text
+```ts
 getPackageDir()
   -> 若存在 PI_PACKAGE_DIR
        -> 直接返回 normalizePath(envDir)
@@ -434,10 +448,6 @@ getPackageDir()
   -> 找到 package.json 所在目录就返回
   -> 兜底返回 __dirname
 ```
-
-作用：
-
-- 找到当前包的根目录
 
 优先级：
 
@@ -452,9 +462,9 @@ getPackageDir()
 
 所以必须用一个统一入口把差异抹平。
 
-### 2、`getThemesDir()`
+### `getThemesDir()` 返回内置主题目录
 
-```text
+```ts
 getThemesDir()
   -> isBunBinary
        -> <packageDir>/theme
@@ -462,13 +472,9 @@ getThemesDir()
        -> <packageDir>/<src|dist>/modes/interactive/theme
 ```
 
-作用：
+### `getExportTemplateDir()` 返回 HTML 导出模板目录
 
-- 返回内置主题目录
-
-### 3、`getExportTemplateDir()`
-
-```text
+```ts
 getExportTemplateDir()
   -> isBunBinary
        -> <packageDir>/export-html
@@ -476,11 +482,7 @@ getExportTemplateDir()
        -> <packageDir>/<src|dist>/core/export-html
 ```
 
-作用：
-
-- 返回 HTML 导出模板目录
-
-### 4、文档与元文件路径
+### 文档与元文件路径
 
 这些函数都比较直接，都是从 `getPackageDir()` 往下拼接：
 
@@ -495,15 +497,11 @@ getExportTemplateDir()
 - `getChangelogPath()`
   - `resolve(join(getPackageDir(), "CHANGELOG.md"))`
 
-作用：
+作用：为帮助信息、文档跳转、CHANGELOG 展示、示例路径定位提供统一入口
 
-- 为帮助信息、文档跳转、CHANGELOG 展示、示例路径定位提供统一入口
+### 交互模式静态资源
 
-### 5、交互模式静态资源
-
-`getInteractiveAssetsDir()`：
-
-```text
+```ts
 getInteractiveAssetsDir()
   -> isBunBinary
        -> <packageDir>/assets
@@ -511,26 +509,20 @@ getInteractiveAssetsDir()
        -> <packageDir>/<src|dist>/modes/interactive/assets
 ```
 
-作用：
+作用：获取 interactive mode 的静态资源目录
 
-- 获取 interactive mode 的静态资源目录
-
-`getBundledInteractiveAssetPath(name)`：
-
-```text
+```ts
 getBundledInteractiveAssetPath(name)
   -> join(getInteractiveAssetsDir(), name)
 ```
 
-作用：
+作用：获取某个具体内置资源的完整路径
 
-- 获取某个具体内置资源的完整路径
-
-## 六、应用配置常量：从 `package.json` 读取 pi 的身份信息
+## 五、应用配置常量：从 `package.json` 读取 pi 的身份信息
 
 这一段不是读用户的 `settings.json`，而是读**包自己的元信息**。
 
-### 1、`PackageJson` 接口与 `pkg`
+### `PackageJson` 接口与 `pkg`
 
 ```ts
 interface PackageJson {
@@ -545,17 +537,16 @@ interface PackageJson {
 const pkg = JSON.parse(readFileSync(getPackageJsonPath(), "utf-8")) as PackageJson;
 ```
 
-作用：
+作用：从包内 `package.json` 读取：
 
-- 从包内 `package.json` 读取：
-  - npm 包名
-  - 版本
-  - `piConfig.name`
-  - `piConfig.configDir`
+- npm 包名
+- 版本
+- `piConfig.name`
+- `piConfig.configDir`
 
 也就是说，`config.ts` 里很多导出常量不是写死的，而是通过包元信息动态派生。
 
-### 2、常量：`PACKAGE_NAME`
+### 常量：`PACKAGE_NAME`
 
 ```ts
 export const PACKAGE_NAME: string = pkg.name || "@earendil-works/pi-coding-agent";
@@ -566,7 +557,7 @@ export const PACKAGE_NAME: string = pkg.name || "@earendil-works/pi-coding-agent
 - 当前 npm 包名
 - 主要用于安装、更新、卸载等外部 package manager 语义
 
-### 3、常量：`APP_NAME`
+### 常量：`APP_NAME`
 
 ```ts
 export const APP_NAME: string = piConfigName || "pi";
@@ -583,22 +574,20 @@ export const APP_NAME: string = piConfigName || "pi";
 - debug log 文件名
 - UI 标题的部分逻辑
 
-### 4、常量：`APP_TITLE`
+### 常量：`APP_TITLE`
 
 ```ts
 export const APP_TITLE: string = piConfigName ? APP_NAME : "π";
 ```
 
-作用：
-
-- UI 或显示层标题
+作用：UI 或显示层标题
 
 逻辑：
 
 - 如果是自定义应用名，就显示 `APP_NAME`
 - 否则默认显示 `"π"`
 
-### 5、常量：`CONFIG_DIR_NAME`
+### 常量：`CONFIG_DIR_NAME`
 
 ```ts
 export const CONFIG_DIR_NAME: string = pkg.piConfig?.configDir || ".pi";
@@ -611,30 +600,24 @@ export const CONFIG_DIR_NAME: string = pkg.piConfig?.configDir || ".pi";
 
 它会直接影响 `getAgentDir()` 这类用户路径函数的拼接结果。
 
-### 6、常量：`VERSION`
+### 常量：`VERSION`
 
 ```ts
 export const VERSION: string = pkg.version || "0.0.0";
 ```
 
-作用：
+作用：当前版本号
 
-- 当前版本号
+典型调用方：`main.ts` 的 `--version`
 
-典型调用方：
-
-- `main.ts` 的 `--version`
-
-### 7、环境变量名常量：`ENV_AGENT_DIR`、`ENV_SESSION_DIR`
+### 环境变量名常量：`ENV_AGENT_DIR`、`ENV_SESSION_DIR`
 
 ```ts
 export const ENV_AGENT_DIR = `${APP_NAME.toUpperCase()}_CODING_AGENT_DIR`;
 export const ENV_SESSION_DIR = `${APP_NAME.toUpperCase()}_CODING_AGENT_SESSION_DIR`;
 ```
 
-作用：
-
-- 统一定义可覆盖目录的环境变量名
+作用：统一定义可覆盖目录的环境变量名
 
 例如默认 `APP_NAME = "pi"` 时：
 
@@ -643,73 +626,45 @@ ENV_AGENT_DIR   = PI_CODING_AGENT_DIR
 ENV_SESSION_DIR = PI_CODING_AGENT_SESSION_DIR
 ```
 
-这样做的好处是：
+这样做的好处是：应用重命名时，这两个环境变量前缀可以自动跟着变
 
-- 应用重命名时，这两个环境变量前缀可以自动跟着变
+## 六、分享链接
 
-## 七、通用辅助：路径展开与分享链接
-
-### 1、`expandTildePath(path)`
-
-```ts
-export function expandTildePath(path: string): string {
-  return normalizePath(path);
-}
-```
-
-函数名看起来像“展开 `~`”，而它实际委托的是 `normalizePath()`。
-
-作用：
-
-- 统一把传入路径做路径标准化
-
-在当前工程的路径工具约定里，`normalizePath()` 已经承担了 `~` 展开和路径规范化语义，所以这里作为更高层、更语义化的导出入口。
-
-### 2、`DEFAULT_SHARE_VIEWER_URL`
+### `DEFAULT_SHARE_VIEWER_URL`
 
 ```ts
 const DEFAULT_SHARE_VIEWER_URL = "https://pi.dev/session/";
 ```
 
-作用：
+作用：会话分享查看器的默认基地址
 
-- 会话分享查看器的默认基地址
+### `getShareViewerUrl(gistId)`
 
-### 3、`getShareViewerUrl(gistId)`
-
-```text
+```ts
 getShareViewerUrl(gistId)
   -> baseUrl = PI_SHARE_VIEWER_URL || DEFAULT_SHARE_VIEWER_URL
   -> 返回 `${baseUrl}#${gistId}`
 ```
 
-作用：
+作用：根据 gist id 生成分享链接
 
-- 根据 gist id 生成分享链接
+支持：用 `PI_SHARE_VIEWER_URL` 覆盖默认 viewer 地址
 
-支持：
-
-- 用 `PI_SHARE_VIEWER_URL` 覆盖默认 viewer 地址
-
-## 八、用户配置目录路径系统：`~/.pi/agent/*`
+## 七、用户配置目录路径系统：`~/.pi/agent/*`
 
 这一段解决的是：
 
 > **用户级数据到底存在哪里？**
 
-### 1、主入口：`getAgentDir()`
+### 主入口：`getAgentDir()` 返回用户 agent 配置目录
 
-```text
+```ts
 getAgentDir()
   -> 读取 process.env[ENV_AGENT_DIR]
        -> 若存在，expandTildePath(envDir)
   -> 否则
        -> join(homedir(), CONFIG_DIR_NAME, "agent")
 ```
-
-作用：
-
-- 返回用户 agent 配置目录
 
 默认结果通常是：
 
@@ -719,11 +674,11 @@ getAgentDir()
 
 它是整个“用户路径系统”的根函数，地位类似于包内世界里的 `getPackageDir()`。
 
-### 2、从 `getAgentDir()` 派生的所有路径函数
+### 从 `getAgentDir()` 派生的所有路径函数
 
 这组函数都非常统一，都是：
 
-```text
+```ts
 getXxxPath() / getXxxDir()
   -> join(getAgentDir(), ...)
 ```
@@ -763,7 +718,7 @@ getXxxPath() / getXxxDir()
 1. 所有用户级路径都以 `getAgentDir()` 为根统一派生
 2. `getDebugLogPath()` 里会用到 `APP_NAME`，所以应用名变化时日志文件名也会自动变化
 
-## 九、`config.ts` 内部调用关系
+## 八、`config.ts` 内部调用关系
 
 如果只看函数列表，容易觉得它们是零散工具。实际上内部有很明显的依赖层次。
 
@@ -842,58 +797,4 @@ CONFIG_DIR_NAME + ENV_AGENT_DIR + homedir()
        -> getPromptsDir()
        -> getSessionsDir()
        -> getDebugLogPath()
-```
-
-## 十、对外部模块的意义
-
-这个文件在工程里的真正价值不是“提供配置项”，而是给整个工程提供一组**不会到处重复实现的基础判断**。
-
-典型地说：
-
-- `main.ts`
-  - 会用 `getAgentDir()`、`getPackageDir()`、`VERSION`、`ENV_SESSION_DIR`
-- 资源和主题相关逻辑
-  - 会用 `getThemesDir()`、`getInteractiveAssetsDir()`
-- 导出功能
-  - 会用 `getExportTemplateDir()`
-- 自更新和包管理逻辑
-  - 会用 `detectInstallMethod()`、`getSelfUpdateCommand()`、`getUpdateInstruction()`
-- 各种用户配置与数据存取模块
-  - 会用 `getModelsPath()`、`getAuthPath()`、`getSettingsPath()`、`getSessionsDir()`
-
-所以它的定位更准确地说是：
-
-```text
-config.ts
-  = 应用身份信息中心
-  + 运行时形态判断中心
-  + 安装来源判断中心
-  + 包资产路径中心
-  + 用户数据根目录中心
-```
-
-这也是为什么后面的 `main.ts`、`migrations.ts`、包管理、自更新、主题系统、session 系统几乎都会 import 它。
-
----
-
-## 十一、怎么理解这一章和后文的关系
-
-这一节讲的是 **“pi 这个程序自己是谁、装在哪里、资源在哪里、用户数据在哪里”**。
-
-而后面的 `main.ts` 章节讲的是：
-
-```text
-有了这些基础路径和常量之后，
-产品启动流程如何进一步决定
-mode / session / runtime。
-```
-
-所以顺序上是：
-
-```text
-config.ts
-  先回答“程序自身与环境”的问题
-    ↓
-main.ts
-  再回答“这次启动如何编排”的问题
 ```

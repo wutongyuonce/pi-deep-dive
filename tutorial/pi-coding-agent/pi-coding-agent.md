@@ -585,11 +585,15 @@ main(process.argv.slice(2));
 >    └─ 其他底层组件   ← DNS 解析、TLS 握手、连接池...
 > ```
 
-### `config.ts`  配置中心模块
+### [`config.ts`  配置中心模块](./模块/config.md)
 
-
+它统一解决六类问题：**运行时检测**、**安装方式识别**、**自更新命令生成**、**包内资产路径解析**、**应用元信息读取**、**用户配置目录路径**
 
 ### `main.ts` 产品启动编排器
+
+> config.ts 先回答“程序自身与环境”的问题
+>
+> main.ts  再回答“这次启动如何编排”的问题
 
 `main.ts` 不是“真正跑一轮对话”的地方，它是整个产品的**启动编排器**。
 
@@ -1473,7 +1477,7 @@ this._modelRegistry   = config.modelRegistry;  // 模型注册表
 
 
 
-##### [会话树管理器 `core/session-manager.ts`](./session-manager.md)
+##### [会话树管理器 `core/session-manager.ts`](./模块/session-manager.md)
 
 完全无关。管理会话树，与资源发现无交集。
 
@@ -1493,7 +1497,7 @@ SessionManager 通过 AgentSessionConfig 注入 AgentSession 的构造函数。
 
 * 读取：LLM 请求 → SessionManager.buildSessionContext() → 会话消息列表
 
-##### [设置管理器 `core/settings-manager.ts`：全局、项目级 Settings.json](./settings-manager.md)
+##### [设置管理器 `core/settings-manager.ts`：全局、项目级 Settings.json](./模块/settings-manager.md)
 
 SettingsManager 传给 ResourceLoader 用于解析 package 路径，但本身不受 ResourceLoader 管理。
 
@@ -1502,7 +1506,7 @@ SettingsManager 传给 ResourceLoader 用于解析 package 路径，但本身不
 
 
 
-##### [模型注册表 `core/model-registry.ts`](./model-registry.ts)
+##### [模型注册表 `core/model-registry.ts`](./模块/model-registry.ts)
 
 完全无关。管理 API 密钥和模型元数据。
 
@@ -1519,7 +1523,7 @@ provider/model 池
 
 
 
-##### 前置阶段：PackageManager.resolve() → 路径集合	[资源包管理器 `core/package-manager.ts`](./package-manager.md)
+##### 前置阶段：PackageManager.resolve() → 路径集合	[资源包管理器 `core/package-manager.ts`](./模块/package-manager.md)
 
 > - package manager 负责将 SettingsManager 中解析的包来源，翻译成可被 `ResourceLoader` 消费的资源路径集合
 > - resource loader 负责把这些路径真正装成 extension/skill/prompt/theme
@@ -1607,7 +1611,7 @@ export function createSyntheticSourceInfo(
 }
 ```
 
-##### [外部资源的统一入口 `core/resource-loader`](./resource-loader.md)
+##### [外部资源的统一入口 `core/resource-loader`](./模块/resource-loader.md)
 
 
 
@@ -1734,7 +1738,7 @@ export interface ResourceCollision {
 
 
 
-##### [skills 不是代码是文档 `core/skills.ts`](./skills.md)
+##### [skills 不是代码是文档 `core/skills.ts`](./模块/skills.md)
 
 > **skills 不是代码插件，而是可被模型读取的能力文档。**
 
