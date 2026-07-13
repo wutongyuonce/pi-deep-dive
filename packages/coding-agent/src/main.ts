@@ -603,9 +603,6 @@ function buildSessionOptions(
 		}));
 	}
 
-	// CLI 传入的 API key 在 authStorage 中设置
-	//（由调用者在 createAgentSession 之前处理）
-
 	// 工具配置
 	if (parsed.noTools) {
 		options.noTools = "all";
@@ -964,7 +961,7 @@ export async function main(args: string[], options?: MainOptions) {
 			noTools: sessionOptions.noTools,
 			customTools: sessionOptions.customTools,
 		});
-		// 如果 CLI 显式指定了思考级别（或从模型模式中提取），则强制设置
+		// 如果 CLI 显式指定了思考级别 --thinking（或从模型模式中提取 --model xxx:high），则强制设置
 		const cliThinkingOverride = parsed.thinking !== undefined || cliThinkingFromModel;
 		if (created.session.model && cliThinkingOverride) {
 			created.session.setThinkingLevel(created.session.thinkingLevel);

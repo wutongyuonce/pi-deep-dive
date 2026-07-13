@@ -650,51 +650,30 @@ main(args, options)
 #### 阶段 1：初始化和预处理
 
 ```ts
-  -> resetTimings()
+  -> 调用 core/timings.ts 中的 resetTimings() 重置性能计时器
   -> 检查 --offline 或 PI_OFFLINE
-       -> 命中则统一设置
-            PI_OFFLINE=1
-            PI_SKIP_VERSION_CHECK=1
+       -> 命中则统一设置离线模式环境变量 PI_OFFLINE=1 PI_SKIP_VERSION_CHECK=1
   -> 如果是 Windows
-       -> 调用 utils/windows-self-update.ts 中的 cleanupWindowsSelfUpdateQuarantine(getPackageDir())
+       -> 调用 utils/windows-self-update.ts 中的 cleanupWindowsSelfUpdateQuarantine(getPackageDir()) 清理 Windows 自更新残留文件
 ```
-
-这一段还没有任何 session 语义，纯粹是产品启动前的环境整理：
-
-- 重置性能计时器
-- 统一离线模式环境变量
-- 清理 Windows 自更新残留文件
 
 #### 阶段 2：包管理命令短路
 
 这一段说明 `pi` 不只是聊天入口，它还是包与配置的入口。
 
 ```ts
-  -> handlePackageCommand(args)
-       -> install / remove / list / update
-       -> 如果命中，直接 return
-  -> handleConfigCommand(args)
-       -> config
-       -> 如果命中，直接 return
+  -> 调用 package-manager-cli.ts 中的 handlePackageCommand(args)
+       -> 处理 pi install / remove / list / update ... 
+  -> 调用 package-manager-cli.ts 中的 handleConfigCommand(args)
+       -> 处理 pi config ...
 ```
 
-也就是说：
-
-```bash
-pi install ...
-pi remove ...
-pi list ...
-pi update ...
-pi config ...
-```
-
-这类命令根本不会进入 runtime 创建阶段，而是调用 package-manager-cli.ts 中的 `handlePackageCommand()` `handleConfigCommand()` 被直接消费。
+也就是说上面五种命令不会进入 runtime 创建阶段，而是调用 package-manager-cli.ts 被直接消费。
 
 #### 阶段 3：参数解析和模式决策
 
-```text
-main(args, options)
-  -> parsed = parseArgs(args)
+```ts
+  -> parsed = parseArgs(args) // cli/args.ts
   -> 输出 parsed.diagnostics
        -> 有 error 就 process.exit(1)
   -> time("parseArgs")
@@ -716,13 +695,13 @@ main(args, options)
 
 这一段的特点是：**在创建 runtime 之前，把能够直接结束的入口先处理掉。**
 
-```text
+```ts
 main(args, options)
   -> parsed.version
        -> console.log(VERSION)
        -> process.exit(0)
   -> parsed.export
-       -> exportFromFile(parsed.export, outputPath)
+       -> exportFromFile(parsed.export, outputPath) // core/export-html/index.ts
        -> console.log("Exported to: ...")
        -> process.exit(0)
   -> parsed.mode === "rpc" && parsed.fileArgs.length > 0
@@ -731,12 +710,9 @@ main(args, options)
 
 这里分别对应三类情况：
 
-- `--version`
-  - 完全不需要 session
-- `--export`
-  - 只需要读会话文件并导出 HTML，不需要进入 agent loop
-- `rpc + @file`
-  - 非法组合，因为 RPC 模式下 stdin 被 JSON-RPC 通信占用
+- `--version`：完全不需要 session
+- `--export`：只需要读会话文件并导出 HTML，不需要进入 agent loop
+- `rpc + @file`：非法组合，因为 RPC 模式下 stdin 被 JSON-RPC 通信占用
 
 #### 阶段 5：会话管理器创建
 
@@ -744,7 +720,7 @@ main(args, options)
 
 > **本次启动最终要挂载哪个 `SessionManager`？**
 
-```text
+```ts
 main(args, options)
   -> validateForkFlags(parsed)
   -> runMigrations(process.cwd())
@@ -790,13 +766,14 @@ main(args, options)
 
 从这里开始，才真正进入“把 session 装成可运行 runtime”的阶段。
 
-```text
+```ts
 main(args, options)
-  -> resolveCliPaths(cwd, parsed.extensions)
-  -> resolveCliPaths(cwd, parsed.skills)
-  -> resolveCliPaths(cwd, parsed.promptTemplates)
-  -> resolveCliPaths(cwd, parsed.themes)
-  -> authStorage = AuthStorage.create()
+  -> 解析 CLI 中的路径参数（扩展、技能、提示模板、主题的路径）
+      -> resolveCliPaths(cwd, parsed.extensions)
+      -> resolveCliPaths(cwd, parsed.skills)
+      -> resolveCliPaths(cwd, parsed.promptTemplates)
+      -> resolveCliPaths(cwd, parsed.themes)
+  -> 创建认证存储（管理 API key 等凭据）authStorage = AuthStorage.create() // core/auth-storage.ts
   -> 定义 createRuntime({ cwd, agentDir, sessionManager, sessionStartEvent })
        -> createAgentSessionServices(...)
        -> 读取 services.settingsManager / modelRegistry / resourceLoader
@@ -804,13 +781,14 @@ main(args, options)
             -> services.diagnostics
             -> settings diagnostics
             -> extension load errors
-       -> modelPatterns = parsed.models ?? settingsManager.getEnabledModels()
-       -> scopedModels = resolveModelScope(modelPatterns, modelRegistry)
-       -> buildSessionOptions(parsed, scopedModels, hasExistingSession, modelRegistry, settingsManager)
+       -> 从 CLI --models 或设置中的 enabledModels 解析可用模型列表
+           -> modelPatterns = parsed.models ?? settingsManager.getEnabledModels()
+           -> scopedModels = resolveModelScope(modelPatterns, modelRegistry) // core/model-resolver.ts
+       -> 将解析后的 CLI 参数和模型作用域转换为 CreateAgentSessionOptions buildSessionOptions(parsed, scopedModels, hasExistingSession, modelRegistry, settingsManager)
        -> 若 parsed.apiKey 存在
             -> authStorage.setRuntimeApiKey(...)
        -> createAgentSessionFromServices(...)
-       -> 若 CLI 显式指定 thinking
+       -> 若 CLI 显式指定了思考级别 --thinking 或 --model xxx:high，则强制设置
             -> created.session.setThinkingLevel(...)
        -> 返回 { session, services, diagnostics, modelFallbackMessage }
   -> time("createRuntime")
@@ -822,29 +800,18 @@ main(args, options)
        -> assertSessionCwdExists(...)
        -> createRuntime(...)
        -> new AgentSessionRuntime(...)
-  -> configureHttpDispatcher(settingsManager.getHttpIdleTimeoutMs())
+  -> 配置 HTTP 请求分发器的空闲超时时间 configureHttpDispatcher(settingsManager.getHttpIdleTimeoutMs())
 ```
 
-这一段是全文和后续章节衔接最强的位置，因为它第一次把三层对象真正串起来：
+[认证凭据读写与解析中心 `core/auth-storage.ts`、模型注册表 `core/model-registry.ts`、model-resolver](./模块/auth-storage、model-registry、model-resolver.md)
 
-```text
-main.ts
-  -> 先创建 SessionManager
-  -> 再定义 createRuntime
-       -> createAgentSessionServices()   // 环境层
-       -> createAgentSessionFromServices()
-            -> createAgentSession()      // 会话装配入口
-                 -> new AgentSession(...)
-  -> 最后 createAgentSessionRuntime(...) // 宿主层
-```
-
-所以后面的“会话运行时层”其实就是把这里被提到的三层对象展开说明。
+后续**”会话运行时层章节“**其实就是把这里被提到的三层对象展开说明。
 
 #### 阶段 7：后处理和模式启动
 
 runtime 已经创建出来以后，`main.ts` 还要做最后一层产品级收口。
 
-```text
+```ts
 main(args, options)
   -> --help
        -> 从 resourceLoader.getExtensions() 收集 extension flags
