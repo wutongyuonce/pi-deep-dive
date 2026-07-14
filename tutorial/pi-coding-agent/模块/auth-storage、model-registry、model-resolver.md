@@ -847,7 +847,7 @@ interface Model<TApi extends Api> {
 用户可以在 `~/.pi/agent/models.json` 中自定义模型。这个文件遵循严格的 JSON Schema：
 
 ```typescript
-// file: packages/coding-agent/src/core/model-registry.ts:90-109
+// packages/coding-agent/src/core/model-registry.ts:90-109
 const ModelDefinitionSchema = Type.Object({
   id: Type.String({ minLength: 1 }),
   name: Type.Optional(Type.String({ minLength: 1 })),

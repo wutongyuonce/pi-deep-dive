@@ -12,7 +12,7 @@ description: Adds structured Chinese code comments for files/functions. Invoke w
 - “说明每个函数的定位、作用、调用关系”
 - “按某种固定风格统一整理注释”
 
-## 目标
+## 要求
 
 输出的注释应满足这几个要求：
 
@@ -20,7 +20,7 @@ description: Adds structured Chinese code comments for files/functions. Invoke w
 - 函数头只写高层信息，不把“步骤流程”堆在函数头里
 - 函数体内部用就近注释解释关键步骤
 - 不改业务逻辑，只补注释或调整注释位置
-- 优先中文注释，术语保留必要英文原词
+- 优先中文注释，如果存在英文注释则翻译后融入新增注释，注意专业术语保留必要英文原词
 
 ## 注释规则
 
@@ -58,9 +58,11 @@ description: Adds structured Chinese code comments for files/functions. Invoke w
 
 - 作用
 - 定位
-- 被谁调用
-- 调用了谁
+- 被谁调用（本代码以及项目其余代码都要考虑）
+- 调用了谁（如果为空可以不写）
 - 参数和返回值
+
+函数头注释复杂度要与函数内代码量匹配，简单的函数只需一句话总结即可。
 
 示例：
 
@@ -169,20 +171,6 @@ function resolvePromptInput(input: string | undefined, description: string): str
 
 5. 如果文件已有注释，请统一成上述风格，而不是重复堆叠。
 ```
-
-## 适用边界
-
-适合：
-
-- TypeScript / JavaScript 业务代码
-- 需要知识交接的核心模块
-- 长函数、流程型函数、协调器类
-
-不适合：
-
-- 第三方压缩文件
-- 纯类型 re-export 文件只需极简注释
-- 用户明确要求“不要加注释”的文件
 
 ## 交付标准
 

@@ -214,7 +214,7 @@ export type StreamFunction<TApi extends Api, TOptions extends StreamOptions> = (
 
 ### Pi 为什么选 EventStream
 
-pi-agent 选择 EventStream（事件总线）而不是简单的 for-loop，本质上是因为规模不同导致的需求差异 。
+pi 选择 EventStream（事件总线）而不是简单的 for-loop，本质上是因为规模不同导致的需求差异 。
 
 #### 核心原因：事件类型数量和消费者数量
 
@@ -235,7 +235,7 @@ for chunk in stream:                    # ← 边收边处理
 
 等流结束，agent.chat() 才拿到 LLMResponse，然后再串行执行工具：
 
-```
+```ts
 agent.chat()
   ├── for chunk in stream: ...          ← 收完全部 chunk
   ├── for tc in resp.tool_calls:
@@ -244,16 +244,13 @@ agent.chat()
   └── llm.chat(messages)               ← 把结果喂回去，下一轮
 ```
 
-pi-agent 的事件类型多得多：
-
-<img src="img/image-20260528153946996.png" alt="image-20260528153946996" style="zoom:50%;" />
+pi 的事件类型多得多（见 [2.8 事件协议](#2.8)）
 
 不同消费者对不同事件感兴趣：
 
-- UI 层：关注 text_delta （渲染文字）和 tool_use_start （显示"正在执行..."）
-- 日志：所有事件都想记录
-- 工具执行器：只关心 tool_use_start/end
-  EventStream 天然支持按事件类型过滤订阅。
+- UI 层：关注 `text_delta`、`thinking_delta`，用来实时渲染增量内容
+- 日志层：几乎所有事件都想记录
+- 工具执行层：关注 `toolcall_*`
 
 ```
 LLM API 流式响应
@@ -261,14 +258,10 @@ LLM API 流式响应
     ▼
 EventStream（事件总线）
     │
-    ├── text_delta → UI 渲染层（实时打印文字）
-    ├── tool_use   → StreamingToolExecutor
-    │                   ├── 启动工具执行
-    │                   ├── 工具结果 → 插回对话流
-    │                   └── 重新请求 LLM（继续下一轮）
-    ├── usage      → Token 计数器
-    ├── error      → 错误处理
-    └── done       → 结束
+    ├── text_* / thinking_* → UI 或调试输出
+    ├── toolcall_*          → 上层决定是否执行工具
+    ├── done                → 产出最终 AssistantMessage
+    └── error               → 产出带错误信息的 AssistantMessage
 ```
 
 用 for-loop + 回调，一个回调里塞这么多逻辑会变成：
@@ -295,11 +288,11 @@ await Promise.all([
 ]);
 ```
 
-> 最关键的差异：**工具执行的时机**
+> **当前仓库里的 `packages/agent` 并不是“边流式边执行工具”**
 >
-> Claude Code/Pi 可以在 LLM 还在流式输出的时候就开始执行工具 。比如 LLM 先返回了 tool_use （参数是写文件的请求），Claude Code 可以在 LLM 继续输出文本的同时， 并行执行写文件操作 。
+> 现在的 `agent-loop.ts` 会先通过 `streamAssistantResponse()` 把一整轮 provider 流收敛成最终的 `AssistantMessage`，然后再从 `message.content` 中提取 `toolCall` 块，进入 `executeToolCalls()`。
 >
-> 一般的 Agent 必须等 LLM 流式响应完全结束，拿到完整的 LLMResponse 之后，才能开始执行工具。这也是为什么架构更简单——同步模型天然不需要处理"工具还没执行完，LLM 下一轮的文本又来了"这种并发问题。
+> 也就是说，`toolcall_*` 事件确实是流式到达的，但当前实现不会在 provider 流还没结束时就启动真正的工具执行。真正的运行时工具事件 `tool_execution_start/update/end` 是在 assistant 流结束之后才开始发出的。
 
 #### 解耦 + 可测试性
 
@@ -902,7 +895,7 @@ export class AssistantMessageEventStream extends EventStream<
 - **什么时候算结束**：收到 `done` 或 `error` 事件
 - **结束时返回什么**：事件里的 `message` 或 `error` 字段（都是 `AssistantMessage` 对象）
 
-#### 2.8 事件协议 `AssistantMessageEvent`
+#### 2.8 事件协议 `AssistantMessageEvent`<a id="2.8"></a>
 
 每个从流里出来的事件都是以下类型之一：
 

@@ -19,7 +19,7 @@
 
 而对下，它依赖的是：
 
-- `pi-ai` 的 `streamSimple()` 发起 LLM 请求
+- `pi-ai` 的 `streamSimple()` 作为默认 LLM 请求实现，也允许替换为任意满足 `StreamFn` 契约的流函数
 - `pi-ai` 的 `AssistantMessageEventStream` 消费流式事件
 - `pi-ai` 的 `validateToolArguments()` 校验工具参数
 - `pi-ai` 的 `Message` / `AssistantMessage` / `ToolResultMessage` 消息类型
@@ -50,7 +50,8 @@
 
 公共入口
    index.ts                    ← 统一 re-export
-   proxy.ts                    ← 代理工具函数
+   node.ts                     ← Node 环境入口（补充导出 NodeExecutionEnv）
+   proxy.ts                    ← 代理流函数与相关类型
 ```
 
 ```ts
@@ -91,11 +92,12 @@ Agent (agent.ts)               ← 高层：状态管理 + 事件订阅 + 消息
 
 | 文件              | 定位                 | 核心功能 / 关键导出                                                                                                                              | 主要被谁调用                                   | 它主要调用谁                                        |
 | ----------------- | -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------- | --------------------------------------------------- |
-| index.ts          | 包公共入口           | 统一 re-export 所有公共 API                                                                                                                      | `packages/coding-agent`、外部 npm 使用者        | 各子模块                                            |
+| index.ts          | 包公共入口           | 聚合导出 `Agent` / loop / harness / compaction / session repo 与 storage / proxy / types 等公共 API                                              | `packages/coding-agent`、外部 npm 使用者        | 各子模块                                            |
 | types.ts          | 核心协议文件         | `AgentMessage`、`AgentEvent`、`AgentTool`、`AgentContext`、`AgentLoopConfig`、`AgentState`、`StreamFn`、`QueueMode`、`ThinkingLevel`              | 几乎所有源码文件                               | 无运行时调用                                        |
 | agent-loop.ts     | 无状态循环引擎       | `agentLoop`、`agentLoopContinue`、`runAgentLoop`、`runAgentLoopContinue`、`runLoop`、`streamAssistantResponse`、`executeToolCalls`               | `agent.ts`、`agent-harness.ts`                 | `pi-ai` 的 `streamSimple`、`validateToolArguments`  |
 | agent.ts          | 有状态运行时壳       | `Agent` 类：`prompt()`、`continue()`、`abort()`、`steer()`、`followUp()`、`subscribe()`、`processEvents()`                                       | `packages/coding-agent`、测试代码              | `agent-loop.ts` 的 `runAgentLoop` / `runAgentLoopContinue` |
-| proxy.ts          | 代理工具函数         | `createProxyTool` 等辅助函数                                                                                                                     | 外部调用者                                     | 无                                                  |
+| node.ts           | Node 入口            | `NodeExecutionEnv` + `index.ts` 的全部导出                                                                                                       | Node 侧调用者                                  | `harness/env/nodejs.ts`、`index.ts`                |
+| proxy.ts          | 代理流实现           | `streamProxy()`、`ProxyStreamOptions`、`ProxyAssistantMessageEvent`                                                                              | 需要经由服务端代理模型请求的调用者             | `fetch`、`pi-ai` 的流式事件类型与 JSON 增量解析     |
 
 #### `harness/`
 
@@ -129,11 +131,13 @@ Agent (agent.ts)               ← 高层：状态管理 + 事件订阅 + 消息
 
 ```typescript
 export type StreamFn = (
-  ...args: Parameters<typeof streamSimple>
-) => ReturnType<typeof streamSimple> | Promise<ReturnType<typeof streamSimple>>;
+  model: Model<Api>,
+  context: Context,
+  options?: SimpleStreamOptions,
+) => AssistantMessageEventStream | Promise<AssistantMessageEventStream>;
 ```
 
-`StreamFn` 签名与 `pi-ai` 的 `streamSimple()` 完全一致。默认值就是 `streamSimple`，但上层可以替换它（比如 `coding-agent` 在 `sdk.ts` 里包了一层，附加 apiKey / headers / retry 策略）。
+`StreamFn` 的签名不是“从 `typeof streamSimple` 直接推导”，而是用显式的结构化签名。这样做的好处是：满足同一协议的实现也能直接接进 agent loop，不再强耦合某一个具体函数符号。
 
 ```
 agent-loop.ts 的 streamFn 参数
@@ -142,7 +146,7 @@ agent-loop.ts 的 streamFn 参数
   │     └── coding-agent/sdk.ts 传入包装版（+apiKey +headers +retry）
   │
   └── 来自 AgentHarness → 自己创建包装版（+auth +headers +hook系统）
-        └── 最终也调 streamSimple
+        └── 最终只要满足 StreamFn 契约即可
 ```
 
 > * StreamFunction （pi-ai 层） — "provider 级函数签名"
@@ -156,7 +160,7 @@ agent-loop.ts 的 streamFn 参数
 >
 > * StreamFn （pi-agent 层） — "agent 循环可替换的函数签名"
 >
->   - 参数是 从 streamSimple 推导出来的 （ ...args: Parameters<typeof streamSimple> ），不是手写的
+>   - 参数是手写的结构化协议：`model`、`context`、`options?`
 >
 >   - 返回值 多了 Promise<AssistantMessageEventStream> （允许异步返回流）
 >
@@ -172,15 +176,25 @@ agent-loop.ts 的 streamFn 参数
 >     return streamSimple(model, context, { ... });
 > }
 > ```
-> 这个函数的返回值是 Promise<AssistantMessageEventStream> ，不是 AssistantMessageEventStream 。 StreamFn 通过 | Promise<ReturnType<typeof streamSimple>> 兼容了这种情况。
+> 这个函数的返回值是 Promise<AssistantMessageEventStream> ，不是 AssistantMessageEventStream 。因此 StreamFn 的返回类型需要显式允许 `Promise<AssistantMessageEventStream>`。
 
 #### ToolExecutionMode / QueueMode / ThinkingLevel
 
 ```typescript
 export type ToolExecutionMode = "sequential" | "parallel";
 export type QueueMode = "all" | "one-at-a-time";
-export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
+export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 ```
+
+> ThinkingLevel 在 agent 层：
+>
+> - "off" = 明确关闭推理
+> - "minimal" | "low" | "medium" | "high" | "xhigh" | "max" = 开启推理，并指定强度
+>
+> 在传给 pi-ai / provider 时：
+>
+> - "off" 通常会被翻译成 reasoning: undefined
+> - 其他等级才真的传下去
 
 这三个枚举分别控制：
 - `ToolExecutionMode`：`AgentTool.executionMode` 和 `AgentLoopConfig.toolExecution` 的取值类型
@@ -255,11 +269,14 @@ export type AgentToolCall = Extract<AssistantMessage["content"][number], { type:
 export interface AgentToolResult<T> {
   content: (TextContent | ImageContent)[];  // 返回给模型的文本或图片
   details: T;                                // 用于日志/UI 的任意结构化详情
+  addedToolNames?: string[];                 // 从当前 transcript 节点起新增可用工具名
   terminate?: boolean;                       // 提示 Agent 应在当前工具批次后停止
 }
 ```
 
 工具的 `execute` 函数返回这个结构。`content` 会被送回 LLM 作为工具结果消息，`details` 留给 UI 渲染或日志。`terminate` 是软信号——仅当批次中**所有**已完成的工具结果都设为 `true` 时才触发提前终止。
+
+`addedToolNames` 是新增工具名集合字段：工具可以声明“从这个工具结果开始，后续 transcript 可用的工具集合新增了哪些名字”，用于支持“工具运行过程中动态解锁后续工具”的场景。`agent-loop.ts` 在组装 `ToolResultMessage` 时会把它继续透传下去。
 
 #### AgentToolUpdateCallback — 流式更新回调
 
@@ -533,6 +550,37 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 }
 ```
 
+prepareNextTurn() 和 shouldStopAfterTurn() 两者输入相同：PrepareNextTurnContext extends ShouldStopAfterTurnContext 结构完全一致，但职责不同
+
+- prepareNextTurn 是"修改者"，负责调整下一轮参数
+- shouldStopAfterTurn 是"裁判"，负责决定是否继续
+
+```ts
+prepareNextTurn: async (context) => {
+    // 场景 1：切换模型（先用强模型思考，再用弱模型执行）
+    if (context.newMessages.length > 10) {
+        return { model: cheaperModel };
+    }
+    // 场景 2：裁剪上下文
+    if (context.context.messages.length > 100) {
+        return { context: { ...context.context, messages: context.context.messages.slice(-50) } };
+    }
+    return undefined; // 不修改
+}
+
+shouldStopAfterTurn: async (context) => {
+    // 场景 1：上下文即将超出容量
+    if (estimateTokens(context.context) > MAX_TOKENS * 0.9) {
+        return true; // 停止
+    }
+    // 场景 2：已完成目标
+    if (context.message.stopReason === "end_turn") {
+        return true; // 停止
+    } 
+    return false; // 继续
+}
+```
+
 #### 不同抛异常策略的场景
 
 ```
@@ -647,8 +695,15 @@ private createLoopConfig(options: { skipInitialSteeringPoll?: boolean } = {}): A
         getApiKey: this.getApiKey,
         
         // ---- 闭包包装 ----
-        prepareNextTurn: this.prepareNextTurn
-            ? async () => await this.prepareNextTurn?.(this.signal) : undefined,
+        prepareNextTurn:
+            this.prepareNextTurnWithContext || this.prepareNextTurn
+                ? async (context) => {
+                    if (this.prepareNextTurnWithContext) {
+                        return await this.prepareNextTurnWithContext(context, this.signal);
+                    }
+                    return await this.prepareNextTurn?.(this.signal);
+                }
+                : undefined,
         getSteeringMessages: async () => {
             if (skipInitialSteeringPoll) { skipInitialSteeringPoll = false; return []; }
             return this.steeringQueue.drain();
@@ -665,7 +720,7 @@ private createLoopConfig(options: { skipInitialSteeringPoll?: boolean } = {}): A
 | `transformContext`    | 用户传入 → `AgentOptions.transformContext`                   | 可选，不传就不做变换                                         |
 | `getApiKey`           | 用户传入 → `AgentOptions.getApiKey`                          | 可选，用于短期 OAuth 令牌等场景                              |
 | `shouldStopAfterTurn` | **未提供**                                                   | Agent 不使用此钩子                                           |
-| `prepareNextTurn`     | 用户传入 → `AgentOptions.prepareNextTurn`，包装为闭包透传 signal | 可选                                                         |
+| `prepareNextTurn`     | 用户传入 → `AgentOptions.prepareNextTurnWithContext` 或 `AgentOptions.prepareNextTurn`，包装为闭包透传 context / signal | 可选；新版优先使用带 context 的版本                         |
 | `getSteeringMessages` | 内部 `steeringQueue.drain()`                                 | 从 PendingMessageQueue 排空消息；continue 时跳过首次 poll 避免重复消费 |
 | `getFollowUpMessages` | 内部 `followUpQueue.drain()`                                 | 同上                                                         |
 | `toolExecution`       | 用户传入 → `AgentOptions.toolExecution`，默认 `"parallel"`   | —                                                            |
@@ -750,10 +805,10 @@ private createLoopConfig(
 ##### 上层 prepareNextTurn 轮次间钩子的实现
 
 ```ts
-// AgentLoopConfig 中的定义
+// types.ts
 prepareNextTurn?: (
     context: PrepareNextTurnContext,
-  ) => AgentLoopTurnUpdate | undefined | Promise<AgentLoopTurnUpdate | undefined>;
+) => AgentLoopTurnUpdate | undefined | Promise<AgentLoopTurnUpdate | undefined>;
 ```
 
 **调用位置**：在 `agent-loop.ts` 的 `runLoop()` 函数中，`turn_end` 事件之后、下一轮 LLM 请求之前，动态修改下一轮的配置（模型、上下文、思考级别等）。
@@ -768,7 +823,7 @@ prepareNextTurn?: (
     ↓
 turn_end 事件
     ↓
-prepareNextTurn() ← 可以修改下一轮的参数
+prepareNextTurn()/prepareNextTurnWithContext() ← 可以修改下一轮的参数
     ↓
 第 2 轮 LLM 请求（使用修改后的参数）
 ```
@@ -800,26 +855,33 @@ if (nextTurnSnapshot) {
 }
 ```
 
-**上层的实现：**他们都覆盖了原有的定义，都没有使用循环引擎中 prepareNextTurn 允许接受的 context 参数，Agent 只能访问 signal，AgentHarness 则能通过 this 访问实例状态。
+**上层的实现：**
 
-1、**Agent 透传 signal 终止信号，让用户可以在每轮后做自定义逻辑**
+1、**Agent 提供两种入口：旧的 signal-only 版本和新版带 context 的版本**
 
 ```ts
 // agent.ts 中的 createLoopConfig()
-prepareNextTurn: this.prepareNextTurn
-            ? async () => await this.prepareNextTurn?.(this.signal) : undefined,
+prepareNextTurn:
+    this.prepareNextTurnWithContext || this.prepareNextTurn
+        ? async (context) => {
+            if (this.prepareNextTurnWithContext) {
+                return await this.prepareNextTurnWithContext(context, this.signal);
+            }
+            return await this.prepareNextTurn?.(this.signal);
+        }
+        : undefined,
 ```
 
 ```ts
 const agent = new Agent({
-    prepareNextTurn: async (signal) => {
+    prepareNextTurnWithContext: async (context, signal) => {
         // 如果已被中止，不做任何修改，快速返回
         if (signal?.aborted) {
             return undefined;
         }
         
-        // 正常逻辑：每 5 轮切换一次模型
-        if (turnCount % 5 === 0) {
+        // 正常逻辑：根据上一轮结果决定是否切换模型
+        if (context.toolResults.length > 3) {
             return { model: cheaperModel };
         }
         return undefined;
@@ -1007,7 +1069,7 @@ agentLoopContinue()        -> runAgentLoopContinue() -> runLoop()
 
 * 内层循环：一次迭代的完整时序
 
-  ```
+  ```ts
   内层循环 while (hasMoreToolCalls || pendingMessages.length > 0):
   │
   ├─ 1. emit turn_start（非第一轮）
@@ -1049,40 +1111,10 @@ agentLoopContinue()        -> runAgentLoopContinue() -> runLoop()
   └─ 9. 内层循环结束 → 跳到外层
   ```
 
-  prepareNextTurn() 和 shouldStopAfterTurn() 两者输入相同，PrepareNextTurnContext extends ShouldStopAfterTurnContext 结构完全一致，但职责不同：
-
-  - prepareNextTurn 是"修改者"，负责调整下一轮参数
-  - shouldStopAfterTurn 是"裁判"，负责决定是否继续
-
-  ```ts
-  prepareNextTurn: async (context) => {
-      // 场景 1：切换模型（先用强模型思考，再用弱模型执行）
-      if (context.newMessages.length > 10) {
-          return { model: cheaperModel };
-      }
-      // 场景 2：裁剪上下文
-      if (context.context.messages.length > 100) {
-          return { context: { ...context.context, messages: context.context.messages.slice(-50) } };
-      }
-      return undefined; // 不修改
-  }
-  
-  shouldStopAfterTurn: async (context) => {
-      // 场景 1：上下文即将超出容量
-      if (estimateTokens(context.context) > MAX_TOKENS * 0.9) {
-          return true; // 停止
-      }
-      // 场景 2：已完成目标
-      if (context.message.stopReason === "end_turn") {
-          return true; // 停止
-      } 
-      return false; // 继续
-  }
-  ```
 
 * 外层循环的唯一职责：
 
-  ```
+  ```ts
   内层循环结束（意味着：没有工具要执行，也没有 steering）
       ↓
   getFollowUpMessages() ──有──→ pendingMessages = follow-up → continue → 重入内层
@@ -1517,8 +1549,9 @@ sequenceDiagram
   		role: "toolResult",
   		toolCallId: finalized.toolCall.id,
   		toolName: finalized.toolCall.name,
-  		content: finalized.result.content,
+  		content: finalized.result.content ?? [],
   		details: finalized.result.details,
+  		...(finalized.result.addedToolNames?.length ? { addedToolNames: finalized.result.addedToolNames } : {}),
   		isError: finalized.isError,
   		timestamp: Date.now(),
   	};
@@ -1978,7 +2011,7 @@ graph TB
 
 ### Agent 类内部字段与构造器
 
-Agent 实例持有 5 个私有字段和 14 个公开配置字段。它们不是随意堆放的——每个字段都有明确的角色。
+Agent 实例持有 5 个私有字段和 15 个公开配置字段。它们不是随意堆放的——每个字段都有明确的角色。
 
 ```typescript
 class Agent {
@@ -1993,11 +2026,11 @@ class Agent {
   public convertToLlm: ...;
   public transformContext?: ...;
   public streamFn: ...;
-  // ... 共 14 个，见下文
+  // ... 共 15 个，见下文
 }
 ```
 
-14 个公开配置字段的完整列表（全部可选，可运行时替换）：
+15 个公开配置字段的完整列表（全部可选，可运行时替换）：
 
 | 字段 | 默认值 | 用途 |
 |---|---|---|
@@ -2010,6 +2043,7 @@ class Agent {
 | `beforeToolCall` | `undefined` | 工具执行前拦截（可阻断） |
 | `afterToolCall` | `undefined` | 工具执行后拦截（可覆盖结果） |
 | `prepareNextTurn` | `undefined` | 轮次结束后准备下一轮（可替换模型/上下文） |
+| `prepareNextTurnWithContext` | `undefined` | 轮次结束后基于完整上下文准备下一轮；新版优先于 `prepareNextTurn` |
 | `sessionId` | `undefined` | 会话标识符，传给 provider 用于缓存 |
 | `thinkingBudgets` | `undefined` | 各推理级别的 token 预算 |
 | `transport` | `"auto"` | 传输方式偏好 |
@@ -2032,6 +2066,7 @@ constructor(options: AgentOptions = {}) {
     this.beforeToolCall = options.beforeToolCall;
     this.afterToolCall = options.afterToolCall;
     this.prepareNextTurn = options.prepareNextTurn;
+    this.prepareNextTurnWithContext = options.prepareNextTurnWithContext;
     this.steeringQueue = new PendingMessageQueue(options.steeringMode ?? "one-at-a-time");
     this.followUpQueue = new PendingMessageQueue(options.followUpMode ?? "one-at-a-time");
     this.sessionId = options.sessionId;
@@ -2051,12 +2086,12 @@ const agent = new Agent({
   initialState: {
     systemPrompt: 'You are a helpful assistant.',  // 默认 ""
     model: getModel('anthropic', 'claude-sonnet-4-20250514'),  // 默认占位模型（不可用）
-    thinkingLevel: 'medium',  // 默认 "off"，可选 off | minimal | low | medium | high | xhigh
+    thinkingLevel: 'medium',  // 默认 "off"，可选 off | minimal | low | medium | high | xhigh | max
     tools: [],                // 默认 []
     messages: [],             // 默认 []
   },
 
-  // ---- 14 个公开配置字段：全部可选，可运行时替换 ----
+  // ---- 15 个公开配置字段：全部可选，可运行时替换 ----
   convertToLlm: (messages) => messages.filter(      // 消息转换钩子，默认 defaultConvertToLlm
     m => m.role === 'user' || m.role === 'assistant' || m.role === 'toolResult'
   ),
@@ -2075,6 +2110,7 @@ const agent = new Agent({
     if (!isError) return { details: { ...result.details, audited: true } };
   },
   prepareNextTurn: async (signal) => undefined,      // 默认 undefined
+  prepareNextTurnWithContext: async (context, signal) => undefined, // 默认 undefined，且优先级更高
   sessionId: 'my-session',                           // 默认 undefined
   thinkingBudgets: { medium: 5000, high: 10000 },    // 默认 undefined
   transport: 'auto',                                 // 默认 "auto"
@@ -2340,6 +2376,11 @@ export interface AgentOptions {
 	prepareNextTurn?: (
 		signal?: AbortSignal,
 	) => Promise<AgentLoopTurnUpdate | undefined> | AgentLoopTurnUpdate | undefined;
+	/** 轮次结束后基于完整上下文准备下一轮；如果提供，则优先于 prepareNextTurn。 */
+	prepareNextTurnWithContext?: (
+		context: PrepareNextTurnContext,
+		signal?: AbortSignal,
+	) => Promise<AgentLoopTurnUpdate | undefined> | AgentLoopTurnUpdate | undefined;
 	/** steering 消息的队列模式。 */
 	steeringMode?: QueueMode;
 	/** follow-up 消息的队列模式。 */
@@ -2419,10 +2460,16 @@ shouldStopAfterTurn?: (context) => boolean;
 3、签名不同的字段：prepareNextTurn
 
 ```ts
-// AgentOptions — 用户定义，接收 signal
+// AgentOptions — 兼容旧接口：只接收 signal
 prepareNextTurn?: (signal?: AbortSignal) => Promise<AgentLoopTurnUpdate | undefined>;
 
-// AgentLoopConfig — 循环引擎调用，接收 context
+// AgentOptions — 新接口：接收完整 context + signal
+prepareNextTurnWithContext?: (
+  context: PrepareNextTurnContext,
+  signal?: AbortSignal,
+) => Promise<AgentLoopTurnUpdate | undefined>;
+
+// AgentLoopConfig — 循环引擎调用，统一接收 context
 prepareNextTurn?: (context: PrepareNextTurnContext) => Promise<AgentLoopTurnUpdate | undefined>;
 ```
 
@@ -2509,9 +2556,15 @@ private createLoopConfig(options?: { skipInitialSteeringPoll?: boolean }): Agent
     getApiKey: this.getApiKey,
 
     // ---- 闭包包装 ----
-    prepareNextTurn: this.prepareNextTurn
-      ? async () => await this.prepareNextTurn?.(this.signal)
-      : undefined,
+    prepareNextTurn:
+      this.prepareNextTurnWithContext || this.prepareNextTurn
+        ? async (context) => {
+            if (this.prepareNextTurnWithContext) {
+              return await this.prepareNextTurnWithContext(context, this.signal);
+            }
+            return await this.prepareNextTurn?.(this.signal);
+          }
+        : undefined,
     getSteeringMessages: async () => {
       if (skipInitialSteeringPoll) { skipInitialSteeringPoll = false; return []; }
       return this.steeringQueue.drain();
