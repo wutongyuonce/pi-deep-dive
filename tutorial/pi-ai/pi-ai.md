@@ -1422,10 +1422,34 @@ api:    anthropicMessagesApi()  // 同一套引擎
 
 **每个厂商的模型目录都有对应的工厂来装配 provider**，可通过子路径导入。如果应用只需要少量特定 provider，导入该厂商的 provider 即可：<a id="特定"></a>
 
+> **npm 包的 subpath exports （子路径导出）**，由包作者在 package.json 中声明：
+>
+> ```json
+> // package.json
+> "exports": {
+>     ".": {
+>         "types": "./dist/index.d.ts",
+>         "import": "./dist/index.js"
+>     },
+>     "./providers/*": {
+>         "types": "./dist/providers/*.d.ts",
+>         "import": "./dist/providers/*.js"
+>     },
+>     ...
+> }
+> ```
+>
+> 当你导入：
+>
+> ```json
+> import { openrouterProvider } from '@earendil-works/pi-ai/providers/openrouter';
+> ```
+>
+> Node.js / bundler 会查 @earendil-works/pi-ai 这个包的 exports 映射，找到 "./providers/openrouter" 对应的实际文件 ./dist/providers/openrouter.js。
+
 ```ts
 import { anthropicProvider } from '@earendil-works/pi-ai/providers/anthropic';
 import { openaiProvider } from '@earendil-works/pi-ai/providers/openai';
-import { openrouterProvider } from '@earendil-works/pi-ai/providers/openrouter';
 // ...支持列表中的每个 provider 都有对应模块
 
 const models = createModels();
