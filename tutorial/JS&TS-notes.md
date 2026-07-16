@@ -586,6 +586,8 @@ Promise.resolve() 是一个静态方法，返回一个已经兑现（resolved）
 
 ### JSON 相关方法
 
+JSON 是 JavaScript 引擎内置的全局对象
+
 ![image-20260615150927201](img/image-20260615150927201.png)
 
 ### AsyncIterable（异步可迭代）

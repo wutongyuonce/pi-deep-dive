@@ -313,19 +313,27 @@ for (const block of response.content) {
 | session-resources.ts      | 会话资源清理注册表   | `registerSessionResourceCleanup`、`cleanupSessionResources`  | 需要维护 session 资源的 provider                           | cleanup 回调集合                   |
 | oauth.ts                  | OAuth 导出入口       | re-export `utils/oauth/` 的全部 OAuth 能力（登录、刷新、凭据管理） | 需要 OAuth 登录的外部调用者                                | `utils/oauth/index.ts`                |
 
-#### `auth/` --- 认证与凭证管理层
+#### `auth/` 认证与凭证管理层
 
 `auth/` 负责 provider 认证的解析和凭证存储，是 `models.ts` 中 `applyAuth()` 的底盘。
 
+核心文件：
+
+
+
+- resolve.ts — 统一解析：锁、过期检查、刷新、env fallback 全自动
+- helpers.ts — envApiKeyAuth() 工厂（30+ provider 在用）
+- credential-store.ts — 默认 InMemoryCredentialStore
+
 | 文件                | 定位                   | 核心功能 / 关键导出                                | 主要被谁调用               |
 | ------------------- | ---------------------- | -------------------------------------------------- | -------------------------- |
-| types.ts            | 认证类型定义           | `ModelAuth`、`ApiKeyCredential`、`OAuthCredential`、`Credential`、`ProviderAuth` | `models.ts`、各 provider   |
+| types.ts            | 认证类型定义           | `CredentialStore`、`ApiKeyCredential`、`OAuthCredential`、`Credential`、`ApiKeyAuth`、`OAuthAuth`、`ProviderAuth` | `models.ts`、各 provider   |
 | resolve.ts          | 认证解析核心           | `resolveProviderAuth()`、`ModelsError`             | `models.ts` 的 `applyAuth()` |
 | credential-store.ts | 凭证存储               | `InMemoryCredentialStore`（默认内存实现）          | `models.ts`、外部登录流程  |
 | context.ts          | 认证上下文             | `defaultProviderAuthContext()`（跨平台 env/fileExists） | `resolve.ts`               |
 | helpers.ts          | 认证辅助工厂           | `envApiKeyAuth()`、`oauthAuth()` 等工厂函数        | 各 provider 定义           |
 
-#### `providers/` --- Provider 装配层
+#### `providers/` Provider 装配层
 
 **Provider 是"薄封装"**：每个文件拿一组模型目录 + 一套认证方式 + 一套 API 引擎，通过 `createProvider()` 装配成统一 Provider。同一套引擎可被多个 provider 复用。内置 provider 共 35 个。
 
@@ -372,7 +380,7 @@ for (const block of response.content) {
 
 typebox-helpers.ts 帮你写 schema， validation.ts 用 schema 校验参数。
 
-##### `utils/oauth/` --- OAuth 登录与 Token 管理
+##### `utils/oauth/` OAuth 登录与 Token 管理
 
 处理 Anthropic、GitHub Copilot 等 OAuth 类型 provider 的登录、token 刷新和凭据存储。
 
@@ -1349,11 +1357,23 @@ index.ts
 
 
 
-## 三、API 懒加载协议层 `api/` 
+## 三、认证与基础设施层
+
+### 认证与凭证管理层 `auth/`
+
+Provider 自带认证能力，不依赖外部。定义了 ProviderAuth（包含 ApiKeyAuth 和 OAuthAuth），以及统一的 resolveProviderAuth() 解析入口。
+
+
+
+
 
 ### 统一事件流机制 EventStream
 
-见 [pi-ai-streaming-architecture.md](./pi-ai-streaming-architecture.md)
+见 [pi-ai-streaming-architecture.md](
+
+## 四、API 懒加载协议层 `api/` 
+
+
 
 
 
@@ -1479,13 +1499,17 @@ Provider 工厂导入对应厂商的模型目录和一个懒加载 API 包装器
   - builtinModels() 再把它注册进 ModelsImpl
   - 之后任何 Anthropic 模型请求都能通过 Models.stream() 找到它
 
+```
+import { builtinModels } from '@earendil-works/pi-ai/providers/all';
 
+const models = builtinModels(); // 注册了全部内置 provider 的 Models 集合
+```
+
+这个子入口会导入所有模型目录和所有内置 provider 工厂，是一个更重但更显式的入口。`builtinModels()` 接收与 `createModels()` 相同的参数（`credentials`、`authContext`）；如果你想手动注册，也可以使用 `builtinProviders()` 获取 provider 数组。
 
 ## 五、`models.ts` 统一 provider / models 运行时框架
 
-## 在运行时按模型分发请求
-
-`Models` 集合负责保存这些 provider，并把每次请求路由给真正拥有该模型的 provider。
+`pi-ai` 的核心运行时抽象之一，负责管理 provider 集合、模型目录、认证解析及请求分发。
 
 - 定义了 Provider 接口，规定一个 provider 至少要有：
   - id/name/baseUrl/headers
@@ -1493,12 +1517,20 @@ Provider 工厂导入对应厂商的模型目录和一个懒加载 API 包装器
   - getModels()
   - stream() / streamSimple()
 - 定义了 Models 接口，它不是单个 provider，而是“provider 集合”。
-- ModelsImpl 负责运行时：
+- ModelsImpl 负责运行时：并把每次请求路由给真正拥有该模型的 provider
   - 保存所有 provider
   - 查模型
   - 解析 auth
   - 在 stream() 时找到模型所属 provider 并把请求转发出去
-- createProvider() 是关键装配函数， anthropic.ts 这种 provider 文件最后就是靠它把“模型列表 + auth + api”变成标准 Provider 。
+- 提供 `createModels()` 创建可变运行时集合
+- 提供 `createProvider()` 关键装配函数，anthropic.ts 这种 provider 文件最后就是靠它把“模型列表 + auth + api 实现”组装成标准 Provider
+- 统一计算 token 成本与 thinking level 映射
+
+
+
+调用链：createModels() → ModelsImpl → setProvider(createProvider(...)) → stream()/complete() → applyAuth() → Provider.stream()
+
+### 图片侧运行时 `image-models.ts`
 
 <img src="img/image-20260713203151898.png" alt="image-20260713203151898" style="zoom:50%;" />
 
