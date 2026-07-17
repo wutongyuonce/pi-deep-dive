@@ -21,6 +21,7 @@ import type { MistralOptions } from "./api/mistral-conversations.ts";
 import type { OpenAICodexResponsesOptions } from "./api/openai-codex-responses.ts";
 import type { OpenAICompletionsOptions } from "./api/openai-completions.ts";
 import type { OpenAIResponsesOptions } from "./api/openai-responses.ts";
+import type { PiMessagesOptions } from "./api/pi-messages.ts";
 import type { AssistantMessageDiagnostic } from "./utils/diagnostics.ts";
 import type { AssistantMessageEventStream } from "./utils/event-stream.ts";
 
@@ -45,7 +46,8 @@ export type KnownApi =
 	| "anthropic-messages"
 	| "bedrock-converse-stream"
 	| "google-generative-ai"
-	| "google-vertex";
+	| "google-vertex"
+	| "pi-messages";
 
 // API 标识类型。`KnownApi` 联合类型的超集，允许通过 `string & {}` 扩展自定义 API。
 export type Api = KnownApi | (string & {});
@@ -66,6 +68,7 @@ export type KnownProvider =
 	| "openai"
 	| "azure-openai-responses"
 	| "openai-codex"
+	| "radius"
 	| "nvidia"
 	| "deepseek"
 	| "github-copilot"
@@ -164,6 +167,9 @@ export type ProviderEnv = Record<string, string>;
 
 /** provider 级 HTTP 请求头覆写。`null` 值表示抑制该名称的默认请求头。 */
 export type ProviderHeaders = Record<string, string | null>;
+
+/** session affinity 头格式：`openai` 使用 session ID 查询参数，`openai-nosession` 不传 session，`openrouter` 使用 OpenRouter 风格的头。 */
+export type SessionAffinityFormat = "openai" | "openai-nosession" | "openrouter";
 
 /** provider HTTP 响应的统一结构，包含 HTTP 状态码和响应头。 */
 export interface ProviderResponse {
@@ -267,6 +273,7 @@ export interface ApiOptionsMap {
 	"google-vertex": GoogleVertexOptions;
 	"mistral-conversations": MistralOptions;
 	"bedrock-converse-stream": BedrockOptions;
+	"pi-messages": PiMessagesOptions;
 }
 
 /** 某个 API 的完整流式参数类型；未知 API 则回退到通用形态。 */
@@ -702,8 +709,10 @@ export interface OpenAICompletionsCompat {
 	 * 应用 Anthropic 风格的 `cache_control` 标记。
 	 */
 	cacheControlFormat?: "anthropic";
-	/** 启用缓存时，是否从 `options.sessionId` 发送已知的会话亲和性请求头（`session_id`、`x-client-request-id`、`x-session-affinity`）。默认：false。 */
+	/** Whether to send session-affinity data from `options.sessionId`. Default: false. */
 	sendSessionAffinityHeaders?: boolean;
+	/** Session-affinity header format: `openai` sends `session_id`, `x-client-request-id`, and `x-session-affinity`; `openai-nosession` sends `x-client-request-id` and `x-session-affinity`; `openrouter` sends `x-session-id`. Does not affect the `prompt_cache_key` body param, which is governed by cache retention. Default: auto-detected. */
+	sessionAffinityFormat?: SessionAffinityFormat;
 	/** provider 是否支持长提示缓存保留（`prompt_cache_retention: "24h"` 或 Anthropic 风格 `cache_control.ttl: "1h"`，取决于格式）。默认：true。 */
 	supportsLongCacheRetention?: boolean;
 }
@@ -716,8 +725,8 @@ export interface OpenAICompletionsCompat {
 export interface OpenAIResponsesCompat {
 	/** provider 是否支持 `developer` 角色（相对于 `system`）。默认：true。 */
 	supportsDeveloperRole?: boolean;
-	/** 启用缓存时，是否从 `options.sessionId` 发送 OpenAI 的 `session_id` 缓存亲和性请求头。默认：true。 */
-	sendSessionIdHeader?: boolean;
+	/** Session-affinity header format: `openai` sends `session_id` and `x-client-request-id`; `openai-nosession` sends `x-client-request-id`; `openrouter` sends `x-session-id`. Does not affect the `prompt_cache_key` body param, which is governed by cache retention. Default: auto-detected. */
+	sessionAffinityFormat?: SessionAffinityFormat;
 	/** provider 是否支持 `prompt_cache_retention: "24h"`。默认：true。 */
 	supportsLongCacheRetention?: boolean;
 	/** 模型是否支持客户端执行的延迟工具搜索。默认：false。 */

@@ -1,23 +1,3 @@
-/**
- * OpenAI Chat Completions API 的兼容实现。
- *
- * 文件定位：
- * - 这是 `openai-completions` 协议在 `pi/packages/ai` 中的核心实现
- * - 负责把统一的消息、工具、推理选项翻译成 Chat Completions 请求，
- *   再把兼容端点返回的 SSE chunk 转回框架内部统一的事件流
- *
- * 核心职责：
- * - 统一处理 OpenAI 兼容 provider 的 header、鉴权、cache 和 reasoning 差异
- * - 把 `Context` 转换为 Chat Completions 的 `messages/tools`
- * - 增量解析文本、thinking、tool call 和 usage 信息
- * - 为 DeepSeek、Together、OpenRouter、ZAI 等非标准实现补兼容分支
- *
- * 调用链路：
- * - 各 provider（例如 `providers/deepseek.ts`）声明使用 `openai-completions`
- * - 上层 `stream()` / `streamSimple()` 解析到该 API
- * - 本文件负责真正发起请求并产出统一 assistant 事件
- */
-
 import OpenAI from "openai";
 import type {
 	ChatCompletionAssistantMessageParam,
@@ -64,9 +44,9 @@ import { buildBaseOptions } from "./simple-options.ts";
 import { transformMessages } from "./transform-messages.ts";
 
 /**
- * 判断 headers 里是否已显式提供某个认证头。
- *
- * 定位：请求发起前的轻量检查函数，用来判断能否跳过 API key 校验。
+ * Check if conversation messages contain tool calls or tool results.
+ * This is needed because Anthropic (via proxy) requires the tools param
+ * to be present when messages include tool_calls or tool role messages.
  */
 function hasHeader(headers: ProviderHeaders | undefined, name: string): boolean {
 	if (!headers) return false;
@@ -83,12 +63,6 @@ function getClientApiKey(provider: string, apiKey: string | undefined, headers: 
 	throw new Error(`No API key for provider: ${provider}`);
 }
 
-/**
- * 检查历史消息里是否已经出现过工具调用轨迹。
- *
- * 作用：某些兼容端点要求“只要历史里有 tool_calls / tool 角色消息，就必须继续传 `tools` 字段”，
- * 即使当前轮没有可用工具也一样。
- */
 function hasToolHistory(messages: Message[]): boolean {
 	for (const msg of messages) {
 		if (msg.role === "toolResult") {
@@ -101,6 +75,26 @@ function hasToolHistory(messages: Message[]): boolean {
 		}
 	}
 	return false;
+}
+
+function getDeferredToolNames(messages: Message[]): Set<string> {
+	const names = new Set<string>();
+	for (const message of messages) {
+		if (message.role === "toolResult") {
+			for (const name of message.addedToolNames ?? []) {
+				names.add(name);
+			}
+		}
+	}
+	return names;
+}
+
+function getToolsByName(tools: Tool[] | undefined, names: Iterable<string>): Tool[] {
+	if (!tools) return [];
+	const toolsByName = new Map(tools.map((tool) => [tool.name, tool]));
+	return Array.from(names)
+		.map((name) => toolsByName.get(name))
+		.filter((tool): tool is Tool => tool !== undefined);
 }
 
 function isTextContentBlock(block: { type: string }): block is TextContent {
@@ -143,13 +137,22 @@ interface OpenAICompatCacheControl {
 	ttl?: string;
 }
 
-type ResolvedOpenAICompletionsCompat = Omit<Required<OpenAICompletionsCompat>, "cacheControlFormat"> & {
+type ResolvedOpenAICompletionsCompat = Omit<
+	Required<OpenAICompletionsCompat>,
+	"cacheControlFormat" | "deferredToolsMode"
+> & {
 	cacheControlFormat?: OpenAICompletionsCompat["cacheControlFormat"];
+	deferredToolsMode?: OpenAICompletionsCompat["deferredToolsMode"];
 };
 
 type ResolvedChatTemplateKwargValue = string | number | boolean | null;
 
 type ChatCompletionInstructionMessageParam = ChatCompletionDeveloperMessageParam | ChatCompletionSystemMessageParam;
+
+type KimiToolSystemMessageParam = {
+	role: "system";
+	tools: OpenAI.Chat.Completions.ChatCompletionTool[];
+};
 
 type OpenAIEncryptedReasoningDetail = {
 	type: "reasoning.encrypted";
@@ -175,15 +178,6 @@ function resolveCacheRetention(cacheRetention?: CacheRetention, env?: ProviderEn
 	return "short";
 }
 
-/**
- * OpenAI Chat Completions 的完整参数流式入口。
- *
- * 定位：`openai-completions` 协议的主执行函数，负责串起鉴权、payload 构造、SSE 解析与错误收口。
- *
- * 被谁调用：
- * - `openai-completions.lazy.ts`
- * - 复用该协议的 provider（如 DeepSeek、Moonshot、Together 等）
- */
 export const stream: StreamFunction<"openai-completions", OpenAICompletionsOptions> = (
 	model: Model<"openai-completions">,
 	context: Context,
@@ -211,21 +205,16 @@ export const stream: StreamFunction<"openai-completions", OpenAICompletionsOptio
 		};
 
 		try {
-			// 1. 解析 provider 兼容配置并创建 client。
 			const apiKey = getClientApiKey(model.provider, options?.apiKey, options?.headers);
 			const compat = getCompat(model);
 			const cacheRetention = resolveCacheRetention(options?.cacheRetention, options?.env);
 			const cacheSessionId = cacheRetention === "none" ? undefined : options?.sessionId;
 			const client = createClient(model, context, apiKey, options?.headers, cacheSessionId, compat);
-
-			// 2. 构建 payload，并允许调用方在真正发送前做最后修正。
 			let params = buildParams(model, context, options, compat, cacheRetention);
 			const nextParams = await options?.onPayload?.(params, model);
 			if (nextParams !== undefined) {
 				params = nextParams as OpenAI.Chat.Completions.ChatCompletionCreateParamsStreaming;
 			}
-
-			// 3. 发起请求时统一挂上 signal / timeout / retry 控制。
 			const requestOptions = {
 				...(options?.signal ? { signal: options.signal } : {}),
 				...(options?.timeoutMs !== undefined ? { timeout: options.timeoutMs } : {}),
@@ -244,7 +233,6 @@ export const stream: StreamFunction<"openai-completions", OpenAICompletionsOptio
 			type StreamingBlock = TextContent | ThinkingContent | StreamingToolCallBlock;
 			type StreamingToolCallDelta = NonNullable<ChatCompletionChunk.Choice.Delta["tool_calls"]>[number];
 
-			// 当前流的状态机会逐步把增量片段拼成最终的 assistant message。
 			let textBlock: TextContent | null = null;
 			let thinkingBlock: ThinkingContent | null = null;
 			let hasFinishReason = false;
@@ -402,8 +390,10 @@ export const stream: StreamFunction<"openai-completions", OpenAICompletionsOptio
 						});
 					}
 
-					// 不同兼容端点对“推理内容”字段命名不一致，这里只取首个非空字段，
-					// 避免像 chutes.ai 一样同时返回多个同义字段时出现重复。
+					// Some endpoints return reasoning in reasoning_content (llama.cpp),
+					// or reasoning (other openai compatible endpoints)
+					// Use the first non-empty reasoning field to avoid duplication
+					// (e.g., chutes.ai returns both reasoning_content and reasoning with same content)
 					const reasoningFields = ["reasoning_content", "reasoning", "reasoning_text"];
 					const deltaFields = choice.delta as Record<string, unknown>;
 					let foundReasoningField: string | null = null;
@@ -525,7 +515,6 @@ export const streamSimple: StreamFunction<"openai-completions", SimpleStreamOpti
 	context: Context,
 	options?: SimpleStreamOptions,
 ): AssistantMessageEventStream => {
-	// 简化入口复用完整实现，只在这里补齐通用选项和 reasoning 映射。
 	getClientApiKey(model.provider, options?.apiKey, options?.headers);
 
 	const base = buildBaseOptions(model, context, options, options?.apiKey);
@@ -548,8 +537,6 @@ function createClient(
 	sessionId?: string,
 	compat: ResolvedOpenAICompletionsCompat = getCompat(model),
 ) {
-	// 这里是所有 OpenAI 兼容 provider 的 header 汇合点：
-	// provider 预设、动态 copilot header、session 亲和性、调用方自定义 header 都在这里合并。
 	const headers: ProviderHeaders = { ...model.headers };
 	if (model.provider === "github-copilot") {
 		const hasImages = hasCopilotVisionInput(context.messages);
@@ -561,9 +548,15 @@ function createClient(
 	}
 
 	if (sessionId && compat.sendSessionAffinityHeaders) {
-		headers.session_id = sessionId;
-		headers["x-client-request-id"] = sessionId;
-		headers["x-session-affinity"] = sessionId;
+		if (compat.sessionAffinityFormat === "openrouter") {
+			headers["x-session-id"] = sessionId;
+		} else {
+			if (compat.sessionAffinityFormat === "openai") {
+				headers.session_id = sessionId;
+			}
+			headers["x-client-request-id"] = sessionId;
+			headers["x-session-affinity"] = sessionId;
+		}
 	}
 
 	// Merge options headers last so they can override defaults
@@ -586,7 +579,6 @@ function buildParams(
 	compat: ResolvedOpenAICompletionsCompat = getCompat(model),
 	cacheRetention: CacheRetention = resolveCacheRetention(options?.cacheRetention, options?.env),
 ) {
-	// 先把内部统一消息模型转换成 Chat Completions 可接受的消息数组。
 	const messages = convertMessages(model, context, compat);
 	const cacheControl = getCompatCacheControl(compat, cacheRetention);
 
@@ -622,13 +614,16 @@ function buildParams(
 		params.temperature = options.temperature;
 	}
 
-	if (context.tools && context.tools.length > 0) {
-		params.tools = convertTools(context.tools, compat);
+	const deferredToolNames =
+		compat.deferredToolsMode === "kimi" ? getDeferredToolNames(context.messages) : new Set<string>();
+	const activeTools = context.tools?.filter((tool) => !deferredToolNames.has(tool.name));
+	if (activeTools && activeTools.length > 0) {
+		params.tools = convertTools(activeTools, compat);
 		if (compat.zaiToolStream) {
 			(params as any).tool_stream = true;
 		}
 	} else if (hasToolHistory(context.messages)) {
-		// 某些代理要求历史里出现过工具痕迹后，后续请求即使没有工具定义也必须继续传 `tools: []`。
+		// Anthropic (via LiteLLM/proxy) requires tools param when conversation has tool_calls/tool_results
 		params.tools = [];
 	}
 
@@ -640,7 +635,6 @@ function buildParams(
 		params.tool_choice = options.toolChoice;
 	}
 
-	// reasoning 的字段名在不同兼容实现里差异最大，因此统一集中在这里分流。
 	if (compat.thinkingFormat === "zai" && model.reasoning) {
 		const zaiParams = params as Omit<typeof params, "reasoning_effort"> & {
 			thinking?: { type: "enabled" | "disabled"; clear_thinking?: boolean };
@@ -896,12 +890,6 @@ export function convertMessages(
 ): ChatCompletionMessageParam[] {
 	const params: ChatCompletionMessageParam[] = [];
 
-	/**
-	 * 规范化 tool call ID。
-	 *
-	 * OpenAI Chat Completions 对工具调用 ID 的字符集和长度比较严格，
-	 * 某些上游（尤其是 Responses API 产出的兼容结果）会带管道分隔或超长随机串，这里统一清洗。
-	 */
 	const normalizeToolCallId = (id: string): string => {
 		// Handle pipe-separated IDs from OpenAI Responses API
 		// Format: {call_id}|{id} where {id} can be 400+ chars with special chars (+, /, =)
@@ -919,7 +907,6 @@ export function convertMessages(
 
 	const transformedMessages = transformMessages(context.messages, model, (id) => normalizeToolCallId(id));
 
-	// 推理模型优先用 developer 角色，其余场景继续使用传统 system 角色。
 	if (context.systemPrompt) {
 		const useDeveloperRole = model.reasoning && compat.supportsDeveloperRole;
 		const role = useDeveloperRole ? "developer" : "system";
@@ -930,8 +917,8 @@ export function convertMessages(
 
 	for (let i = 0; i < transformedMessages.length; i++) {
 		const msg = transformedMessages[i];
-		// 某些 provider 不允许 tool result 后直接跟 user，
-		// 这里插一条合成 assistant 消息把对话结构补齐。
+		// Some providers don't allow user messages directly after tool results
+		// Insert a synthetic assistant message to bridge the gap
 		if (compat.requiresAssistantAfterToolResult && lastRole === "toolResult" && msg.role === "user") {
 			params.push({
 				role: "assistant",
@@ -1070,6 +1057,7 @@ export function convertMessages(
 			params.push(assistantMsg);
 		} else if (msg.role === "toolResult") {
 			const imageBlocks: Array<{ type: "image_url"; image_url: { url: string } }> = [];
+			const deferredToolNames = new Set<string>();
 			let j = i;
 
 			for (; j < transformedMessages.length && transformedMessages[j].role === "toolResult"; j++) {
@@ -1095,6 +1083,12 @@ export function convertMessages(
 					(toolResultMsg as any).name = toolMsg.toolName;
 				}
 				params.push(toolResultMsg);
+
+				if (compat.deferredToolsMode === "kimi") {
+					for (const name of toolMsg.addedToolNames ?? []) {
+						deferredToolNames.add(name);
+					}
+				}
 
 				if (hasImages && model.input.includes("image")) {
 					for (const block of toolMsg.content) {
@@ -1133,6 +1127,18 @@ export function convertMessages(
 				lastRole = "user";
 			} else {
 				lastRole = "toolResult";
+			}
+
+			if (deferredToolNames.size > 0) {
+				const deferredTools = getToolsByName(context.tools, deferredToolNames);
+				if (deferredTools.length > 0) {
+					const kimiToolMessage: KimiToolSystemMessageParam = {
+						role: "system",
+						tools: convertTools(deferredTools, compat),
+					};
+					// Kimi accepts a system message with tools but omits the standard content field.
+					params.push(kimiToolMessage as unknown as ChatCompletionMessageParam);
+				}
 			}
 			continue;
 		}
@@ -1229,7 +1235,6 @@ function mapStopReason(reason: ChatCompletionChunk.Choice["finish_reason"] | str
  * entries override these detected values.
  */
 function detectCompat(model: Model<"openai-completions">): ResolvedOpenAICompletionsCompat {
-	// 兼容配置先按 provider/baseUrl 做启发式探测，再允许 model.compat 精确覆盖。
 	const provider = model.provider;
 	const baseUrl = model.baseUrl;
 
@@ -1302,6 +1307,8 @@ function detectCompat(model: Model<"openai-completions">): ResolvedOpenAIComplet
 		supportsStrictMode: !isMoonshot && !isTogether && !isCloudflareAiGateway && !isNvidia,
 		cacheControlFormat,
 		sendSessionAffinityHeaders: false,
+		deferredToolsMode: undefined,
+		sessionAffinityFormat: isOpenRouter ? "openrouter" : "openai",
 		supportsLongCacheRetention: !(
 			isTogether ||
 			isCloudflareWorkersAI ||
@@ -1317,7 +1324,6 @@ function detectCompat(model: Model<"openai-completions">): ResolvedOpenAIComplet
  * Auto-detects from provider/URL then overrides with explicit model.compat.
  */
 function getCompat(model: Model<"openai-completions">): ResolvedOpenAICompletionsCompat {
-	// 最终配置 = 自动探测默认值 + 模型显式覆写值。
 	const detected = detectCompat(model);
 	if (!model.compat) return detected;
 
@@ -1342,6 +1348,8 @@ function getCompat(model: Model<"openai-completions">): ResolvedOpenAICompletion
 		supportsStrictMode: model.compat.supportsStrictMode ?? detected.supportsStrictMode,
 		cacheControlFormat: model.compat.cacheControlFormat ?? detected.cacheControlFormat,
 		sendSessionAffinityHeaders: model.compat.sendSessionAffinityHeaders ?? detected.sendSessionAffinityHeaders,
+		deferredToolsMode: model.compat.deferredToolsMode ?? detected.deferredToolsMode,
+		sessionAffinityFormat: model.compat.sessionAffinityFormat ?? detected.sessionAffinityFormat,
 		supportsLongCacheRetention: model.compat.supportsLongCacheRetention ?? detected.supportsLongCacheRetention,
 	};
 }

@@ -13,6 +13,11 @@
 对应项目版本：0.80.6
 最后一个 commit：Jul 13, 2026 fix(ai): route GitHub Copilot MAI-Code models through /responses endpoint (#6544)
 
+0.80.10
+Commits on Jul 17, 2026
+Add [Unreleased] section for next cycle
+
+
 ## 关于 Pi
 
 [Pi](https://pi.dev) 是一个基于 TypeScript 构建的自扩展编程 Agent，采用 npm workspace monorepo 架构，核心包含四层：

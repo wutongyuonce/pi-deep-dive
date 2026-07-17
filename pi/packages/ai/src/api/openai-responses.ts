@@ -1,23 +1,3 @@
-/**
- * OpenAI Responses API 的流式实现。
- *
- * 文件定位：
- * - 这是 `openai-responses` 协议在 `pi/packages/ai` 中的核心实现
- * - 负责把统一的 `Context` / `Tool` / `StreamOptions` 转成 OpenAI Responses 请求，
- *   并把返回的流式事件重新整理成框架内部统一的 assistant 事件流
- *
- * 核心职责：
- * - 解析 provider 认证方式与兼容参数
- * - 构建 OpenAI SDK client 和 Responses payload
- * - 处理 prompt cache、reasoning、service tier、deferred tools 等扩展能力
- * - 复用 `openai-responses-shared.ts` 将原始响应翻译成统一事件协议
- *
- * 调用链路：
- * - `providers/openai.ts` / 其他复用 Responses 协议的 provider 先注册 API
- * - 上层 `stream()` / `streamSimple()` 选中 `openai-responses`
- * - 本文件的 `stream()` / `streamSimple()` 发起请求并产出统一事件流
- */
-
 import OpenAI from "openai";
 import type { ResponseCreateParamsStreaming } from "openai/resources/responses/responses.js";
 import { clampThinkingLevel } from "../models.ts";
@@ -64,13 +44,13 @@ function getClientApiKey(provider: string, apiKey: string | undefined, headers: 
 	throw new Error(`No API key for provider: ${provider}`);
 }
 
+function detectSessionAffinityFormat(model: Pick<Model<"openai-responses">, "provider" | "baseUrl">) {
+	return model.provider === "openrouter" || model.baseUrl.includes("openrouter.ai") ? "openrouter" : "openai";
+}
+
 /**
- * 解析缓存保留策略。
- *
- * 优先级：
- * - 显式传入的 `cacheRetention`
- * - provider 环境变量里的 `PI_CACHE_RETENTION`
- * - 默认值 `"short"`
+ * Resolve cache retention preference.
+ * Defaults to "short" and uses PI_CACHE_RETENTION for backward compatibility.
  */
 function resolveCacheRetention(cacheRetention?: CacheRetention, env?: ProviderEnv): CacheRetention {
 	if (cacheRetention) {
@@ -85,7 +65,7 @@ function resolveCacheRetention(cacheRetention?: CacheRetention, env?: ProviderEn
 function getCompat(model: Model<"openai-responses">): Required<OpenAIResponsesCompat> {
 	return {
 		supportsDeveloperRole: model.compat?.supportsDeveloperRole ?? true,
-		sendSessionIdHeader: model.compat?.sendSessionIdHeader ?? true,
+		sessionAffinityFormat: model.compat?.sessionAffinityFormat ?? detectSessionAffinityFormat(model),
 		supportsLongCacheRetention: model.compat?.supportsLongCacheRetention ?? true,
 		supportsToolSearch: model.compat?.supportsToolSearch ?? false,
 	};
@@ -102,26 +82,16 @@ function formatOpenAIResponsesError(error: unknown): string {
 	return formatProviderError(normalizeProviderError(error), "OpenAI API error");
 }
 
-/** OpenAI Responses 特有的流式参数。 */
+// OpenAI Responses-specific options
 export interface OpenAIResponsesOptions extends StreamOptions {
 	reasoningEffort?: "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 	reasoningSummary?: "auto" | "detailed" | "concise" | null;
 	serviceTier?: ResponseCreateParamsStreaming["service_tier"];
+	toolChoice?: ResponseCreateParamsStreaming["tool_choice"];
 }
 
 /**
- * OpenAI Responses 的完整参数流式入口。
- *
- * 定位：`openai-responses` 协议的主执行函数，负责把一次统一请求完整落到 SDK 调用上。
- *
- * 被谁调用：
- * - `openai-responses.lazy.ts`
- * - 所有复用 Responses API 的 provider
- *
- * 调用了谁：
- * - `createClient()` 创建 OpenAI SDK client
- * - `buildParams()` 构建请求 payload
- * - `processResponsesStream()` 处理返回的增量事件
+ * Generate function for OpenAI Responses API
  */
 export const stream: StreamFunction<"openai-responses", OpenAIResponsesOptions> = (
 	model: Model<"openai-responses">,
@@ -130,7 +100,7 @@ export const stream: StreamFunction<"openai-responses", OpenAIResponsesOptions> 
 ): AssistantMessageEventStream => {
 	const stream = new AssistantMessageEventStream();
 
-	// 立即返回事件流，真正的网络请求在后台异步执行。
+	// Start async processing
 	(async () => {
 		const output: AssistantMessage = {
 			role: "assistant",
@@ -151,27 +121,21 @@ export const stream: StreamFunction<"openai-responses", OpenAIResponsesOptions> 
 		};
 
 		try {
-			// 1. 解析认证、缓存策略并构造 SDK client。
+			// Create OpenAI client
 			const apiKey = getClientApiKey(model.provider, options?.apiKey, options?.headers);
 			const cacheRetention = resolveCacheRetention(options?.cacheRetention, options?.env);
 			const cacheSessionId = cacheRetention === "none" ? undefined : options?.sessionId;
 			const client = createClient(model, context, apiKey, options?.headers, cacheSessionId);
-
-			// 2. 构建请求体，并给上层一个最后改写 payload 的机会。
 			let params = buildParams(model, context, options);
 			const nextParams = await options?.onPayload?.(params, model);
 			if (nextParams !== undefined) {
 				params = nextParams as ResponseCreateParamsStreaming;
 			}
-
-			// 3. 转发请求级控制选项。
 			const requestOptions = {
 				...(options?.signal ? { signal: options.signal } : {}),
 				...(options?.timeoutMs !== undefined ? { timeout: options.timeoutMs } : {}),
 				maxRetries: options?.maxRetries ?? 0,
 			};
-
-			// 4. 发起请求后，统一交给共享流处理器拆解 Responses 事件。
 			const { data: openaiStream, response } = await client.responses.create(params, requestOptions).withResponse();
 			await options?.onResponse?.({ status: response.status, headers: headersToRecord(response.headers) }, model);
 			stream.push({ type: "start", partial: output });
@@ -212,7 +176,6 @@ export const streamSimple: StreamFunction<"openai-responses", SimpleStreamOption
 	context: Context,
 	options?: SimpleStreamOptions,
 ): AssistantMessageEventStream => {
-	// 简化入口先做一次鉴权校验，保证报错时机与完整入口一致。
 	getClientApiKey(model.provider, options?.apiKey, options?.headers);
 
 	const base = buildBaseOptions(model, context, options, options?.apiKey);
@@ -232,7 +195,6 @@ function createClient(
 	optionsHeaders?: ProviderHeaders,
 	sessionId?: string,
 ) {
-	// 不同 provider 会共用这套实现，这里集中处理 header 差异和会话亲和性。
 	const compat = getCompat(model);
 	const headers: ProviderHeaders = { ...model.headers };
 	if (model.provider === "github-copilot") {
@@ -245,10 +207,14 @@ function createClient(
 	}
 
 	if (sessionId) {
-		if (compat.sendSessionIdHeader) {
-			headers.session_id = sessionId;
+		if (compat.sessionAffinityFormat === "openrouter") {
+			headers["x-session-id"] = sessionId;
+		} else {
+			if (compat.sessionAffinityFormat === "openai") {
+				headers.session_id = sessionId;
+			}
+			headers["x-client-request-id"] = sessionId;
 		}
-		headers["x-client-request-id"] = sessionId;
 	}
 
 	// Merge options headers last so they can override defaults
@@ -265,8 +231,6 @@ function createClient(
 }
 
 function buildParams(model: Model<"openai-responses">, context: Context, options?: OpenAIResponsesOptions) {
-	// `splitDeferredTools()` 会把不能立即暴露的工具拆出去，
-	// 这样既能兼容 tool search / tool reference，又不会污染首轮请求。
 	const compat = getCompat(model);
 	const toolPlacement = splitDeferredTools(context, compat.supportsToolSearch);
 	const messages = convertResponsesMessages(model, context, OPENAI_TOOL_CALL_PROVIDERS, {
@@ -299,9 +263,11 @@ function buildParams(model: Model<"openai-responses">, context: Context, options
 		params.tools = convertResponsesTools(toolPlacement.immediate);
 	}
 
+	if (options?.toolChoice !== undefined) {
+		params.tool_choice = options.toolChoice;
+	}
+
 	if (model.reasoning) {
-		// Responses API 的 reasoning 配置是一个嵌套对象；
-		// 没显式开启时，部分 provider 还需要传一个“关闭推理”的值来保持行为稳定。
 		if (options?.reasoningEffort || options?.reasoningSummary) {
 			const effort = options?.reasoningEffort
 				? (model.thinkingLevelMap?.[options.reasoningEffort] ?? options.reasoningEffort)
@@ -316,6 +282,7 @@ function buildParams(model: Model<"openai-responses">, context: Context, options
 				effort: (model.thinkingLevelMap?.off ?? "none") as NonNullable<typeof params.reasoning>["effort"],
 			};
 		}
+		if (model.provider === "xai") params.include = ["reasoning.encrypted_content"];
 	}
 
 	return params;

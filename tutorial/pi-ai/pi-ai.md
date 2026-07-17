@@ -309,7 +309,6 @@ for (const block of response.content) {
 | image-models.ts           | 图片模型查询层       | `getImageModel`、`getImageModels`、`getImageProviders`       | 外部调用者                                                 | `image-models.generated.ts`            |
 | models.generated.ts       | 生成产物             | 文本模型元信息常量 `MODELS`（35 个 provider 合集）              | `providers/all.ts`                                        | 无                                     |
 | image-models.generated.ts | 生成产物             | 图片模型元信息常量 `IMAGE_MODELS`                            | `image-models.ts`                                          | 无                                     |
-| env-api-keys.ts           | 认证发现层           | `findEnvKeys`、`getEnvApiKey`                                | provider、外部调用者                                       | Node/Bun 环境变量 / ADC / AWS 凭证 |
 | session-resources.ts      | 会话资源清理注册表   | `registerSessionResourceCleanup`、`cleanupSessionResources`  | 需要维护 session 资源的 provider                           | cleanup 回调集合                   |
 | oauth.ts                  | OAuth 导出入口       | re-export `utils/oauth/` 的全部 OAuth 能力（登录、刷新、凭据管理） | 需要 OAuth 登录的外部调用者                                | `utils/oauth/index.ts`                |
 
@@ -319,16 +318,10 @@ for (const block of response.content) {
 
 核心文件：
 
-
-
-- resolve.ts — 统一解析：锁、过期检查、刷新、env fallback 全自动
-- helpers.ts — envApiKeyAuth() 工厂（30+ provider 在用）
-- credential-store.ts — 默认 InMemoryCredentialStore
-
 | 文件                | 定位                   | 核心功能 / 关键导出                                | 主要被谁调用               |
 | ------------------- | ---------------------- | -------------------------------------------------- | -------------------------- |
 | types.ts            | 认证类型定义           | `CredentialStore`、`ApiKeyCredential`、`OAuthCredential`、`Credential`、`ApiKeyAuth`、`OAuthAuth`、`ProviderAuth` | `models.ts`、各 provider   |
-| resolve.ts          | 认证解析核心           | `resolveProviderAuth()`、`ModelsError`             | `models.ts` 的 `applyAuth()` |
+| resolve.ts          | 认证解析核心           | `resolveProviderAuth()`（统一解析：锁、过期检查、刷新、env fallback 全自动）、`ModelsError` | `models.ts` 的 `applyAuth()` |
 | credential-store.ts | 凭证存储               | `InMemoryCredentialStore`（默认内存实现）          | `models.ts`、外部登录流程  |
 | context.ts          | 认证上下文             | `defaultProviderAuthContext()`（跨平台 env/fileExists） | `resolve.ts`               |
 | helpers.ts          | 认证辅助工厂           | `envApiKeyAuth()`、`oauthAuth()` 等工厂函数        | 各 provider 定义           |
@@ -395,6 +388,10 @@ typebox-helpers.ts 帮你写 schema， validation.ts 用 schema 校验参数。
 | anthropic.ts      | Anthropic OAuth   | `loginAnthropic`、`refreshAnthropicToken`       |
 | github-copilot.ts | GitHub Copilot OAuth | `loginGitHubCopilot`、`refreshGitHubCopilotToken` |
 | openai-codex.ts   | OpenAI Codex OAuth| 登录和 token 刷新                               |
+
+ai changelog
+
+coding-agent docs/ changelog
 
 ### `scripts/` 
 

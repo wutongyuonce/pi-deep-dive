@@ -1,23 +1,18 @@
-/**
- * provider / model 运行时管理层。
- *
- * 文件定位：`pi-ai` 的核心运行时抽象之一，负责管理 provider 集合、模型目录、认证解析及请求分发。
- *
- * 核心职责：
- * - 定义 `Provider`、`Models` 等核心接口
- * - 提供 `createModels()` 创建可变运行时集合
- * - 提供 `createProvider()` 将模型列表、auth 和 API 实现组装成统一 provider
- * - 统一计算 token 成本与 thinking level 映射
- *
- * 典型调用链：
- *   createModels() → ModelsImpl → setProvider(createProvider(...)) → stream()/complete() → applyAuth() → Provider.stream()
- */
-
 import { lazyStream } from "./api/lazy.ts";
 import { defaultProviderAuthContext as defaultAuthContext } from "./auth/context.ts";
 import { InMemoryCredentialStore } from "./auth/credential-store.ts";
-import { ModelsError, resolveProviderAuth } from "./auth/resolve.ts";
-import type { AuthContext, AuthResult, CredentialStore, ProviderAuth } from "./auth/types.ts";
+import { type AuthResolutionOverrides, ModelsError, resolveProviderAuth } from "./auth/resolve.ts";
+import type {
+	AuthCheck,
+	AuthContext,
+	AuthInteraction,
+	AuthResult,
+	AuthType,
+	Credential,
+	CredentialStore,
+	ProviderAuth,
+} from "./auth/types.ts";
+import { InMemoryModelsStore, type ModelsStore, type ProviderModelsStore } from "./models-store.ts";
 import type {
 	Api,
 	ApiStreamOptions,
@@ -34,18 +29,48 @@ import type {
 	Usage,
 } from "./types.ts";
 
-export { type AuthModel, ModelsError, type ModelsErrorCode } from "./auth/resolve.ts";
+export { ModelsError, type ModelsErrorCode } from "./auth/resolve.ts";
+
+export interface RefreshModelsContext {
+	/** Effective configured credential. OAuth credentials are refreshed before network access. */
+	credential?: Credential;
+	/** Persistent model storage scoped to this provider ID. */
+	store: ProviderModelsStore;
+	/** False during offline/cache-only initialization. */
+	allowNetwork: boolean;
+	/** Bypass provider freshness checks and fetch immediately when network access is allowed. */
+	force?: boolean;
+	signal?: AbortSignal;
+}
+
+export interface ModelsRefreshOptions {
+	allowNetwork?: boolean;
+	/** Bypass provider freshness checks and fetch immediately when network access is allowed. */
+	force?: boolean;
+	signal?: AbortSignal;
+}
+
+export interface ModelsRefreshResult {
+	aborted: boolean;
+	errors: ReadonlyMap<string, Error>;
+}
+
+export interface ModelsStreamTransforms {
+	/** Transform fully assembled model/auth/request headers before provider dispatch. */
+	transformHeaders?: (headers: ProviderHeaders) => ProviderHeaders | Promise<ProviderHeaders>;
+}
+
+export type ModelsApiStreamOptions<TApi extends Api> = ApiStreamOptions<TApi> & ModelsStreamTransforms;
+export type ModelsSimpleStreamOptions = SimpleStreamOptions & ModelsStreamTransforms;
 
 /**
- * Provider 封装 AI 服务提供者的标识、认证、模型目录和流式能力，是 `Models` 集合的基本管理单元。
+ * A provider is the concrete runtime unit. It owns id/name/base metadata,
+ * auth methods, model listing, and stream behavior.
  *
- * `TApi` 允许具体 provider 工厂声明其模型使用的 API 协议
- * （如 `openaiProvider(): Provider<"openai-responses" | "openai-completions">`），
- * 为直接调用工厂的用户提供类型化模型列表。在 `Models`
- * 集合内部，provider 以 `Provider<Api>` 持有。
- *
- * 被谁调用：`ModelsImpl` 持有并管理 Provider 实例；Provider 工厂函数返回该类型。
- * 调用了谁：依赖 `ProviderAuth` 完成认证解析；依赖 `ProviderStreams` 完成流式分发。
+ * `TApi` lets concrete provider factories declare which APIs their models
+ * use (e.g. `openaiProvider(): Provider<"openai-responses" | "openai-completions">`),
+ * giving typed model lists to direct factory users. Inside a `Models`
+ * collection providers are held as `Provider<Api>`.
  */
 export interface Provider<TApi extends Api = Api> {
 	readonly id: string;
@@ -55,199 +80,174 @@ export interface Provider<TApi extends Api = Api> {
 	readonly headers?: ProviderHeaders;
 
 	/**
-	 * 声明 provider 的认证方式与解析逻辑。每个 provider 都必须有认证语义——
-	 * 即使只使用环境变量、AWS profile、ADC 等环境凭证，
-	 * 或通过 keyless 本地服务接入的 provider，也需提供 `apiKey` 认证，
-	 * 其 `resolve()` 报告 provider 是否已配置。
-	 *
-	 * `Models.getAuth()` 在 provider 未配置时返回 undefined。
+	 * Required: at least one of `apiKey`/`oauth`. Every provider has auth
+	 * semantics — even providers with only ambient credentials (env vars, AWS
+	 * profiles, ADC files) and keyless local servers provide `apiKey` auth
+	 * whose `resolve()` reports whether the provider is configured.
+	 * `Models.getAuth()` returns undefined when the provider is unconfigured.
 	 */
 	readonly auth: ProviderAuth;
 
 	/**
-	 * 同步获取当前已知的模型列表。
-	 * 静态 provider 直接返回内置目录；动态 provider 返回最近一次 `refreshModels()` 后的列表（首次 refresh 前为空）。
-	 *
-	 * 约束：不得抛出异常；`Models` 将抛异常的 provider 视为无模型。
+	 * Current known models, sync. Static providers return their catalog;
+	 * dynamic providers return the list as of the last `refreshModels()`
+	 * (empty before the first). Must not throw; `Models` treats a throwing
+	 * implementation as having no models.
 	 */
 	getModels(): readonly Model<TApi>[];
 
 	/**
-	 * 动态 provider 专用：拉取并更新模型列表。无副作用的模型发现（不涉及下载或加载）。
-	 * 并发调用共享同一个进行中的请求（去重）。可能 reject（网络错误，失败时列表保留在上次已知状态，后续可重试）。
-	 *
-	 * 被谁调用：`ModelsImpl.refresh()`。
+	 * Dynamic providers only: restore the provider-scoped stored catalog and optionally fetch
+	 * a newer list using the effective credential. Implementations must retain their previous
+	 * list on failure and honor the shared abort signal for network requests.
 	 */
-	refreshModels?(): Promise<void>;
+	refreshModels?(context: RefreshModelsContext): Promise<void>;
 
 	/**
-	 * 完整参数流式调用，向模型发送请求并返回助手消息事件流。
-	 * 被谁调用：`ModelsImpl.stream()` 在解析 auth 后委托调用。
+	 * Optional provider policy for credential-specific model availability.
+	 * `getModels()` remains the complete synchronous catalog; `Models.getAvailable()`
+	 * applies this filter after confirming that provider auth is configured.
 	 */
+	filterModels?(models: readonly Model<TApi>[], credential: Credential | undefined): readonly Model<TApi>[];
+
 	stream<T extends TApi>(
 		model: Model<T>,
 		context: Context,
 		options?: ApiStreamOptions<T>,
 	): AssistantMessageEventStream;
 
-	/**
-	 * 简化参数流式调用，使用 `SimpleStreamOptions`（含 reasoning 档位）进行流式请求。
-	 * 被谁调用：`ModelsImpl.streamSimple()`。
-	 */
 	streamSimple(model: Model<TApi>, context: Context, options?: SimpleStreamOptions): AssistantMessageEventStream;
 }
 
 /**
- * 应用层与 provider 层之间的协调层，解析认证并将每个请求委托给拥有该模型的 provider。
- *
- * 被谁调用：`compat.ts` 兼容层、CLI 工具、应用层代码。
- * 调用了谁：`resolveProviderAuth()`（认证解析）、`Provider.stream()`（流式分发）。
+ * Runtime collection of providers plus auth application and stream
+ * convenience. Providers own stream behavior; `Models` resolves auth and
+ * delegates each request to the provider that owns the model.
  */
 export interface Models {
-	/** 同步返回当前集合中的所有 provider 实例。 */
 	getProviders(): readonly Provider[];
-
-	/** 按 id 查找单个 provider，未找到返回 undefined。 */
 	getProvider(id: string): Provider | undefined;
 
 	/**
-	 * 按 provider id 过滤或返回全部已知模型。尽力而为：`getModels()` 抛异常的 provider 不贡献模型。
-	 * 调用了谁：`Provider.getModels()`。
+	 * Sync read of last-known models from one provider or all providers.
+	 * Best-effort: a provider whose `getModels()` throws yields no models.
 	 */
 	getModels(provider?: string): readonly Model<Api>[];
 
 	/**
-	 * 在给定 provider 的已知模型中查找匹配 id 的模型。
-	 * 动态模型列表的类型为 `Model<Api>`；可通过 `hasApi()` 类型守卫收窄。
-	 * 调用了谁：`Provider.getModels()`。
+	 * Sync runtime model lookup against last-known lists. Dynamic model lists
+	 * are typed as `Model<Api>`; narrow with the `hasApi()` type guard.
 	 */
 	getModel(provider: string, id: string): Model<Api> | undefined;
 
 	/**
-	 * 要求动态 provider 重新获取模型列表。指定 provider id 时，该 provider 拉取失败则 reject 并抛出
-	 * `ModelsError("model_source")`；不指定则并发刷新所有 provider（尽力而为）。静态 provider 为无操作。
-	 * 调用了谁：`Provider.refreshModels()`。
+	 * Refresh every configured dynamic provider concurrently. Provider errors and cancellation
+	 * are returned without rejecting; static and unconfigured providers are skipped.
 	 */
-	refresh(provider?: string): Promise<void>;
+	refresh(options?: ModelsRefreshOptions): Promise<ModelsRefreshResult>;
+
+	/** Check whether a provider has complete auth configuration without refreshing OAuth. */
+	checkAuth(providerId: string): Promise<AuthCheck | undefined>;
+
+	/** Return models whose providers have complete auth configuration. */
+	getAvailable(providerId?: string): Promise<readonly Model<Api>[]>;
 
 	/**
-	 * 为模型解析请求认证，包含用于状态 UI 的来源标签。provider 未知或未配置时返回
-	 * `undefined`。token 刷新失败时 reject `ModelsError("oauth")`
-	 * （凭证保留供重试，重新登录可修复）；api-key 或凭证存储失败时 reject `ModelsError("auth")`。
-	 * 被谁调用：`ModelsImpl.applyAuth()` 每次流式请求前。
-	 * 调用了谁：`resolveProviderAuth()`。
+	 * Resolve provider-scoped auth by provider id, or provider auth plus static
+	 * model headers when passed a model. Includes a source label for status UI.
+	 * Resolves `undefined` when the provider is unknown or unconfigured.
+	 * Rejects with `ModelsError`: code "oauth" when a token refresh fails (the
+	 * stored credential is preserved for retry; re-login fixes it), code "auth"
+	 * when api-key resolution or the credential store fails. Request paths
+	 * surface rejections as stream errors.
 	 */
-	getAuth(model: Model<Api>): Promise<AuthResult | undefined>;
+	getAuth(providerId: string, overrides?: AuthResolutionOverrides): Promise<AuthResult | undefined>;
+	getAuth(model: Model<Api>, overrides?: AuthResolutionOverrides): Promise<AuthResult | undefined>;
 
-	/**
-	 * 完整参数流式入口：解析认证后将请求分发给模型所属的 provider。
-	 * 调用了谁：`applyAuth()` → `Provider.stream()`。
-	 */
+	/** Run a provider-owned login flow and persist its returned credential. */
+	login(providerId: string, type: AuthType, interaction: AuthInteraction): Promise<Credential>;
+
+	/** Remove the stored credential for a provider. */
+	logout(providerId: string): Promise<void>;
+
 	stream<TApi extends Api>(
 		model: Model<TApi>,
 		context: Context,
-		options?: ApiStreamOptions<TApi>,
+		options?: ModelsApiStreamOptions<TApi>,
 	): AssistantMessageEventStream;
 
-	/**
-	 * 完整参数一次性调用：发起流式请求并等待 `AssistantMessage` 结果。
-	 * 调用了谁：`stream()` → `AssistantMessageEventStream.result()`。
-	 */
 	complete<TApi extends Api>(
 		model: Model<TApi>,
 		context: Context,
-		options?: ApiStreamOptions<TApi>,
+		options?: ModelsApiStreamOptions<TApi>,
 	): Promise<AssistantMessage>;
 
-	/**
-	 * 简化参数流式入口，使用 `SimpleStreamOptions` 进行流式请求。
-	 * 调用了谁：`applyAuth()` → `Provider.streamSimple()`。
-	 */
-	streamSimple(model: Model<Api>, context: Context, options?: SimpleStreamOptions): AssistantMessageEventStream;
-
-	/**
-	 * 简化参数一次性调用：使用简化参数发起流式请求并等待完整结果。
-	 * 调用了谁：`streamSimple()` → `AssistantMessageEventStream.result()`。
-	 */
-	completeSimple(model: Model<Api>, context: Context, options?: SimpleStreamOptions): Promise<AssistantMessage>;
+	streamSimple(model: Model<Api>, context: Context, options?: ModelsSimpleStreamOptions): AssistantMessageEventStream;
+	completeSimple(model: Model<Api>, context: Context, options?: ModelsSimpleStreamOptions): Promise<AssistantMessage>;
 }
 
-/**
- * `Models` 的可变扩展，允许运行时动态添加、删除、清空 provider。
- * 被谁调用：`createModels()` 工厂返回此接口。
- */
 export interface MutableModels extends Models {
-	/** 按 provider.id 新增或替换。Provider id 全局唯一。 */
+	/** Upsert/replace by provider.id. Provider ids are unique. */
 	setProvider(provider: Provider): void;
-	/** 按 id 移除一个 provider。 */
 	deleteProvider(id: string): void;
-	/** 清空所有已注册的 provider。 */
 	clearProviders(): void;
 }
 
-/**
- * `createModels()` 的可选配置参数，允许外部注入自定义凭证存储和认证上下文。
- */
 export interface CreateModelsOptions {
-	/** 凭证存储实现，默认使用 `InMemoryCredentialStore`。 */
 	credentials?: CredentialStore;
-	/** 认证上下文，默认使用 `defaultProviderAuthContext()`。 */
+	modelsStore?: ModelsStore;
 	authContext?: AuthContext;
 }
 
-/**
- * provider 运行时集合的核心实现：管理 provider 注册表、凭证存储、认证解析，
- * 并提供 `stream` / `complete` / `streamSimple` / `completeSimple` 四个调用入口。
- *
- * 被谁调用：`createModels()` 创建实例。
- * 调用了谁：`resolveProviderAuth()`（认证解析）、`lazyStream()`（延迟流包装）、`Provider.stream()`（流式分发）。
- */
+function mergeHeaders(
+	base: ProviderHeaders | undefined,
+	override: ProviderHeaders | undefined,
+): ProviderHeaders | undefined {
+	if (!base && !override) return undefined;
+	const merged = { ...base };
+	for (const [name, value] of Object.entries(override ?? {})) {
+		const lowerName = name.toLowerCase();
+		for (const existingName of Object.keys(merged)) {
+			if (existingName.toLowerCase() === lowerName) delete merged[existingName];
+		}
+		merged[name] = value;
+	}
+	return merged;
+}
+
 class ModelsImpl implements MutableModels {
 	private providers = new Map<string, Provider>();
 	private credentials: CredentialStore;
+	private modelsStore: ModelsStore;
 	private authContext: AuthContext;
 
-	/**
-	 * 初始化 provider 集合、凭证存储和认证上下文。
-	 * 被谁调用：`createModels()` 工厂函数。
-	 */
 	constructor(options?: CreateModelsOptions) {
-		// 凭证存储默认使用内存实现；authContext 默认使用标准 provider 认证上下文。
 		this.credentials = options?.credentials ?? new InMemoryCredentialStore();
+		this.modelsStore = options?.modelsStore ?? new InMemoryModelsStore();
 		this.authContext = options?.authContext ?? defaultAuthContext();
 	}
 
-	/** 按 provider.id 新增或替换。 */
 	setProvider(provider: Provider): void {
 		this.providers.set(provider.id, provider);
 	}
 
-	/** 按 id 移除，不存在则无操作。 */
 	deleteProvider(id: string): void {
 		this.providers.delete(id);
 	}
 
-	/** 清空所有已注册的 provider。 */
 	clearProviders(): void {
 		this.providers.clear();
 	}
 
-	/** 以只读数组形式返回当前全部 provider 实例。 */
 	getProviders(): readonly Provider[] {
 		return Array.from(this.providers.values());
 	}
 
-	/** O(1) Map 查找，未找到返回 undefined。 */
 	getProvider(id: string): Provider | undefined {
 		return this.providers.get(id);
 	}
 
-	/**
-	 * 同步读取模型列表。指定 provider 时只返回该 provider 的模型（不存在则返回空数组）；
-	 * 不指定时返回所有 provider 的模型合集。单个 provider 抛出异常时被静默跳过。
-	 */
 	getModels(provider?: string): readonly Model<Api>[] {
-		// 单 provider 查找：不存在则返回空；getModels 抛异常时也返回空。
 		if (provider !== undefined) {
 			const entry = this.providers.get(provider);
 			if (!entry) return [];
@@ -258,61 +258,200 @@ class ModelsImpl implements MutableModels {
 			}
 		}
 
-		// 全量遍历：逐个收集各 provider 的模型，异常 provider 跳过。
 		const models: Model<Api>[] = [];
 		for (const entry of this.providers.values()) {
 			try {
 				models.push(...entry.getModels());
 			} catch {
-				// 尽力而为：行为异常的 provider 不贡献任何模型。
+				// Best-effort: ill-behaved providers yield no models.
 			}
 		}
 		return models;
 	}
 
-	/** 在指定 provider 的已知模型列表中按 model.id 查找。 */
 	getModel(provider: string, id: string): Model<Api> | undefined {
 		return this.getModels(provider).find((model) => model.id === id);
 	}
 
-	/**
-	 * 刷新动态 provider 的模型列表。单 provider 刷新失败时包装为 `ModelsError("model_source")` 抛出；
-	 * 全量刷新使用 `Promise.allSettled` 并发执行，任意单个失败不影响其他。
-	 * 调用了谁：`Provider.refreshModels()`。
-	 */
-	async refresh(provider?: string): Promise<void> {
-		// 单 provider 刷新：查找失败或静态 provider 直接返回；网络错误包装为 ModelsError 抛出。
-		if (provider !== undefined) {
-			const entry = this.providers.get(provider);
-			if (!entry?.refreshModels) return;
-			try {
-				await entry.refreshModels();
-			} catch (error) {
-				if (error instanceof ModelsError) throw error;
-				throw new ModelsError("model_source", `Model refresh failed for ${provider}`, { cause: error });
-			}
-			return;
+	async refresh(options: ModelsRefreshOptions = {}): Promise<ModelsRefreshResult> {
+		const allowNetwork = options.allowNetwork ?? true;
+		const errors = new Map<string, Error>();
+		const refreshable = Array.from(this.providers.values()).filter(
+			(provider): provider is Provider & Required<Pick<Provider, "refreshModels">> =>
+				provider.refreshModels !== undefined,
+		);
+
+		await Promise.all(
+			refreshable.map(async (provider) => {
+				if (options.signal?.aborted) return;
+				const store: ProviderModelsStore = {
+					read: () => this.modelsStore.read(provider.id),
+					write: (entry) => this.modelsStore.write(provider.id, entry),
+					delete: () => this.modelsStore.delete(provider.id),
+				};
+				let stored: Credential | undefined;
+				try {
+					stored = await this.readCredential(provider.id);
+					const credential = await this.resolveRefreshCredential(provider, stored, allowNetwork, options.signal);
+					if (!credential) return;
+					await provider.refreshModels({
+						credential,
+						store,
+						allowNetwork,
+						force: options.force,
+						signal: options.signal,
+					});
+				} catch (error) {
+					if (!options.signal?.aborted) {
+						errors.set(
+							provider.id,
+							error instanceof Error
+								? error
+								: new ModelsError("model_source", `Model refresh failed for ${provider.id}`, { cause: error }),
+						);
+					}
+					try {
+						await provider.refreshModels({
+							credential: stored,
+							store,
+							allowNetwork: false,
+							signal: options.signal,
+						});
+					} catch {
+						// Preserve the original auth/network error; cache restoration is best-effort here.
+					}
+				}
+			}),
+		);
+
+		return { aborted: options.signal?.aborted ?? false, errors };
+	}
+
+	private async resolveRefreshCredential(
+		provider: Provider,
+		stored: Credential | undefined,
+		allowNetwork: boolean,
+		signal?: AbortSignal,
+	): Promise<Credential | undefined> {
+		if (stored?.type === "oauth") {
+			const oauth = provider.auth.oauth;
+			if (!oauth) return undefined;
+			if (!allowNetwork || Date.now() < stored.expires) return stored;
+			if (signal?.aborted) return undefined;
+			const post = await this.credentials.modify(provider.id, async (current) => {
+				if (current?.type !== "oauth" || Date.now() < current.expires) return undefined;
+				return oauth.refresh(current, signal);
+			});
+			return post?.type === "oauth" ? post : undefined;
 		}
 
-		// 全量刷新：allSettled 兜底，任意单个 provider 失败不影响其他。
-		await Promise.allSettled(Array.from(this.providers.values(), async (entry) => entry.refreshModels?.()));
+		const apiKey = provider.auth.apiKey;
+		if (!apiKey) return undefined;
+		const credential = stored?.type === "api_key" ? stored : undefined;
+		const result = await apiKey.resolve({ ctx: this.authContext, credential });
+		if (!result) return undefined;
+		return { type: "api_key", key: result.auth.apiKey, env: result.env };
 	}
 
-	/**
-	 * 为模型解析请求认证。provider 未知返回 undefined；已知则委托 `resolveProviderAuth` 完成解析。
-	 * 被谁调用：`applyAuth()` 每次流式请求前。
-	 * 调用了谁：`resolveProviderAuth()`。
-	 */
-	async getAuth(model: Model<Api>): Promise<AuthResult | undefined> {
-		const provider = this.providers.get(model.provider);
+	private async readCredential(providerId: string): Promise<Credential | undefined> {
+		try {
+			return await this.credentials.read(providerId);
+		} catch (error) {
+			throw new ModelsError("auth", `Credential store read failed for ${providerId}`, { cause: error });
+		}
+	}
+
+	private async checkProviderAuth(
+		provider: Provider,
+		credential: Credential | undefined,
+	): Promise<AuthCheck | undefined> {
+		if (credential?.type === "oauth") {
+			return provider.auth.oauth ? { source: "OAuth", type: "oauth" } : undefined;
+		}
+		const apiKey = provider.auth.apiKey;
+		if (!apiKey) return undefined;
+		if (apiKey.check) {
+			try {
+				return await apiKey.check({
+					ctx: this.authContext,
+					credential: credential?.type === "api_key" ? credential : undefined,
+				});
+			} catch (error) {
+				throw new ModelsError("auth", `API key auth check failed for provider ${provider.id}`, { cause: error });
+			}
+		}
+
+		const resolution = await resolveProviderAuth(provider, this.credentials, this.authContext);
+		return resolution ? { source: resolution.source, type: "api_key" } : undefined;
+	}
+
+	async checkAuth(providerId: string): Promise<AuthCheck | undefined> {
+		const provider = this.providers.get(providerId);
 		if (!provider) return undefined;
-		return resolveProviderAuth(provider, model, this.credentials, this.authContext);
+		return this.checkProviderAuth(provider, await this.readCredential(providerId));
 	}
 
-	/**
-	 * 内部辅助：要求 provider 必须存在，否则抛出 `ModelsError`。
-	 * 供 `applyAuth()` / `stream()` 等使用，确保后续操作不会在未知 provider 上执行。
-	 */
+	async getAvailable(providerId?: string): Promise<readonly Model<Api>[]> {
+		const providers = providerId
+			? [this.providers.get(providerId)].filter((entry) => entry !== undefined)
+			: this.getProviders();
+		const checks = await Promise.all(
+			providers.map(async (provider) => {
+				const credential = await this.readCredential(provider.id);
+				return { provider, credential, auth: await this.checkProviderAuth(provider, credential) };
+			}),
+		);
+		return checks.flatMap(({ provider, credential, auth }) => {
+			if (!auth) return [];
+			const models = provider.getModels();
+			return provider.filterModels?.(models, credential) ?? models;
+		});
+	}
+
+	getAuth(providerId: string, overrides?: AuthResolutionOverrides): Promise<AuthResult | undefined>;
+	getAuth(model: Model<Api>, overrides?: AuthResolutionOverrides): Promise<AuthResult | undefined>;
+	async getAuth(
+		providerOrModel: string | Model<Api>,
+		overrides?: AuthResolutionOverrides,
+	): Promise<AuthResult | undefined> {
+		const providerId = typeof providerOrModel === "string" ? providerOrModel : providerOrModel.provider;
+		const provider = this.providers.get(providerId);
+		if (!provider) return undefined;
+		const result = await resolveProviderAuth(provider, this.credentials, this.authContext, overrides);
+		if (!result || typeof providerOrModel === "string" || !providerOrModel.headers) return result;
+		return {
+			...result,
+			auth: {
+				...result.auth,
+				headers: mergeHeaders(result.auth.headers, providerOrModel.headers),
+			},
+		};
+	}
+
+	async login(providerId: string, type: AuthType, interaction: AuthInteraction): Promise<Credential> {
+		const provider = this.providers.get(providerId);
+		if (!provider) throw new ModelsError("provider", `Unknown provider: ${providerId}`);
+		const method = type === "oauth" ? provider.auth.oauth : provider.auth.apiKey;
+		if (!method?.login) {
+			throw new ModelsError("auth", `${provider.name} does not support ${type} login`);
+		}
+		const credential = await method.login(interaction);
+		try {
+			await this.credentials.modify(providerId, async () => credential);
+		} catch (error) {
+			throw new ModelsError("auth", `Credential store modify failed for ${providerId}`, { cause: error });
+		}
+		return credential;
+	}
+
+	async logout(providerId: string): Promise<void> {
+		try {
+			await this.credentials.delete(providerId);
+		} catch (error) {
+			throw new ModelsError("auth", `Credential store delete failed for ${providerId}`, { cause: error });
+		}
+	}
+
 	private requireProvider(model: Model<Api>): Provider {
 		const provider = this.providers.get(model.provider);
 		if (!provider) {
@@ -321,161 +460,125 @@ class ModelsImpl implements MutableModels {
 		return provider;
 	}
 
-	/**
-	 * `stream()` / `streamSimple()` 的前置步骤：解析 provider 认证，按字段级优先级合并
-	 * apiKey / headers / env 到请求参数中。
-	 *
-	 * 调用了谁：`resolveProviderAuth()`、`requireProvider()`。
-	 */
-	private async applyAuth<TOptions extends StreamOptions>(
+	private async applyAuth<TOptions extends StreamOptions & ModelsStreamTransforms>(
 		model: Model<Api>,
 		options: TOptions | undefined,
-	): Promise<{ requestModel: Model<Api>; requestOptions: TOptions | undefined }> {
-		// 阶段 1：解析 provider 认证，获取 apiKey / baseUrl / headers / env。
-		const resolution = await resolveProviderAuth(
-			this.requireProvider(model),
-			model,
-			this.credentials,
-			this.authContext,
-			{
-				apiKey: options?.apiKey,
-				env: options?.env,
-			},
-		);
-		const auth = resolution?.auth;
-		// 阶段 2：未认证时原样返回。
-		if (!auth) return { requestModel: model, requestOptions: options };
+	): Promise<{ requestModel: Model<Api>; requestOptions: StreamOptions | undefined }> {
+		this.requireProvider(model);
+		const resolution = await this.getAuth(model, {
+			apiKey: options?.apiKey,
+			env: options?.env,
+		});
+		if (!resolution) {
+			throw new ModelsError("auth", `Provider is not configured: ${model.provider}`);
+		}
+		const auth = resolution.auth;
 
-		// 阶段 3：auth 返回的 baseUrl 优先于 model 内置的 baseUrl。
-		const requestModel = auth.baseUrl ? { ...model, baseUrl: auth.baseUrl } : model;
-
-		// 阶段 4：显式请求参数优先于 auth 解析结果。headers 和 env 按 key 级别浅合并（options 优先）。
+		// Explicit request options win per-field; the Models-only transform runs last.
 		const apiKey = options?.apiKey ?? auth.apiKey;
-		const headers = auth.headers || options?.headers ? { ...auth.headers, ...options?.headers } : undefined;
+		let headers = mergeHeaders(auth.headers, options?.headers);
+		if (options?.transformHeaders) headers = await options.transformHeaders(headers ?? {});
 		const env = resolution.env || options?.env ? { ...(resolution.env ?? {}), ...(options?.env ?? {}) } : undefined;
-		const requestOptions = { ...options, apiKey, headers, env } as TOptions;
+		const requestModel = auth.baseUrl ? { ...model, baseUrl: auth.baseUrl } : model;
+		const { transformHeaders: _transformHeaders, ...providerOptions } = options ?? {};
+		const requestOptions = { ...providerOptions, apiKey, headers, env } as StreamOptions;
 
 		return { requestModel, requestOptions };
 	}
 
-	/**
-	 * 完整参数流式入口：通过 `lazyStream` 延迟触发，先解析 provider 和认证，再分发给 provider。
-	 * 调用了谁：`lazyStream()`、`requireProvider()`、`applyAuth()` → `Provider.stream()`。
-	 */
 	stream<TApi extends Api>(
 		model: Model<TApi>,
 		context: Context,
-		options?: ApiStreamOptions<TApi>,
+		options?: ModelsApiStreamOptions<TApi>,
 	): AssistantMessageEventStream {
-		// lazyStream 将异步的 provider 查找和 auth 注入包装进同步流接口中。
 		return lazyStream(model, async () => {
 			const provider = this.requireProvider(model);
-			const { requestModel, requestOptions } = await this.applyAuth(model, options as StreamOptions | undefined);
+			const { requestModel, requestOptions } = await this.applyAuth(
+				model,
+				options as ModelsApiStreamOptions<Api> | undefined,
+			);
 			return provider.stream(requestModel as Model<TApi>, context, requestOptions as ApiStreamOptions<TApi>);
 		});
 	}
 
-	/**
-	 * 完整参数一次性调用：委托 `stream()` 发起请求并等待最终消息。
-	 * 调用了谁：`stream()` → `AssistantMessageEventStream.result()`。
-	 */
 	async complete<TApi extends Api>(
 		model: Model<TApi>,
 		context: Context,
-		options?: ApiStreamOptions<TApi>,
+		options?: ModelsApiStreamOptions<TApi>,
 	): Promise<AssistantMessage> {
 		return this.stream(model, context, options).result();
 	}
 
-	/**
-	 * 简化参数流式入口：通过 `lazyStream` 延迟触发，使用 `SimpleStreamOptions` 进行流式请求。
-	 * 调用了谁：`lazyStream()`、`requireProvider()`、`applyAuth()` → `Provider.streamSimple()`。
-	 */
-	streamSimple(model: Model<Api>, context: Context, options?: SimpleStreamOptions): AssistantMessageEventStream {
+	streamSimple(model: Model<Api>, context: Context, options?: ModelsSimpleStreamOptions): AssistantMessageEventStream {
 		return lazyStream(model, async () => {
 			const provider = this.requireProvider(model);
 			const { requestModel, requestOptions } = await this.applyAuth(model, options);
-			return provider.streamSimple(requestModel, context, requestOptions);
+			return provider.streamSimple(requestModel, context, requestOptions as SimpleStreamOptions);
 		});
 	}
 
-	/**
-	 * 简化参数一次性调用：委托 `streamSimple()` 发起请求并等待最终消息。
-	 * 调用了谁：`streamSimple()` → `AssistantMessageEventStream.result()`。
-	 */
-	async completeSimple(model: Model<Api>, context: Context, options?: SimpleStreamOptions): Promise<AssistantMessage> {
+	async completeSimple(
+		model: Model<Api>,
+		context: Context,
+		options?: ModelsSimpleStreamOptions,
+	): Promise<AssistantMessage> {
 		return this.streamSimple(model, context, options).result();
 	}
 }
 
-/** 创建一个可变的 provider / model 运行时集合。 */
 export function createModels(options?: CreateModelsOptions): MutableModels {
 	return new ModelsImpl(options);
 }
 
-/**
- * `createProvider()` 的配置参数，提供构建 Provider 所需的所有元数据：
- * id、name、认证、模型列表、API 实现和可选的刷新逻辑。
- *
- * 被谁调用：`createProvider()` 接收此参数；各内置 provider 工厂构造此对象。
- */
 export interface CreateProviderOptions<TApi extends Api = Api> {
 	id: string;
-	/** 显示名称，默认使用 `id`。 */
+	/** Display name. Default: `id`. */
 	name?: string;
 	baseUrl?: string;
 	headers?: ProviderHeaders;
-	/** 必填 —— 每个 provider 都有认证语义，即使环境凭证型/keyless 的 provider 也不例外。 */
+	/** Required — every provider has auth semantics, even ambient/keyless ones. */
 	auth: ProviderAuth;
-	/** 初始模型列表（纯动态 provider 可为空）。 */
+	/** Static baseline model list (empty for purely dynamic providers). */
 	models: readonly Model<TApi>[];
-	/**
-	 * 动态 provider 的模型刷新函数。成功时存储结果；并发调用共享同一个进行中的 fetch。
-	 * 可能 reject：此时存储的列表保留在上次已知状态，rejection
-	 * 由 `Models.refresh(provider)` 包装为 `ModelsError("model_source")` 向上传播，后续调用可重试。
-	 */
-	refreshModels?: () => Promise<readonly Model<TApi>[]>;
-	/**
-	 * API 流式实现。可以是单个 `ProviderStreams`（所有模型共享同一 API），
-	 * 也可以是一个按 `model.api` 分组的 Map（用于混合 API 的 provider）。
-	 */
+	/** Fetch a dynamic model overlay. createProvider restores/persists it through ModelsStore. */
+	fetchModels?: (context: RefreshModelsContext) => Promise<readonly Model<TApi>[]>;
+	filterModels?: (models: readonly Model<TApi>[], credential: Credential | undefined) => readonly Model<TApi>[];
+	/** Single implementation, or map keyed by `model.api` for mixed-API providers. */
 	api: ProviderStreams | Partial<Record<TApi, ProviderStreams>>;
 }
 
 /**
- * 内置 provider 工厂和外部自定义 provider（如 `models.json`）的统一构建入口：
- * 接收 `CreateProviderOptions`，返回完整的 `Provider` 实例，封装模型存储、刷新去重和 API 分发。
- *
- * 被谁调用：各内置 provider 工厂函数、外部自定义 provider 加载逻辑。
- * 调用了谁：`lazyStream()`（错误流构造）。
- *
- * - 当 `api` 是单个实现时，provider 下所有模型共享同一套流式能力
- * - 当 `api` 是按 `model.api` 分组的 map 时，会在运行时按模型协议分发
- * - 若某个模型对应的 api 没有注册实现，则返回错误流
+ * Builds a provider from parts. Built-in provider factories and models.json
+ * custom providers both go through this. A single `api` streams all models;
+ * an `api` map dispatches on `model.api`, and a model whose api has no entry
+ * produces a stream error.
  */
 export function createProvider<TApi extends Api = Api>(input: CreateProviderOptions<TApi>): Provider<TApi> {
-	let models = input.models;
+	const baselineModels = input.models;
+	let dynamicModels: readonly Model<TApi>[] = [];
 	let inflightRefresh: Promise<void> | undefined;
-	const refreshModels = input.refreshModels;
-	// 判断 api 是单个 ProviderStreams 实现还是按 model.api 分组的 Map。
+	const fetchModels = input.fetchModels;
+	const currentModels = (): readonly Model<TApi>[] => {
+		const merged = [...baselineModels];
+		for (const model of dynamicModels) {
+			const index = merged.findIndex((entry) => entry.id === model.id);
+			if (index >= 0) merged[index] = model;
+			else merged.push(model);
+		}
+		return merged;
+	};
 	const single =
 		typeof (input.api as ProviderStreams).stream === "function" ? (input.api as ProviderStreams) : undefined;
 	const byApi = single ? undefined : (input.api as Partial<Record<string, ProviderStreams>>);
 
-	/** 按模型的 api 字段查找对应的流式实现。 */
 	const apiFor = (model: Model<Api>): ProviderStreams | undefined => single ?? byApi?.[model.api];
 
-	/**
-	 * 统一分发包装器：为每个 stream/streamSimple 调用查找对应的 API 实现，
-	 * 找不到时返回错误流。
-	 */
 	const dispatch = (
 		model: Model<Api>,
 		run: (streams: ProviderStreams) => AssistantMessageEventStream,
 	): AssistantMessageEventStream => {
 		const streams = apiFor(model);
 		if (!streams) {
-			// 模型声明的 api 在当前 provider 下没有注册实现 → 返回错误流。
 			return lazyStream(model, async () => {
 				throw new ModelsError("stream", `Provider ${input.id} has no API implementation for "${model.api}"`);
 			});
@@ -489,21 +592,30 @@ export function createProvider<TApi extends Api = Api>(input: CreateProviderOpti
 		baseUrl: input.baseUrl,
 		headers: input.headers,
 		auth: input.auth,
-		getModels: () => models,
-		refreshModels: refreshModels
-			? () => {
-					// inflight 去重：并发调用共享同一个 Promise，避免重复请求。
+		getModels: currentModels,
+		refreshModels: fetchModels
+			? (context) => {
 					inflightRefresh ??= (async () => {
 						try {
-							models = await refreshModels();
+							const stored = await context.store.read();
+							if (stored) {
+								dynamicModels = stored.models
+									.filter((model) => model.provider === input.id)
+									.map((model) => model as Model<TApi>);
+							}
+							if (!context.allowNetwork || context.signal?.aborted) return;
+							const refreshed = await fetchModels(context);
+							if (context.signal?.aborted) return;
+							dynamicModels = refreshed;
+							await context.store.write({ models: refreshed, checkedAt: Date.now() });
 						} finally {
-							// 无论成功失败，完成后清除 inflight 标记，允许下次重试。
 							inflightRefresh = undefined;
 						}
 					})();
 					return inflightRefresh;
 				}
 			: undefined,
+		filterModels: input.filterModels,
 		stream: (model, context, options) => dispatch(model, (streams) => streams.stream(model, context, options)),
 		streamSimple: (model, context, options) =>
 			dispatch(model, (streams) => streams.streamSimple(model, context, options)),
@@ -511,14 +623,12 @@ export function createProvider<TApi extends Api = Api>(input: CreateProviderOpti
 }
 
 /**
- * 运行时 API 类型守卫：检查模型的 `api` 字段是否匹配目标 API。
- * `getModel()` 返回 `Model<Api>`，通过此函数收窄为具体 API 类型以获取准确的 options 类型。
+ * Runtime-checked narrowing for dynamically looked-up models:
  *
- * 示例：
  * ```ts
  * const model = models.getModel("anthropic", "claude-opus-4-7");
  * if (model && hasApi(model, "anthropic-messages")) {
- *   // model: Model<"anthropic-messages">, stream options 获得完整类型推导
+ *   // model: Model<"anthropic-messages">, stream options fully typed
  * }
  * ```
  */
@@ -526,14 +636,7 @@ export function hasApi<TApi extends Api>(model: Model<Api>, api: TApi): model is
 	return model.api === api;
 }
 
-/**
- * 计算单次请求的 token 费用：根据输入 token 规模匹配价格 tier，将结果写入 `usage.cost`。
- * Anthropic 的 1h cache write 按 2 倍 input 价格单独拆分计费。
- *
- * 被谁调用：各 provider API 实现层在流完成后调用。
- */
 export function calculateCost<TApi extends Api>(model: Model<TApi>, usage: Usage): Usage["cost"] {
-	// 先根据输入 token 规模匹配价格 tier：遍历所有 tier，选取最大匹配的阈值。
 	const inputTokens = usage.input + usage.cacheRead + usage.cacheWrite;
 	let rates: ModelCostRates = model.cost;
 	let matchedThreshold = -1;
@@ -544,7 +647,7 @@ export function calculateCost<TApi extends Api>(model: Model<TApi>, usage: Usage
 		}
 	}
 
-	// Anthropic 对 1h cache write 按 2 倍 input 价格计费，需要单独拆分计算。
+	// Anthropic charges 2x base input for 1h cache writes.
 	const longWrite = usage.cacheWrite1h ?? 0;
 	const shortWrite = usage.cacheWrite - longWrite;
 	usage.cost.input = (rates.input / 1000000) * usage.input;
@@ -555,64 +658,43 @@ export function calculateCost<TApi extends Api>(model: Model<TApi>, usage: Usage
 	return usage.cost;
 }
 
-/** 完整的 thinking 级别序列，从 off 到 max。 */
 const EXTENDED_THINKING_LEVELS: ModelThinkingLevel[] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
 
-/**
- * 获取当前模型支持的 thinking 级别列表：根据 `reasoning` 标志和 `thinkingLevelMap` 映射过滤。
- *
- * 被谁调用：`clampThinkingLevel()`、应用层 UI 渲染 thinking 选项。
- */
 export function getSupportedThinkingLevels<TApi extends Api>(model: Model<TApi>): ModelThinkingLevel[] {
-	// 模型不支持 reasoning 时只返回 "off"。
 	if (!model.reasoning) return ["off"];
 
 	return EXTENDED_THINKING_LEVELS.filter((level) => {
 		const mapped = model.thinkingLevelMap?.[level];
-		// null 映射表示该级别明确禁用。
 		if (mapped === null) return false;
-		// xhigh 和 max 级别需要显式映射才视为支持。
 		if (level === "xhigh" || level === "max") return mapped !== undefined;
-		// 基础级别默认支持（"off" / "minimal" / "low" / "medium" / "high"）。
 		return true;
 	});
 }
 
-/**
- * 将用户请求的 thinking 级别夹紧到模型实际支持的范围内。
- * 若请求级别可用则直接返回；否则依次向更高、更低相邻档位回退。
- *
- * 被谁调用：provider API 实现层在构建请求参数时调用。
- * 调用了谁：`getSupportedThinkingLevels()`。
- */
 export function clampThinkingLevel<TApi extends Api>(
 	model: Model<TApi>,
 	level: ModelThinkingLevel,
 ): ModelThinkingLevel {
 	const availableLevels = getSupportedThinkingLevels(model);
-	// 快速路径：请求级别已支持。
 	if (availableLevels.includes(level)) return level;
 
 	const requestedIndex = EXTENDED_THINKING_LEVELS.indexOf(level);
 	if (requestedIndex === -1) return availableLevels[0] ?? "off";
 
-	// 向上回退：尝试更高档位。
 	for (let i = requestedIndex; i < EXTENDED_THINKING_LEVELS.length; i++) {
 		const candidate = EXTENDED_THINKING_LEVELS[i];
 		if (availableLevels.includes(candidate)) return candidate;
 	}
-	// 向下回退：尝试更低档位。
 	for (let i = requestedIndex - 1; i >= 0; i--) {
 		const candidate = EXTENDED_THINKING_LEVELS[i];
 		if (availableLevels.includes(candidate)) return candidate;
 	}
-	// 兜底：返回第一个可用级别，或 "off"。
 	return availableLevels[0] ?? "off";
 }
 
 /**
- * 判断两个模型是否相等（比较 id 和 provider）。
- * 任一为 null/undefined 时返回 false。
+ * Check if two models are equal by comparing both their id and provider.
+ * Returns false if either model is null or undefined.
  */
 export function modelsAreEqual<TApi extends Api>(
 	a: Model<TApi> | null | undefined,

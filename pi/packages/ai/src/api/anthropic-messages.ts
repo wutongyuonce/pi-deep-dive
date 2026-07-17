@@ -1,22 +1,3 @@
-/**
- * Anthropic Messages API 的流式实现。
- *
- * 文件定位：
- * - 这是 `anthropic-messages` 协议在 `pi/packages/ai` 中的核心实现
- * - 负责把统一的对话消息、工具定义和 thinking 选项翻译成 Anthropic Messages 请求，
- *   再把返回的 SSE 事件重组为框架内部统一的 assistant 事件流
- *
- * 核心职责：
- * - 兼容 API key、OAuth、GitHub Copilot 等多种鉴权形态
- * - 处理 Anthropic 特有的 thinking、cache control、tool reference、deferred tool 等能力
- * - 将原始 SSE 文本拆为结构化事件，并持续更新统一的 `AssistantMessage`
- *
- * 调用链路：
- * - `providers/anthropic.ts` 及其他复用该协议的 provider 注册 `anthropic-messages`
- * - 上层 `stream()` / `streamSimple()` 选中该 API
- * - 本文件负责真正发起请求、解析事件并输出统一流
- */
-
 import Anthropic from "@anthropic-ai/sdk";
 import type {
 	CacheControlEphemeral,
@@ -60,12 +41,8 @@ import { adjustMaxTokensForThinking, buildBaseOptions, clampMaxTokensToContext }
 import { transformMessages } from "./transform-messages.ts";
 
 /**
- * 解析缓存保留策略。
- *
- * 优先级：
- * - 显式传入的 `cacheRetention`
- * - provider 环境变量里的 `PI_CACHE_RETENTION`
- * - 默认值 `"short"`
+ * Resolve cache retention preference.
+ * Defaults to "short" and uses PI_CACHE_RETENTION for backward compatibility.
  */
 function resolveCacheRetention(cacheRetention?: CacheRetention, env?: ProviderEnv): CacheRetention {
 	if (cacheRetention) {
@@ -82,8 +59,6 @@ function getCacheControl(
 	cacheRetention?: CacheRetention,
 	env?: ProviderEnv,
 ): { retention: CacheRetention; cacheControl?: CacheControlEphemeral } {
-	// Anthropic 的 prompt cache 用 `cache_control` 标记驱动，
-	// 这里把统一 retention 选项翻成 SDK 所需的具体结构。
 	const retention = resolveCacheRetention(cacheRetention, env);
 	if (retention === "none") {
 		return { retention };
@@ -95,7 +70,7 @@ function getCacheControl(
 	};
 }
 
-// OAuth 模式下需要尽量模拟 Claude Code 的工具命名和客户端身份。
+// Stealth mode: Mimic Claude Code's tool naming exactly
 const claudeCodeVersion = "2.1.75";
 
 // Claude Code 2.x tool names (canonical casing)
@@ -135,12 +110,7 @@ const fromClaudeCodeName = (name: string, tools?: Tool[]) => {
 };
 
 /**
- * 把内部内容块转换为 Anthropic Messages 可接受的内容格式。
- *
- * 关键点：
- * - 纯文本场景直接压平成字符串，减少无意义的 block 包装
- * - 遇到图片时必须切换成 block 数组
- * - 只有图片没有文本时，补一个占位文本避免请求被拒绝
+ * Convert content blocks to Anthropic API format
  */
 function convertContentBlocks(content: (TextContent | ImageContent)[]):
 	| string
@@ -542,7 +512,6 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 			let isOAuth: boolean;
 
 			if (options?.client) {
-				// 测试或上层注入场景可直接提供现成 client。
 				client = options.client;
 				isOAuth = false;
 			} else {
@@ -561,7 +530,6 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 				const cacheRetention = resolveCacheRetention(options?.cacheRetention, options?.env);
 				const cacheSessionId = cacheRetention === "none" ? undefined : options?.sessionId;
 
-				// 统一在这里处理 OAuth / Copilot / 原生 Anthropic 的 client 差异。
 				const created = createClient(
 					model,
 					apiKey,
@@ -574,15 +542,11 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 				client = created.client;
 				isOAuth = created.isOAuthToken;
 			}
-
-			// 构建 payload，并允许调用方在发请求前做最后一轮改写。
 			let params = buildParams(model, context, isOAuth, options);
 			const nextParams = await options?.onPayload?.(params, model);
 			if (nextParams !== undefined) {
 				params = nextParams as MessageCreateParamsStreaming;
 			}
-
-			// 所有请求级运行控制都在这里统一挂上。
 			const requestOptions = {
 				...(options?.signal ? { signal: options.signal } : {}),
 				...(options?.timeoutMs !== undefined ? { timeout: options.timeoutMs } : {}),
@@ -595,7 +559,6 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 			type Block = (ThinkingContent | TextContent | (ToolCall & { partialJson: string })) & { index: number };
 			const blocks = output.content as Block[];
 
-			// 持续消费 SSE 事件，并把 Anthropic 专有事件翻译成统一内容块事件。
 			for await (const event of iterateAnthropicEvents(response, options?.signal)) {
 				if (event.type === "message_start") {
 					output.responseId = event.message.id;
@@ -740,25 +703,27 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 					}
 					// Only update usage fields if present (not null).
 					// Preserves input_tokens from message_start when proxies omit it in message_delta.
-					if (event.usage.input_tokens != null) {
-						output.usage.input = event.usage.input_tokens;
-					}
-					if (event.usage.output_tokens != null) {
-						output.usage.output = event.usage.output_tokens;
-					}
-					if (event.usage.cache_read_input_tokens != null) {
-						output.usage.cacheRead = event.usage.cache_read_input_tokens;
-					}
-					if (event.usage.cache_creation_input_tokens != null) {
-						output.usage.cacheWrite = event.usage.cache_creation_input_tokens;
-					}
-					// Anthropic reports reasoning tokens in `output_tokens_details.thinking_tokens` on the
-					// final message_delta usage (a subset of output_tokens). SDK 0.91.1 omits the field from
-					// its Usage type, so read it through a narrow cast. Verified against the live API.
-					const thinkingTokens = (event.usage as { output_tokens_details?: { thinking_tokens?: number } })
-						.output_tokens_details?.thinking_tokens;
-					if (thinkingTokens != null) {
-						output.usage.reasoning = thinkingTokens;
+					if (event.usage) {
+						if (event.usage.input_tokens != null) {
+							output.usage.input = event.usage.input_tokens;
+						}
+						if (event.usage.output_tokens != null) {
+							output.usage.output = event.usage.output_tokens;
+						}
+						if (event.usage.cache_read_input_tokens != null) {
+							output.usage.cacheRead = event.usage.cache_read_input_tokens;
+						}
+						if (event.usage.cache_creation_input_tokens != null) {
+							output.usage.cacheWrite = event.usage.cache_creation_input_tokens;
+						}
+						// Anthropic reports reasoning tokens in `output_tokens_details.thinking_tokens` on the
+						// final message_delta usage (a subset of output_tokens). SDK 0.91.1 omits the field from
+						// its Usage type, so read it through a narrow cast. Verified against the live API.
+						const thinkingTokens = (event.usage as { output_tokens_details?: { thinking_tokens?: number } })
+							.output_tokens_details?.thinking_tokens;
+						if (thinkingTokens != null) {
+							output.usage.reasoning = thinkingTokens;
+						}
 					}
 					// Anthropic doesn't provide total_tokens, compute from components
 					output.usage.totalTokens =
@@ -823,7 +788,6 @@ export const streamSimple: StreamFunction<"anthropic-messages", SimpleStreamOpti
 	context: Context,
 	options?: SimpleStreamOptions,
 ): AssistantMessageEventStream => {
-	// 简化入口只负责把统一 reasoning 选项折算成 Anthropic thinking 配置。
 	assertRequestAuth(model.provider, options?.apiKey, options?.headers);
 
 	const base = buildBaseOptions(model, context, options, options?.apiKey);
@@ -874,7 +838,7 @@ function createClient(
 	dynamicHeaders?: Record<string, string>,
 	sessionId?: string,
 ): { client: Anthropic; isOAuthToken: boolean } {
-	// Adaptive thinking 模型已经内建 interleaved thinking，不需要再额外挂 beta header。
+	// Adaptive thinking models have interleaved thinking built in, so skip the beta header.
 	const needsInterleavedBeta = interleavedThinking && model.compat?.forceAdaptiveThinking !== true;
 	const betaFeatures: string[] = [];
 	if (useFineGrainedToolStreamingBeta) {
@@ -884,7 +848,7 @@ function createClient(
 		betaFeatures.push(INTERLEAVED_THINKING_BETA);
 	}
 
-	// Copilot 走 Bearer auth，并携带一组与官方客户端对齐的动态 headers。
+	// Copilot: Bearer auth, selective betas.
 	if (model.provider === "github-copilot") {
 		const client = new Anthropic({
 			apiKey: null,
@@ -906,7 +870,7 @@ function createClient(
 		return { client, isOAuthToken: false };
 	}
 
-	// OAuth token 需要模拟 Claude Code 的身份头，Anthropic 才会接受对应能力集。
+	// OAuth: Bearer auth, Claude Code identity headers
 	if (apiKey && isOAuthToken(apiKey)) {
 		const client = new Anthropic({
 			apiKey: null,
@@ -929,7 +893,7 @@ function createClient(
 		return { client, isOAuthToken: true };
 	}
 
-	// 普通 API key / 由外部 headers 提供认证的路径走标准 Anthropic client。
+	// API key or header-owned auth.
 	const sessionAffinityHeaders: ProviderHeaders =
 		sessionId && getAnthropicCompat(model).sendSessionAffinityHeaders ? { "x-session-affinity": sessionId } : {};
 	const defaultHeaders = mergeHeaders(
@@ -959,7 +923,6 @@ function buildParams(
 	isOAuthToken: boolean,
 	options?: AnthropicOptions,
 ): MessageCreateParamsStreaming {
-	// 先做消息预处理和 deferred tool 拆分，避免后面构造 payload 时重复判断。
 	const { cacheControl } = getCacheControl(model, options?.cacheRetention, options?.env);
 	const compat = getAnthropicCompat(model);
 	const transformedMessages = transformMessages(context.messages, model, normalizeToolCallId);
@@ -990,7 +953,7 @@ function buildParams(
 		stream: true,
 	};
 
-	// OAuth token 必须带上 Claude Code 身份提示，否则服务端不会按 Claude Code 语义解释工具调用。
+	// For OAuth tokens, we MUST include Claude Code identity
 	if (isOAuthToken) {
 		params.system = [
 			{
@@ -1007,7 +970,7 @@ function buildParams(
 			});
 		}
 	} else if (context.systemPrompt) {
-		// 非 OAuth 模式只保留用户自己的 system prompt，并在需要时加 cache 标记。
+		// Add cache control to system prompt for non-OAuth tokens
 		params.system = [
 			{
 				type: "text",
@@ -1017,7 +980,7 @@ function buildParams(
 		];
 	}
 
-	// Temperature 与 extended thinking 不兼容，且新一代 Claude 并不都支持该参数。
+	// Temperature is incompatible with extended thinking and unsupported on Claude Opus 4.7+.
 	if (options?.temperature !== undefined && !options?.thinkingEnabled && compat.supportsTemperature) {
 		params.temperature = options.temperature;
 	}
@@ -1034,7 +997,7 @@ function buildParams(
 		];
 	}
 
-	// 根据模型能力把统一 reasoning 选项翻译成 adaptive / budget / disabled 三种 thinking 模式。
+	// Configure thinking mode: adaptive, budget-based, or explicitly disabled.
 	if (model.reasoning) {
 		if (options?.thinkingEnabled) {
 			// Default to "summarized" so Opus 4.7 and Mythos Preview behave like
@@ -1083,7 +1046,7 @@ function buildParams(
 	return params;
 }
 
-/** 规范化 tool call ID，满足 Anthropic 对字符集和长度的限制。 */
+// Normalize tool call IDs to match Anthropic's required pattern and length
 function normalizeToolCallId(id: string): string {
 	return id.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 64);
 }
@@ -1095,7 +1058,6 @@ function convertToolResult(
 	loadedToolNames: Set<string>,
 	normalizeToolName: (name: string) => string,
 ): { toolResult: ContentBlockParam; siblingContent: ContentBlockParam[] } {
-	// deferred tool 首次真正“加载”时，需要借助 tool_reference 告诉 Anthropic 有新工具可用。
 	const references: Array<{ type: "tool_reference"; tool_name: string }> = [];
 	for (const name of msg.addedToolNames ?? []) {
 		const normalizedName = normalizeToolName(name);
@@ -1177,8 +1139,6 @@ function convertMessages(
 				});
 			}
 		} else if (msg.role === "assistant") {
-			// assistant 块需要按 Anthropic 的 block 语义重新拆装，
-			// 包括 thinking、tool_use 以及 OAuth 下的工具名大小写映射。
 			const blocks: ContentBlockParam[] = [];
 
 			for (const block of msg.content) {
@@ -1238,7 +1198,7 @@ function convertMessages(
 				content: blocks,
 			});
 		} else if (msg.role === "toolResult") {
-			// 连续 tool result 会被打包成同一条 user 消息，以兼容 Anthropic 及其兼容端点。
+			// Collect all consecutive toolResult messages, needed for z.ai Anthropic endpoint.
 			const toolResults: ContentBlockParam[] = [];
 			const siblingContent: ContentBlockParam[] = [];
 			let j = i;
@@ -1266,7 +1226,7 @@ function convertMessages(
 		}
 	}
 
-	// Anthropic 的对话缓存通常挂在最后一个 user block 上，这里统一补齐。
+	// Add cache_control to the last user message to cache conversation history
 	if (cacheControl && params.length > 0) {
 		const lastMessage = params[params.length - 1];
 		if (lastMessage.role === "user") {

@@ -1,7 +1,7 @@
 import { createImagesModels, type ImagesProvider, type MutableImagesModels } from "../images-models.ts";
 import { MODELS } from "../models.generated.ts";
 import { type CreateModelsOptions, createModels, type MutableModels, type Provider } from "../models.ts";
-import type { Api, KnownProvider, Model } from "../types.ts";
+import type { Api, Model } from "../types.ts";
 import { amazonBedrockProvider } from "./amazon-bedrock.ts";
 import { antLingProvider } from "./ant-ling.ts";
 import { anthropicProvider } from "./anthropic.ts";
@@ -29,6 +29,7 @@ import { opencodeProvider } from "./opencode.ts";
 import { opencodeGoProvider } from "./opencode-go.ts";
 import { openrouterProvider } from "./openrouter.ts";
 import { openrouterImagesProvider } from "./openrouter-images.ts";
+import { radiusProvider } from "./radius.ts";
 import { togetherProvider } from "./together.ts";
 import { vercelAIGatewayProvider } from "./vercel-ai-gateway.ts";
 import { xaiProvider } from "./xai.ts";
@@ -39,24 +40,20 @@ import { xiaomiTokenPlanSgpProvider } from "./xiaomi-token-plan-sgp.ts";
 import { zaiProvider } from "./zai.ts";
 import { zaiCodingCnProvider } from "./zai-coding-cn.ts";
 
-/**
- * 从生成的 MODELS 目录中提取指定 provider/model 组合对应的 Api 类型。
- *
- * 定位：类型辅助工具，为 getBuiltinModel() 和 getBuiltinModels() 提供精确的返回类型推断。
- */
+export { radiusProvider };
+
+/** Providers present in the generated catalog. `KnownProvider` additionally
+ * includes purely dynamic providers (e.g. "radius") that have no static
+ * catalog entry. */
+export type BuiltinProvider = keyof typeof MODELS;
+
 type BuiltinModelApi<
-	TProvider extends KnownProvider,
+	TProvider extends BuiltinProvider,
 	TModelId extends keyof (typeof MODELS)[TProvider],
 > = (typeof MODELS)[TProvider][TModelId] extends { api: infer TApi } ? (TApi extends Api ? TApi : never) : never;
 
-/**
- * 从生成的模型目录中按 provider 和 modelId 查找单个模型。
- *
- * @param provider 已知的 provider 标识
- * @param modelId 该 provider 下的模型 ID
- * @returns 匹配的 Model 对象，如果不存在则返回 undefined
- */
-export function getBuiltinModel<TProvider extends KnownProvider, TModelId extends keyof (typeof MODELS)[TProvider]>(
+/** Typed read of the generated built-in catalog. */
+export function getBuiltinModel<TProvider extends BuiltinProvider, TModelId extends keyof (typeof MODELS)[TProvider]>(
 	provider: TProvider,
 	modelId: TModelId,
 ): Model<BuiltinModelApi<TProvider, TModelId>> {
@@ -64,13 +61,11 @@ export function getBuiltinModel<TProvider extends KnownProvider, TModelId extend
 	return models?.[modelId as string] as Model<BuiltinModelApi<TProvider, TModelId>>;
 }
 
-/** 获取所有内置 provider 的标识列表。 */
-export function getBuiltinProviders(): KnownProvider[] {
-	return Object.keys(MODELS) as KnownProvider[];
+export function getBuiltinProviders(): BuiltinProvider[] {
+	return Object.keys(MODELS) as BuiltinProvider[];
 }
 
-/** 获取指定 provider 下的所有模型。 */
-export function getBuiltinModels<TProvider extends KnownProvider>(
+export function getBuiltinModels<TProvider extends BuiltinProvider>(
 	provider: TProvider,
 ): Model<BuiltinModelApi<TProvider, keyof (typeof MODELS)[TProvider]>>[] {
 	const models = MODELS[provider] as Record<string, Model<Api>> | undefined;
@@ -79,12 +74,7 @@ export function getBuiltinModels<TProvider extends KnownProvider>(
 		: [];
 }
 
-/** 
- * 一次性获取全部 provider 的工厂函数，每次调用都会重新构造新的 provider 实例。
- *
- * 被谁调用：builtinModels()
- * 调用了谁：各 provider 的工厂函数（amazonBedrockProvider()、anthropicProvider() 等）
- */
+/** All built-in providers, freshly constructed. */
 export function builtinProviders(): Provider[] {
 	return [
 		amazonBedrockProvider(),
@@ -113,6 +103,7 @@ export function builtinProviders(): Provider[] {
 		opencodeProvider(),
 		opencodeGoProvider(),
 		openrouterProvider(),
+		radiusProvider(),
 		togetherProvider(),
 		vercelAIGatewayProvider(),
 		xaiProvider(),
@@ -125,25 +116,23 @@ export function builtinProviders(): Provider[] {
 	];
 }
 
-/** 便捷工厂函数，一次性创建已注册全部内置 provider 的 Models 集合。 */
+/** A `Models` collection with every built-in provider registered. */
 export function builtinModels(options?: CreateModelsOptions): MutableModels {
 	const models = createModels(options);
-	// 遍历所有内置 provider，逐一注册到 models 集合中。
 	for (const provider of builtinProviders()) {
 		models.setProvider(provider);
 	}
 	return models;
 }
 
-/** 新建所有内置图像生成 provider 实例。 */
+/** All built-in image-generation providers, freshly constructed. */
 export function builtinImagesProviders(): ImagesProvider[] {
 	return [openrouterImagesProvider()];
 }
 
-/** 便捷工厂函数，一次性创建已注册全部内置图像生成 provider 的 ImagesModels 集合。 */
+/** An `ImagesModels` collection with every built-in image-generation provider registered. */
 export function builtinImagesModels(options?: CreateModelsOptions): MutableImagesModels {
 	const models = createImagesModels(options);
-	// 遍历所有内置图像 provider，逐一注册到 models 集合中。
 	for (const provider of builtinImagesProviders()) {
 		models.setProvider(provider);
 	}
