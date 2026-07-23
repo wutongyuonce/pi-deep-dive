@@ -1,244 +1,98 @@
-/**
- * pi-plan-mode 扩展模块
- *
- * 文件定位：Pi 编码助手的 Codex 风格 Plan Mode 扩展，提供只读规划协作能力。
- *
- * 核心职责：
- * - 管理 Plan Mode 的启用/退出生命周期
- * - 在 Plan Mode 下限制工具集为只读（read、受限 bash、safe built-in）
- * - 注入基于 <proposed_plan> 结构化规划流程的 system prompt
- * - 提供 plan_mode_question 工具，支持 Agent 向用户发起结构化澄清问题
- * - 检测 Agent 输出的 <proposed_plan> 块并引导用户进入实现阶段
- * - 持久化 Plan Mode 状态以支持会话恢复
- *
- * 主要提供内容：
- * - planMode() 默认导出函数：注册扩展的全部钩子和命令
- * - 多个工具函数导出：completePlanArguments、canSelectToolInPlanMode、
- *   isSafeCommand、extractProposedPlan、normalizePlanModeQuestionParams 等
- *
- * 典型调用链：
- *   Pi 加载扩展 → planMode(pi) 注册 flag/command/tool/hooks
- *   → 用户 /plan → enterPlanMode() → activatePlanModeTools()
- *   → before_agent_start 注入 Plan Mode prompt
- *   → Agent 探索/提问 → 输出 <proposed_plan>
- *   → agent_end 检测到 proposed_plan → showPlanReadyMenu()
- *   → 用户选择 Implement → startImplementation() → 退出 Plan Mode → 触发实现 turn
- */
 import type { ExtensionAPI, ExtensionContext, ToolInfo } from "@earendil-works/pi-coding-agent";
+import {
+	normalizePlanModeCompletion,
+	PLAN_MODE_COMPLETE_PARAMS,
+	PLAN_MODE_COMPLETE_TOOL_NAME,
+	planModeCompleted,
+} from "./completion-tool.js";
+import {
+	isEmptyAssistantMessage,
+	latestAssistantText,
+	messageContainsInactivePlanModeArtifact,
+	messageContainsLegacyPlanModeContextArtifact,
+	parseProposedPlan,
+	stripPlanModeCompletionCallsFromMessage,
+	stripProposedPlanBlocksFromMessage,
+} from "./message-transform.js";
+import { buildPlanModePrompt } from "./prompt.js";
+import {
+	askPlanModeQuestions,
+	normalizePlanModeQuestionParams,
+	PLAN_MODE_QUESTION_PARAMS,
+	PLAN_MODE_QUESTION_TOOL_NAME,
+	planModeQuestionAnswered,
+	planModeQuestionCancelled,
+} from "./question-tool.js";
+import { showPersistentSelector } from "./selector-ui.js";
+import {
+	configuredThinkingLevel,
+	type PlanModeFixedThinkingLevel,
+	type PlanModeSettings,
+	readPlanModeSettings,
+} from "./settings.js";
+import { type PlanCompletionSource, type PlanModeState, restorePlanModeState } from "./state.js";
+import {
+	canSelectToolInPlanMode,
+	classifyPlanModeTool,
+	isBuiltinTool,
+	isSafeCommand,
+	readCommand,
+	SAFE_BUILTIN_PLAN_TOOLS,
+} from "./tool-policy.js";
 
-// ── 常量定义 ────────────────────────────────────────────
-
-/** 会话持久化条目的自定义类型标识 */
 const STATE_ENTRY_TYPE = "plan-mode-state";
 const STATUS_KEY = "plan-mode";
 const PLAN_WIDGET_KEY = "plan-mode-plan";
-const PLAN_CONTEXT_MESSAGE_TYPE = "plan-mode-context";
 const PROPOSED_PLAN_MESSAGE_TYPE = "proposed-plan";
-const PLAN_MODE_QUESTION_TOOL_NAME = "plan_mode_question";
-const PLAN_CONTEXT_MARKER = "[CODEX-LIKE PLAN MODE ACTIVE]";
-const SAFE_BUILTIN_PLAN_TOOLS = new Set(["read", "bash", "grep", "find", "ls"]);
 const BLOCKED_BUILTIN_TOOLS = new Set(["edit", "write"]);
 const DEFAULT_TOOLS = ["read", "bash", "edit", "write"];
 const TOOL_SELECTOR_PAGE_SIZE = 10;
-const PROPOSED_PLAN_PATTERN = /<proposed_plan>\s*([\s\S]*?)\s*<\/proposed_plan>/i;
-const PROPOSED_PLAN_BLOCK_PATTERN = /<proposed_plan>\s*[\s\S]*?\s*<\/proposed_plan>/gi;
 
-// ── 类型定义 ────────────────────────────────────────────
+type AgentSettledHandler = (event: unknown, ctx: ExtensionContext) => unknown;
 
-/** /plan 命令的参数补全项 */
+function onAgentSettled(pi: ExtensionAPI, handler: AgentSettledHandler) {
+	(
+		pi as unknown as {
+			on(event: "agent_settled", callback: AgentSettledHandler): void;
+		}
+	).on("agent_settled", handler);
+}
+
+function setPlanThinkingLevel(pi: ExtensionAPI, level: PlanModeFixedThinkingLevel) {
+	(pi.setThinkingLevel as unknown as (level: PlanModeFixedThinkingLevel) => void)(level);
+}
+
 interface CommandArgumentCompletion {
 	value: string;
 	label: string;
 	description?: string;
 }
 
-/** Plan Mode 的运行时状态，会持久化到会话中 */
-interface PlanModeState {
-	enabled: boolean;
-	latestPlan?: string;
-	awaitingAction: boolean;
-	selectedToolNames?: string[];
-	selectedToolKeys?: string[];
+interface ReadyPresentationIntent {
+	nonce: number;
+	plan: string;
+	source: PlanCompletionSource;
 }
 
-type SessionEntry = {
-	type?: string;
-	customType?: string;
-	data?: Partial<PlanModeState>;
-	message?: SessionMessage;
-};
-
-type SessionMessage = {
-	role?: string;
-	content?: unknown;
-};
-
-type TextBlock = {
-	type?: string;
-	text?: string;
-};
-
-type PlanModeQuestionOption = {
-	label: string;
-	description?: string;
-};
-
-type PlanModeQuestion = {
-	id: string;
-	header: string;
-	question: string;
-	options: PlanModeQuestionOption[];
-};
-
-type PlanModeQuestionParams = {
-	questions: PlanModeQuestion[];
-};
-
-type PlanModeQuestionAnswer = {
-	id: string;
-	header: string;
-	question: string;
-	answer: string;
-	wasCustom: boolean;
-	optionIndex?: number;
-};
-
-type PlanModeQuestionReason = "cancelled" | "ui_unavailable" | "plan_mode_inactive" | "invalid_input";
-
-type PlanModeQuestionDetails = {
-	cancelled: boolean;
-	reason?: PlanModeQuestionReason;
-	questions: PlanModeQuestion[];
-	answers?: PlanModeQuestionAnswer[];
-};
+type PlanToolSelectorValue =
+	| { kind: "tool"; tool: ToolInfo }
+	| { kind: "action"; action: "previous" | "next" | "done" };
 
 const PLAN_COMMAND_COMPLETIONS: readonly CommandArgumentCompletion[] = [
+	{ value: "show", label: "show", description: "Show the completed plan" },
+	{ value: "finalize", label: "finalize", description: "Request a completed plan" },
+	{ value: "implement", label: "implement", description: "Implement the completed plan" },
 	{ value: "exit", label: "exit", description: "Leave Plan mode" },
 	{ value: "off", label: "off", description: "Leave Plan mode" },
 	{ value: "tools", label: "tools", description: "Select tools allowed in Plan mode" },
 ];
 
-const PLAN_MODE_QUESTION_PARAMS = {
-	type: "object",
-	additionalProperties: false,
-	required: ["questions"],
-	properties: {
-		questions: {
-			type: "array",
-			minItems: 1,
-			maxItems: 3,
-			description: "Questions to show the user. Prefer 1 and do not exceed 3.",
-			items: {
-				type: "object",
-				additionalProperties: false,
-				required: ["id", "header", "question", "options"],
-				properties: {
-					id: {
-						type: "string",
-						description: "Stable identifier for mapping answers (snake_case).",
-					},
-					header: {
-						type: "string",
-						description: "Short header label shown in the UI (12 or fewer chars).",
-					},
-					question: {
-						type: "string",
-						description: "Single-sentence prompt shown to the user.",
-					},
-					options: {
-						type: "array",
-						minItems: 2,
-						maxItems: 4,
-						description:
-							"Provide 2-4 mutually exclusive choices. Put the recommended option first when there is a clear default.",
-						items: {
-							type: "object",
-							additionalProperties: false,
-							required: ["label", "description"],
-							properties: {
-								label: {
-									type: "string",
-									description: "User-facing label (1-5 words).",
-								},
-								description: {
-									type: "string",
-									description: "One short sentence explaining impact/tradeoff if selected.",
-								},
-							},
-						},
-					},
-				},
-			},
-		},
-	},
-} as const;
-
-const MUTATING_BASH_PATTERNS = [
-	/\brm\b/i,
-	/\brmdir\b/i,
-	/\bmv\b/i,
-	/\bcp\b/i,
-	/\bmkdir\b/i,
-	/\btouch\b/i,
-	/\bchmod\b/i,
-	/\bchown\b/i,
-	/\bchgrp\b/i,
-	/\bln\b/i,
-	/\btee\b/i,
-	/\btruncate\b/i,
-	/\bdd\b/i,
-	/(^|[^<])>(?!>)/,
-	/>>/,
-	/\bnpm\s+(install|uninstall|update|ci|link|publish|version)\b/i,
-	/\byarn\s+(add|remove|install|publish|upgrade)\b/i,
-	/\bpnpm\s+(add|remove|install|publish|update)\b/i,
-	/\bbun\s+(add|remove|install|update|publish)\b/i,
-	/\bpip\s+(install|uninstall)\b/i,
-	/\buv\s+(add|remove|sync|lock|pip\s+install)\b/i,
-	/\bgit\s+(add|commit|push|pull|merge|rebase|reset|checkout|switch|stash|cherry-pick|revert|tag|init|clone)\b/i,
-	/\bsudo\b/i,
-	/\bsu\b/i,
-	/\bkill\b/i,
-	/\bpkill\b/i,
-	/\bkillall\b/i,
-	/\breboot\b/i,
-	/\bshutdown\b/i,
-	/\bsystemctl\s+(start|stop|restart|enable|disable)\b/i,
-	/\bservice\s+\S+\s+(start|stop|restart)\b/i,
-	/\b(vim?|nano|emacs|code|subl)\b/i,
-];
-
-const SAFE_BASH_PATTERNS = [
-	/^\s*(cat|head|tail|less|more|grep|find|ls|pwd|echo|printf|wc|sort|uniq|diff|file|stat|du|df|tree|which|whereis|type|env|printenv|uname|whoami|id|date|uptime|ps|jq|awk|rg|fd|bat|eza)\b/i,
-	/^\s*sed\s+-n\b/i,
-	/^\s*git\s+(status|log|diff|show|branch|remote|config\s+--get|ls-files|grep)\b/i,
-	/^\s*npm\s+(list|ls|view|info|search|outdated|audit)\b/i,
-	/^\s*(node|python|python3|npm|tsc|biome|ruff|ty)\s+--version\b/i,
-];
-
-/**
- * Plan Mode 扩展入口函数
- *
- * 定位：Pi 扩展的默认导出，在加载时由 Pi 调用一次，注册所有命令、工具和事件钩子。
- *
- * 被谁调用：Pi 扩展加载器（通过 package.json 的 pi.extensions 配置）
- *
- * 内部注册内容：
- * - registerFlag("plan")          — --plan CLI 标志
- * - registerTool("plan_mode_question") — Agent 结构化提问工具
- * - registerCommand("plan")       — /plan 命令及子命令
- * - on("session_start")           — 会话启动时恢复 Plan Mode 状态
- * - on("session_shutdown")        — 会话关闭时持久化状态
- * - on("tool_call")               — 拦截 mutating 工具调用
- * - on("context")                 — 清理上下文中的 plan mode artifact
- * - on("before_agent_start")      — 注入 Plan Mode system prompt
- * - on("agent_end")               — 检测 <proposed_plan> 并引导用户
- *
- * @param pi Pi 扩展 API 实例
- */
 export default function planMode(pi: ExtensionAPI) {
 	let state: PlanModeState = { enabled: false, awaitingAction: false };
+	let settings: PlanModeSettings = { thinkingLevel: "inherit" };
 	let previousTools: string[] | undefined;
+	let readyPresentationIntent: ReadyPresentationIntent | undefined;
+	let nextReadyPresentationNonce = 0;
 
 	pi.registerFlag("plan", {
 		description: "Start in Codex-like Plan mode",
@@ -291,15 +145,50 @@ export default function planMode(pi: ExtensionAPI) {
 		},
 	});
 
-	// ── /plan 命令：进入/管理 Plan Mode ──
-	// 参数分发逻辑：exit/off → 退出；tools → 工具选择器；有 prompt → 进入+发送；
-	// 不在 plan mode → 进入；已在 plan mode → 显示菜单
+	pi.registerTool({
+		name: PLAN_MODE_COMPLETE_TOOL_NAME,
+		label: "Complete plan",
+		description:
+			"Submit the complete decision-ready implementation plan for user review. Only available while Plan mode is active, and must be the final standalone action.",
+		promptSnippet: "Submit the final Plan-mode implementation plan",
+		promptGuidelines: [
+			"Call plan_mode_complete alone as the final action only after the implementation plan is decision-complete.",
+		],
+		parameters: PLAN_MODE_COMPLETE_PARAMS,
+		async execute(_toolCallId, params: unknown, _signal, _onUpdate, ctx) {
+			if (!state.enabled) {
+				throw new Error("plan_mode_complete is only available while Plan mode is active");
+			}
+			const parsed = normalizePlanModeCompletion(params);
+			if (!parsed.ok) throw new Error(parsed.error);
+
+			acceptCompletedPlan(parsed.plan, PLAN_MODE_COMPLETE_TOOL_NAME, ctx);
+			return planModeCompleted(parsed.plan);
+		},
+	});
+
 	pi.registerCommand("plan", {
 		description: "Enter or manage Codex-like Plan mode",
 		getArgumentCompletions: completePlanArguments,
 		handler: async (args, ctx) => {
 			const prompt = args.trim();
 			const command = prompt.toLowerCase();
+			if (command === "show") {
+				showStoredPlan(ctx);
+				return;
+			}
+			if (command === "finalize") {
+				requestFinalPlan(ctx);
+				return;
+			}
+			if (command === "implement") {
+				if (!state.enabled || !state.latestPlan?.trim()) {
+					ctx.ui.notify("No completed plan is available to implement.", "warning");
+					return;
+				}
+				startImplementation(ctx);
+				return;
+			}
 			if (command === "exit" || command === "off") {
 				exitPlanMode(ctx);
 				ctx.ui.notify("Plan mode disabled. Proposed plan discarded.", "info");
@@ -323,33 +212,75 @@ export default function planMode(pi: ExtensionAPI) {
 		},
 	});
 
-	// ── 会话生命周期：恢复/持久化 Plan Mode 状态 ──
-	pi.on("session_start", (_event, ctx) => {
+	pi.on("session_start", async (_event, ctx) => {
+		readyPresentationIntent = undefined;
+		settings = { thinkingLevel: "inherit" };
+		const loadedSettings = await readPlanModeSettings();
+		if (loadedSettings.kind === "loaded") settings = loadedSettings.settings;
+		else if (loadedSettings.kind === "invalid") {
+			ctx.ui.notify(`pi-plan-mode settings ignored: ${loadedSettings.reason}`, "warning");
+		}
+		if (loadedSettings.notice) ctx.ui.notify(loadedSettings.notice, "warning");
 		restoreState(ctx);
 		if (pi.getFlag("plan") === true) state.enabled = true;
-		if (state.enabled) activatePlanModeTools();
-		else deactivatePlanModeQuestionTool();
+		if (state.enabled) {
+			activatePlanModeTools();
+			applyPlanThinkingLevel();
+		} else deactivatePlanModeQuestionTool();
 		updateUi(ctx);
 	});
 
+	pi.on("thinking_level_select", (event) => {
+		if (!state.enabled || !state.appliedThinkingLevel) return;
+		if (event.level !== state.appliedThinkingLevel) {
+			state = {
+				...state,
+				manualThinkingLevel: event.level,
+				previousThinkingLevel: undefined,
+				appliedThinkingLevel: undefined,
+			};
+			persistState();
+		}
+	});
+
 	pi.on("session_shutdown", (_event, ctx) => {
+		readyPresentationIntent = undefined;
+		captureManualThinkingLevel();
 		persistState();
+		if (state.enabled) {
+			restoreTools();
+			restoreThinkingLevel();
+		}
 		clearUi(ctx);
 	});
 
-	// ── 工具调用拦截：在 Plan Mode 下阻止 mutating 工具和 bash 命令 ──
 	pi.on("tool_call", async (event) => {
 		if (!state.enabled) return;
-		if (isBlockedBuiltinToolName(event.toolName)) {
+		if (event.toolName === "update_plan") {
 			return {
 				block: true,
-				reason: `Plan mode blocks built-in mutating tool '${event.toolName}'. Use /plan and choose implementation when the plan is ready.`,
+				reason:
+					"Plan mode blocks update_plan because it tracks execution progress rather than conversational planning.",
 			};
 		}
-		if (event.toolName !== "bash" || !isBuiltinToolName(event.toolName)) return;
+		const calledTool = toolByName(event.toolName);
+		if (calledTool && classifyPlanModeTool(calledTool) === "blocked") {
+			return {
+				block: true,
+				reason: `Plan mode blocks built-in tool '${event.toolName}' because its policy class is blocked.`,
+			};
+		}
+		if (!calledTool && BLOCKED_BUILTIN_TOOLS.has(event.toolName)) {
+			return {
+				block: true,
+				reason: `Plan mode blocks built-in tool '${event.toolName}' because its metadata is unavailable.`,
+			};
+		}
+		// Built-in-compatible overrides retain the canonical name but replace its source metadata.
+		if (event.toolName !== "bash") return;
 
 		const command = readCommand(event.input);
-		if (!isSafeCommand(command)) {
+		if (!isSafeCommand(command, settings.safeSubcommands)) {
 			return {
 				block: true,
 				reason: `Plan mode blocks mutating or non-allowlisted bash commands.\nCommand: ${command}`,
@@ -357,8 +288,6 @@ export default function planMode(pi: ExtensionAPI) {
 		}
 	});
 
-	// ── 上下文过滤：清理 Plan Mode 相关的 artifact 消息 ──
-	// 在 Plan Mode 启用时过滤遗留的 plan context；退出后过滤 proposed_plan 和 plan mode 标记
 	pi.on("context", async (event) => {
 		const messagesWithoutLegacyPlanContext = event.messages.filter(
 			(message: unknown) => !messageContainsLegacyPlanModeContextArtifact(message),
@@ -367,15 +296,22 @@ export default function planMode(pi: ExtensionAPI) {
 		return {
 			messages: messagesWithoutLegacyPlanContext
 				.filter((message: unknown) => !messageContainsInactivePlanModeArtifact(message))
-				.map(stripProposedPlanBlocksFromMessage),
+				.map(stripProposedPlanBlocksFromMessage)
+				.map(stripPlanModeCompletionCallsFromMessage)
+				.filter((message: unknown) => !isEmptyAssistantMessage(message)),
 		};
 	});
 
-	// ── Agent 启动前：注入 Plan Mode system prompt 并应用工具限制 ──
 	pi.on("before_agent_start", (event, ctx) => {
 		if (!state.enabled) return;
 		if (state.latestPlan || state.awaitingAction) {
-			state = { ...state, latestPlan: undefined, awaitingAction: false };
+			readyPresentationIntent = undefined;
+			state = {
+				...state,
+				latestPlan: undefined,
+				latestPlanSource: undefined,
+				awaitingAction: false,
+			};
 			persistState();
 			updateUi(ctx);
 		}
@@ -385,96 +321,172 @@ export default function planMode(pi: ExtensionAPI) {
 		};
 	});
 
-	// ── Agent 结束后：检测 <proposed_plan> 块并引导用户下一步 ──
-	// 提取 assistant 最新消息中的 proposed_plan → 标记 awaitingAction → 异步弹出 Plan Ready 菜单
 	pi.on("agent_end", async (event, ctx) => {
 		if (!state.enabled) return;
 
 		const text = latestAssistantText(event.messages);
-		const proposedPlan = extractProposedPlan(text);
-		if (!proposedPlan) {
+		const parsedPlan = parseProposedPlan(text);
+		if (parsedPlan.kind !== "valid") {
+			if (parsedPlan.kind !== "absent") {
+				ctx.ui.notify(invalidPlanMessage(parsedPlan.kind), "warning");
+			}
 			persistState();
 			updateUi(ctx);
 			return;
 		}
-
-		state = { ...state, latestPlan: proposedPlan, awaitingAction: true };
-		persistState();
-		updateUi(ctx);
-
-		scheduleAfterCurrentAgentRun(async () => {
-			if (!state.enabled || state.latestPlan !== proposedPlan) return;
-			if (ctx.hasUI) await showPlanReadyMenu(ctx);
-			if (!state.enabled || state.latestPlan !== proposedPlan) return;
-
-			pi.sendMessage(
-				{
-					customType: PROPOSED_PLAN_MESSAGE_TYPE,
-					content: `**Proposed Plan**\n\n${proposedPlan}`,
-					display: true,
-				},
-				{ triggerTurn: false },
-			);
-		});
+		acceptCompletedPlan(parsedPlan.plan, "legacy_proposed_plan", ctx);
 	});
 
-	// ═══════════════════════════════════════════════════
-	//  内部函数：Plan Mode 生命周期管理
-	// ═══════════════════════════════════════════════════
+	onAgentSettled(pi, async (_event, ctx) => {
+		const intent = readyPresentationIntent;
+		if (!intent || !readyPresentationIsCurrent(intent)) return;
+		if (!ctx.isIdle() || ctx.hasPendingMessages()) return;
 
-	/** 进入 Plan Mode：保存当前工具列表、启用模式、应用限制工具集 */
+		readyPresentationIntent = undefined;
+		try {
+			if (intent.source === "legacy_proposed_plan") {
+				pi.sendMessage(
+					{
+						customType: PROPOSED_PLAN_MESSAGE_TYPE,
+						content: `**Proposed Plan**\n\n${intent.plan}`,
+						display: true,
+					},
+					{ triggerTurn: false },
+				);
+			}
+			if (ctx.hasUI && completedPlanIsCurrent(intent)) {
+				await showPlanReadyMenu(ctx);
+			}
+		} catch (error: unknown) {
+			if (!isStaleExtensionContextError(error)) throw error;
+		}
+	});
+
 	function enterPlanMode(ctx: ExtensionContext) {
-		if (!state.enabled) previousTools = withoutPlanModeQuestionTool(safeGetActiveTools());
+		if (!state.enabled) previousTools = withoutRequiredPlanModeTools(safeGetActiveTools());
 		state = { ...state, enabled: true, awaitingAction: false };
 		activatePlanModeTools();
+		applyPlanThinkingLevel();
 		persistState();
 		updateUi(ctx);
 	}
 
-	/** 进入 Plan Mode 并立即发送用户提示词作为首条 Plan Mode 消息 */
 	function enterPlanModeWithPrompt(prompt: string, ctx: ExtensionContext) {
 		const wasEnabled = state.enabled;
 		enterPlanMode(ctx);
 		if (!wasEnabled) {
 			ctx.ui.notify("Plan mode enabled. I will explore and plan, but not modify files.", "info");
 		}
-		sendPlanModeUserMessage(prompt, ctx);
+		if (!sendPlanModeUserMessage(prompt, ctx) && !wasEnabled) exitPlanMode(ctx);
 	}
 
-	/** 退出 Plan Mode：清空 proposed_plan 状态、恢复完整工具集、更新 UI */
 	function exitPlanMode(ctx: ExtensionContext) {
 		const wasEnabled = state.enabled;
-		state = { ...state, enabled: false, latestPlan: undefined, awaitingAction: false };
-		if (wasEnabled) restoreTools();
+		readyPresentationIntent = undefined;
+		state = {
+			...state,
+			enabled: false,
+			latestPlan: undefined,
+			latestPlanSource: undefined,
+			awaitingAction: false,
+			manualThinkingLevel: undefined,
+		};
+		if (wasEnabled) {
+			restoreTools();
+			restoreThinkingLevel();
+			state = { ...state, manualThinkingLevel: undefined };
+		}
 		persistState();
 		updateUi(ctx);
 	}
 
-	/** 向 Pi 发送用户消息，自动处理 Agent 繁忙/空闲状态 */
 	function sendPlanModeUserMessage(message: string, ctx: ExtensionContext) {
-		if (ctx.isIdle()) pi.sendUserMessage(message);
-		else pi.sendUserMessage(message, { deliverAs: "followUp" });
+		try {
+			if (ctx.isIdle()) pi.sendUserMessage(message);
+			else pi.sendUserMessage(message, { deliverAs: "followUp" });
+			return true;
+		} catch (error: unknown) {
+			const detail = error instanceof Error ? error.message : String(error);
+			ctx.ui.notify(`Unable to send Plan-mode message: ${detail}`, "error");
+			return false;
+		}
 	}
 
-	/**
-	 * 在 agent_end 回调中延迟执行任务，确保当前 Agent 运行已完全结束。
-	 * 使用 setTimeout(0) 推迟到下一个 macrotask，避免在 Pi 尚未 idle 时触发新 turn。
-	 */
-	function scheduleAfterCurrentAgentRun(task: () => Promise<void> | void) {
-		setTimeout(() => {
-			void Promise.resolve(task()).catch((error: unknown) => {
-				const message = error instanceof Error ? error.message : String(error);
-				console.error(`Plan mode follow-up failed: ${message}`);
-			});
-		}, 0);
+	function acceptCompletedPlan(plan: string, source: PlanCompletionSource, ctx: ExtensionContext) {
+		if (
+			state.enabled &&
+			state.awaitingAction &&
+			state.latestPlan === plan &&
+			state.latestPlanSource === source
+		) {
+			return;
+		}
+		state = {
+			...state,
+			latestPlan: plan,
+			latestPlanSource: source,
+			awaitingAction: true,
+		};
+		readyPresentationIntent = {
+			nonce: ++nextReadyPresentationNonce,
+			plan,
+			source,
+		};
+		persistState();
+		updateUi(ctx);
 	}
 
-	/**
-	 * 启动实现：退出 Plan Mode，恢复全部工具，将 proposed_plan 作为实现指令发送给 Agent。
-	 * 这是 Plan Mode → Execution 的正式桥接点。
-	 */
+	function completedPlanIsCurrent(intent: ReadyPresentationIntent) {
+		return (
+			state.enabled &&
+			state.awaitingAction &&
+			state.latestPlan === intent.plan &&
+			state.latestPlanSource === intent.source
+		);
+	}
+
+	function readyPresentationIsCurrent(intent: ReadyPresentationIntent) {
+		return completedPlanIsCurrent(intent) && readyPresentationIntent?.nonce === intent.nonce;
+	}
+
+	function showStoredPlan(ctx: ExtensionContext) {
+		const plan = state.latestPlan?.trim();
+		if (!state.enabled || !plan) {
+			ctx.ui.notify(
+				"No completed plan is available. Use /plan finalize when planning is complete.",
+				"info",
+			);
+			return;
+		}
+		try {
+			pi.sendMessage(
+				{
+					customType: PROPOSED_PLAN_MESSAGE_TYPE,
+					content: `**Proposed Plan**\n\n${plan}`,
+					display: true,
+				},
+				{ triggerTurn: false },
+			);
+		} catch (error: unknown) {
+			const detail = error instanceof Error ? error.message : String(error);
+			ctx.ui.notify(`Unable to show completed plan: ${detail}`, "error");
+		}
+	}
+
+	function requestFinalPlan(ctx: ExtensionContext) {
+		if (!state.enabled) {
+			ctx.ui.notify("Plan mode is not active. Use /plan first.", "warning");
+			return;
+		}
+		sendPlanModeUserMessage(
+			"Finalize the current implementation plan now. If any material decision remains, use plan_mode_question instead. Otherwise call plan_mode_complete alone as your final action with the complete decision-ready plan.",
+			ctx,
+		);
+	}
+
 	function startImplementation(ctx: ExtensionContext) {
 		const plan = state.latestPlan?.trim();
+		const source = state.latestPlanSource;
 		exitPlanMode(ctx);
 
 		if (!plan) {
@@ -482,20 +494,18 @@ export default function planMode(pi: ExtensionAPI) {
 			return;
 		}
 
-		sendPlanModeUserMessage(
+		const sent = sendPlanModeUserMessage(
 			`Plan mode is now disabled. Full tool access is restored. Implement this proposed plan now:\n\n${plan}`,
 			ctx,
 		);
+		if (!sent) {
+			enterPlanMode(ctx);
+			state = { ...state, latestPlan: plan, latestPlanSource: source, awaitingAction: true };
+			persistState();
+			updateUi(ctx);
+		}
 	}
 
-	// ═══════════════════════════════════════════════════
-	//  内部函数：UI 交互（菜单、工具选择器）
-	// ═══════════════════════════════════════════════════
-
-	/**
-	 * 显示 Plan Mode 主菜单（进入后的管理界面）。
-	 * 有 proposed_plan 时多出 "Show"/"Implement" 选项。
-	 */
 	async function showPlanMenu(ctx: ExtensionContext) {
 		if (!ctx.hasUI) {
 			ctx.ui.notify(planStatusText(), "info");
@@ -510,10 +520,14 @@ export default function planMode(pi: ExtensionAPI) {
 					"Stay in Plan mode",
 					"Exit Plan mode",
 				]
-			: ["Configure Plan-mode tools", "Stay in Plan mode", "Exit Plan mode"];
+			: ["Request final plan", "Configure Plan-mode tools", "Stay in Plan mode", "Exit Plan mode"];
 		const choice = await ctx.ui.select(planStatusText(), choices);
 		if (choice === "Show latest proposed plan") {
-			ctx.ui.notify(state.latestPlan ?? "No proposed plan yet.", "info");
+			showStoredPlan(ctx);
+			return;
+		}
+		if (choice === "Request final plan") {
+			requestFinalPlan(ctx);
 			return;
 		}
 		if (choice === "Implement this plan") {
@@ -532,10 +546,6 @@ export default function planMode(pi: ExtensionAPI) {
 		updateUi(ctx);
 	}
 
-	/**
-	 * 检测到 <proposed_plan> 后弹出 Plan Ready 菜单。
-	 * 提供 "Implement" / "Stay" / "Exit" 三选一。
-	 */
 	async function showPlanReadyMenu(ctx: ExtensionContext) {
 		const choice = await ctx.ui.select("Proposed plan ready. What next?", [
 			"Implement this plan",
@@ -552,16 +562,62 @@ export default function planMode(pi: ExtensionAPI) {
 		}
 	}
 
-	/**
-	 * 工具选择器：分页展示可用工具，让用户勾选/取消 Plan Mode 下允许的工具。
-	 * 内置 safe 工具默认选中；non-built-in 工具按"用户自担风险"标记。
-	 */
 	async function showToolSelector(ctx: ExtensionContext) {
 		if (!ctx.hasUI) {
 			ctx.ui.notify(formatToolSummary(), "info");
 			return;
 		}
 
+		const tools = selectableTools();
+		const pageCount = toolSelectorPageCount(tools);
+		let pageIndex = 0;
+		const customHandled = await showPersistentSelector(
+			ctx,
+			() => {
+				pageIndex = Math.min(pageIndex, pageCount - 1);
+				const pageStart = pageIndex * TOOL_SELECTOR_PAGE_SIZE;
+				const pageTools = tools.slice(pageStart, pageStart + TOOL_SELECTOR_PAGE_SIZE);
+				const selectedNames = planModeSelectedNames(tools);
+				const rows: Array<{ value: PlanToolSelectorValue; label: string }> = pageTools.map(
+					(tool, index) => ({
+						value: { kind: "tool", tool },
+						label: formatToolChoice(tool, selectedNames.has(tool.name), pageStart + index),
+					}),
+				);
+				if (pageIndex > 0) {
+					rows.push({ value: { kind: "action", action: "previous" }, label: "Previous page" });
+				}
+				if (pageIndex < pageCount - 1) {
+					rows.push({ value: { kind: "action", action: "next" }, label: "Next page" });
+				}
+				rows.push({ value: { kind: "action", action: "done" }, label: "Done" });
+				return {
+					title: `Plan-mode tools (${pageIndex + 1}/${pageCount}). Non-built-in tools run at user risk.`,
+					rows,
+				};
+			},
+			(value) => {
+				if (value.kind === "action") {
+					if (value.action === "done") return "close";
+					pageIndex += value.action === "previous" ? -1 : 1;
+					return "reset";
+				}
+				if (!canSelectToolInPlanMode(value.tool)) {
+					ctx.ui.notify(`${value.tool.name} is blocked in Plan mode.`, "warning");
+					return "stay";
+				}
+				togglePlanModeTool(value.tool, tools, ctx);
+				return "stay";
+			},
+		);
+		if (!customHandled) await showDialogToolSelector(ctx);
+
+		applyPlanModeTools();
+		persistState();
+		updateUi(ctx);
+	}
+
+	async function showDialogToolSelector(ctx: ExtensionContext) {
 		let pageIndex = 0;
 		while (true) {
 			const tools = selectableTools();
@@ -585,7 +641,7 @@ export default function planMode(pi: ExtensionAPI) {
 				`Plan-mode tools (${pageIndex + 1}/${pageCount}). Non-built-in tools run at user risk.`,
 				[...choices, ...navigationChoices],
 			);
-			if (!choice || choice === doneChoice) break;
+			if (!choice || choice === doneChoice) return;
 			if (choice === previousChoice) {
 				pageIndex = Math.max(0, pageIndex - 1);
 				continue;
@@ -594,40 +650,31 @@ export default function planMode(pi: ExtensionAPI) {
 				pageIndex = Math.min(pageCount - 1, pageIndex + 1);
 				continue;
 			}
-
-			const selectedIndex = choices.indexOf(choice);
-			const tool = pageTools[selectedIndex];
+			const tool = pageTools[choices.indexOf(choice)];
 			if (!tool) continue;
 			if (!canSelectToolInPlanMode(tool)) {
 				ctx.ui.notify(`${tool.name} is blocked in Plan mode.`, "warning");
 				continue;
 			}
-
-			const nextSelectedNames = planModeSelectedNames(tools);
-			if (nextSelectedNames.has(tool.name)) nextSelectedNames.delete(tool.name);
-			else nextSelectedNames.add(tool.name);
-
-			state = {
-				...state,
-				selectedToolNames: filterAvailableSelectedNames(Array.from(nextSelectedNames), tools),
-			};
-			applyPlanModeTools();
-			persistState();
-			updateUi(ctx);
+			togglePlanModeTool(tool, tools, ctx);
 		}
+	}
 
+	function togglePlanModeTool(tool: ToolInfo, tools: ToolInfo[], ctx: ExtensionContext) {
+		const nextSelectedNames = planModeSelectedNames(tools);
+		if (nextSelectedNames.has(tool.name)) nextSelectedNames.delete(tool.name);
+		else nextSelectedNames.add(tool.name);
+		state = {
+			...state,
+			selectedToolNames: filterAvailableSelectedNames(Array.from(nextSelectedNames), tools),
+		};
 		applyPlanModeTools();
 		persistState();
 		updateUi(ctx);
 	}
 
-	// ═══════════════════════════════════════════════════
-	//  内部函数：工具集管理
-	// ═══════════════════════════════════════════════════
-
-	/** 首次进入 Plan Mode 时激活工具集（保存旧列表，应用新列表） */
 	function activatePlanModeTools() {
-		previousTools ??= withoutPlanModeQuestionTool(safeGetActiveTools());
+		previousTools ??= withoutRequiredPlanModeTools(safeGetActiveTools());
 		applyPlanModeTools();
 	}
 
@@ -637,7 +684,14 @@ export default function planMode(pi: ExtensionAPI) {
 
 	function planModeToolNames() {
 		const tools = selectableTools();
-		if (tools.length === 0) return ["read", "bash", PLAN_MODE_QUESTION_TOOL_NAME];
+		if (
+			tools.length === 0 &&
+			state.selectedToolNames === undefined &&
+			state.selectedToolKeys === undefined &&
+			settings.defaultPlanTools === undefined
+		) {
+			return ["read", "bash", PLAN_MODE_QUESTION_TOOL_NAME, PLAN_MODE_COMPLETE_TOOL_NAME];
+		}
 
 		const selectedNames = planModeSelectedNames(tools);
 		return withRequiredPlanModeTools(
@@ -660,6 +714,9 @@ export default function planMode(pi: ExtensionAPI) {
 	}
 
 	function defaultPlanModeToolNames(tools: ToolInfo[]) {
+		if (settings.defaultPlanTools !== undefined) {
+			return filterAvailableSelectedNames(settings.defaultPlanTools, tools);
+		}
 		return tools
 			.filter((tool) => isBuiltinTool(tool) && SAFE_BUILTIN_PLAN_TOOLS.has(tool.name))
 			.map((tool) => tool.name);
@@ -679,7 +736,10 @@ export default function planMode(pi: ExtensionAPI) {
 
 	function selectableTools() {
 		return safeGetAllTools()
-			.filter((tool) => tool.name !== PLAN_MODE_QUESTION_TOOL_NAME)
+			.filter(
+				(tool) =>
+					tool.name !== PLAN_MODE_QUESTION_TOOL_NAME && tool.name !== PLAN_MODE_COMPLETE_TOOL_NAME,
+			)
 			.sort(compareTools);
 	}
 
@@ -696,14 +756,61 @@ export default function planMode(pi: ExtensionAPI) {
 	}
 
 	function restoreTools() {
-		const restoredTools = previousTools && previousTools.length > 0 ? previousTools : DEFAULT_TOOLS;
-		pi.setActiveTools(withoutPlanModeQuestionTool(restoredTools));
+		const restoredTools = previousTools ?? DEFAULT_TOOLS;
+		pi.setActiveTools(withoutRequiredPlanModeTools(restoredTools));
 		previousTools = undefined;
+	}
+
+	function applyPlanThinkingLevel() {
+		if (state.manualThinkingLevel) {
+			if (pi.getThinkingLevel() !== state.manualThinkingLevel) {
+				setPlanThinkingLevel(pi, state.manualThinkingLevel);
+			}
+			return;
+		}
+		const configured = configuredThinkingLevel(settings);
+		if (!configured) {
+			state = {
+				...state,
+				previousThinkingLevel: undefined,
+				appliedThinkingLevel: undefined,
+			};
+			return;
+		}
+		const current = pi.getThinkingLevel();
+		if (!state.appliedThinkingLevel) state.previousThinkingLevel = current;
+		if (current !== configured) setPlanThinkingLevel(pi, configured);
+		state.appliedThinkingLevel = pi.getThinkingLevel();
+	}
+
+	function captureManualThinkingLevel() {
+		if (!state.appliedThinkingLevel) return;
+		const current = pi.getThinkingLevel();
+		if (current === state.appliedThinkingLevel) return;
+		state = {
+			...state,
+			manualThinkingLevel: current,
+			previousThinkingLevel: undefined,
+			appliedThinkingLevel: undefined,
+		};
+	}
+
+	function restoreThinkingLevel() {
+		captureManualThinkingLevel();
+		const { appliedThinkingLevel, previousThinkingLevel } = state;
+		if (
+			appliedThinkingLevel &&
+			previousThinkingLevel &&
+			pi.getThinkingLevel() === appliedThinkingLevel
+		) {
+			setPlanThinkingLevel(pi, previousThinkingLevel);
+		}
+		state = { ...state, appliedThinkingLevel: undefined, previousThinkingLevel: undefined };
 	}
 
 	function deactivatePlanModeQuestionTool() {
 		const activeTools = safeGetActiveTools();
-		const filteredTools = withoutPlanModeQuestionTool(activeTools);
+		const filteredTools = withoutRequiredPlanModeTools(activeTools);
 		if (filteredTools.length !== activeTools.length) {
 			pi.setActiveTools(filteredTools);
 		}
@@ -717,30 +824,12 @@ export default function planMode(pi: ExtensionAPI) {
 		}
 	}
 
-	// ═══════════════════════════════════════════════════
-	//  内部函数：状态持久化与 UI 更新
-	// ═══════════════════════════════════════════════════
-
-	/** 将当前 Plan Mode 状态写入会话条目 */
 	function persistState() {
 		pi.appendEntry<PlanModeState>(STATE_ENTRY_TYPE, state);
 	}
 
-	/** 从会话条目中恢复 Plan Mode 状态 */
 	function restoreState(ctx: ExtensionContext) {
-		const entries = ctx.sessionManager.getEntries() as SessionEntry[];
-		const entry = entries
-			.filter((candidate) => candidate.type === "custom" && candidate.customType === STATE_ENTRY_TYPE)
-			.pop();
-		if (!entry?.data) return;
-		const enabled = entry.data.enabled ?? false;
-		state = {
-			enabled,
-			latestPlan: enabled ? entry.data.latestPlan : undefined,
-			awaitingAction: enabled ? (entry.data.awaitingAction ?? false) : false,
-			selectedToolNames: entry.data.selectedToolNames,
-			selectedToolKeys: entry.data.selectedToolKeys,
-		};
+		state = restorePlanModeState(ctx.sessionManager.getBranch(), STATE_ENTRY_TYPE);
 	}
 
 	function updateUi(ctx: ExtensionContext) {
@@ -754,7 +843,7 @@ export default function planMode(pi: ExtensionAPI) {
 			ctx.ui.setWidget(PLAN_WIDGET_KEY, [
 				"Plan mode: planning",
 				formatToolSummary(),
-				"Produce a <proposed_plan> block.",
+				"Finish with plan_mode_complete when decision-ready.",
 			]);
 		} else {
 			ctx.ui.setWidget(PLAN_WIDGET_KEY, undefined);
@@ -774,8 +863,9 @@ export default function planMode(pi: ExtensionAPI) {
 
 	function planStatusText() {
 		if (!state.enabled) return "Plan mode is off.";
-		if (state.latestPlan) return `Plan mode is active and a proposed plan is ready. ${formatToolSummary()}`;
-		return `Plan mode is active. ${formatToolSummary()} Explore, ask, and produce a <proposed_plan> block.`;
+		if (state.latestPlan)
+			return `Plan mode is active and a proposed plan is ready. ${formatToolSummary()}`;
+		return `Plan mode is active. ${formatToolSummary()} Explore, ask, and finish with plan_mode_complete when decision-ready.`;
 	}
 
 	function formatToolSummary() {
@@ -783,39 +873,11 @@ export default function planMode(pi: ExtensionAPI) {
 		return `Tools: ${names.length > 0 ? names.join(", ") : "none"}`;
 	}
 
-	function isBlockedBuiltinToolName(toolName: string) {
-		if (!BLOCKED_BUILTIN_TOOLS.has(toolName)) return false;
-		const tool = toolByName(toolName);
-		return tool ? isBuiltinTool(tool) : true;
-	}
-
-	function isBuiltinToolName(toolName: string) {
-		const tool = toolByName(toolName);
-		return tool ? isBuiltinTool(tool) : toolName === "bash";
-	}
-
 	function toolByName(toolName: string) {
 		return safeGetAllTools().find((candidate) => candidate.name === toolName);
 	}
 }
 
-// ═══════════════════════════════════════════════════
-//  模块级导出函数：工具判断、命令补全、计划解析
-// ═══════════════════════════════════════════════════
-
-/** 判断工具是否为 Pi 内置工具 */
-function isBuiltinTool(tool: ToolInfo) {
-	return tool.sourceInfo.source === "builtin";
-}
-
-/**
- * /plan 命令的参数补全。
- *
- * 定位：由 registerCommand("plan") 的 getArgumentCompletions 调用。
- *
- * @param argumentPrefix 用户已输入的前缀
- * @returns 匹配的补全项列表，不匹配时返回 null
- */
 export function completePlanArguments(argumentPrefix: string): CommandArgumentCompletion[] | null {
 	const prefix = argumentPrefix.trimStart().toLowerCase();
 	if (prefix === "") return [...PLAN_COMMAND_COMPLETIONS];
@@ -825,20 +887,6 @@ export function completePlanArguments(argumentPrefix: string): CommandArgumentCo
 	return matches.length > 0 ? [...matches] : null;
 }
 
-/**
- * 判断工具是否可在 Plan Mode 中被用户选择启用。
- * 内置工具仅 safe 白名单内的可选；非内置工具一律可选（用户自担风险）。
- */
-export function canSelectToolInPlanMode(tool: ToolInfo) {
-	if (isBuiltinTool(tool)) return SAFE_BUILTIN_PLAN_TOOLS.has(tool.name);
-	return true;
-}
-
-// ═══════════════════════════════════════════════════
-//  模块级内部辅助：工具排序、标签、去重
-// ═══════════════════════════════════════════════════
-
-/** 从旧版 selectedToolKeys（分隔符连接）迁移到 selectedToolNames */
 function toolNameFromLegacyKey(key: string, tools: ToolInfo[]) {
 	const directName = tools.find((tool) => tool.name === key)?.name;
 	if (directName) return directName;
@@ -859,11 +907,11 @@ function formatToolChoice(tool: ToolInfo, selected: boolean, index: number) {
 }
 
 function toolPolicyLabel(tool: ToolInfo) {
-	if (isBuiltinTool(tool)) {
-		if (!SAFE_BUILTIN_PLAN_TOOLS.has(tool.name)) return "built-in blocked";
-		return tool.name === "bash" ? "built-in limited" : "built-in";
-	}
-	return `user risk: ${toolSourceLabel(tool)}`;
+	const policy = classifyPlanModeTool(tool);
+	if (policy === "read-only") return "built-in read-only";
+	if (policy === "limited") return "built-in limited";
+	if (policy === "blocked") return "built-in blocked";
+	return `user opt-in: ${toolSourceLabel(tool)}`;
 }
 
 function toolSourceLabel(tool: ToolInfo) {
@@ -872,382 +920,55 @@ function toolSourceLabel(tool: ToolInfo) {
 	return sourceInfo.path ? `${source} ${sourceInfo.path}` : source;
 }
 
-/** 工具集去重辅助 */
 function unique(values: string[]) {
 	return Array.from(new Set(values));
 }
 
-/**
- * 确保工具名列表中包含 plan_mode_question（Plan Mode 强制要求）。
- * 去重后追加，保证 plan_mode_question 始终在最后。
- */
-export function withRequiredPlanModeTools(toolNames: string[]) {
-	return unique([...withoutPlanModeQuestionTool(toolNames), PLAN_MODE_QUESTION_TOOL_NAME]);
+function isStaleExtensionContextError(error: unknown) {
+	return (
+		error instanceof Error &&
+		(error.message.includes("This extension ctx is stale after session replacement or reload") ||
+			error.message.includes("Extension context is no longer active"))
+	);
 }
 
-/** 从工具集中移除 plan_mode_question（Plan Mode 之外不应有此工具） */
+export function withRequiredPlanModeTools(toolNames: string[]) {
+	return unique([
+		...withoutRequiredPlanModeTools(toolNames),
+		PLAN_MODE_QUESTION_TOOL_NAME,
+		PLAN_MODE_COMPLETE_TOOL_NAME,
+	]);
+}
+
 export function withoutPlanModeQuestionTool(toolNames: string[]) {
 	return toolNames.filter((toolName) => toolName !== PLAN_MODE_QUESTION_TOOL_NAME);
 }
 
-type NormalizePlanModeQuestionParamsResult =
-	| { ok: true; questions: PlanModeQuestion[] }
-	| { ok: false; error: string };
-
-// ═══════════════════════════════════════════════════
-//  plan_mode_question 参数校验
-// ═══════════════════════════════════════════════════
-
-/**
- * 校验 plan_mode_question 工具参数格式。
- *
- * 被谁调用：plan_mode_question 的 execute 回调
- *
- * 校验规则：
- * - questions 必须是 1-3 个元素的数组
- * - 每个 question 必须有 non-empty id/header/question
- * - 每个 question 的 options 必须是 2-4 个带 label/description 的选项
- *
- * @returns ok:true 时携带验证通过的 questions；ok:false 时携带错误描述
- */
-export function normalizePlanModeQuestionParams(input: unknown): NormalizePlanModeQuestionParamsResult {
-	if (!isRecord(input) || !Array.isArray(input.questions)) {
-		return { ok: false, error: "questions must be an array" };
-	}
-	if (input.questions.length < 1 || input.questions.length > 3) {
-		return { ok: false, error: "questions must contain 1-3 items" };
-	}
-
-	const questions: PlanModeQuestion[] = [];
-	for (const [questionIndex, rawQuestion] of input.questions.entries()) {
-		if (!isRecord(rawQuestion)) {
-			return { ok: false, error: `question ${questionIndex + 1} must be an object` };
-		}
-
-		const id = stringField(rawQuestion.id);
-		const header = stringField(rawQuestion.header);
-		const question = stringField(rawQuestion.question);
-		if (!id || !header || !question) {
-			return {
-				ok: false,
-				error: `question ${questionIndex + 1} requires non-empty id, header, and question`,
-			};
-		}
-
-		if (!Array.isArray(rawQuestion.options)) {
-			return { ok: false, error: `question ${questionIndex + 1} options must be an array` };
-		}
-		if (rawQuestion.options.length < 2 || rawQuestion.options.length > 4) {
-			return { ok: false, error: `question ${questionIndex + 1} options must contain 2-4 items` };
-		}
-
-		const options: PlanModeQuestionOption[] = [];
-		for (const [optionIndex, rawOption] of rawQuestion.options.entries()) {
-			if (!isRecord(rawOption)) {
-				return {
-					ok: false,
-					error: `question ${questionIndex + 1} option ${optionIndex + 1} must be an object`,
-				};
-			}
-
-			const label = stringField(rawOption.label);
-			if (!label) {
-				return {
-					ok: false,
-					error: `question ${questionIndex + 1} option ${optionIndex + 1} requires a label`,
-				};
-			}
-			const description = stringField(rawOption.description);
-			if (!description) {
-				return {
-					ok: false,
-					error: `question ${questionIndex + 1} option ${optionIndex + 1} requires a description`,
-				};
-			}
-			options.push({ label, description });
-		}
-
-		questions.push({ id, header, question, options });
-	}
-
-	return { ok: true, questions };
+function withoutRequiredPlanModeTools(toolNames: string[]) {
+	return toolNames.filter(
+		(toolName) =>
+			toolName !== PLAN_MODE_QUESTION_TOOL_NAME && toolName !== PLAN_MODE_COMPLETE_TOOL_NAME,
+	);
 }
 
-/**
- * 逐题向用户弹出选择框，收集 Plan Mode 澄清问题的答案。
- * 每题提供选项 + "Other（自由输入）"路径。任一步取消则返回 undefined。
- */
-async function askPlanModeQuestions(
-	questions: PlanModeQuestion[],
-	ctx: ExtensionContext,
-): Promise<PlanModeQuestionAnswer[] | undefined> {
-	const answers: PlanModeQuestionAnswer[] = [];
-	for (const question of questions) {
-		const choices = question.options.map(formatPlanModeQuestionChoice);
-		const otherChoice = `${question.options.length + 1}. Other (free-form)`;
-		const choice = await ctx.ui.select(`${question.header}: ${question.question}`, [...choices, otherChoice]);
-		if (!choice) return undefined;
-
-		if (choice === otherChoice) {
-			const customAnswer = (await ctx.ui.editor(question.question, ""))?.trim();
-			if (!customAnswer) return undefined;
-			answers.push({
-				id: question.id,
-				header: question.header,
-				question: question.question,
-				answer: customAnswer,
-				wasCustom: true,
-			});
-			continue;
-		}
-
-		const optionIndex = choices.indexOf(choice);
-		const option = question.options[optionIndex];
-		if (!option) return undefined;
-		answers.push({
-			id: question.id,
-			header: question.header,
-			question: question.question,
-			answer: option.label,
-			wasCustom: false,
-			optionIndex: optionIndex + 1,
-		});
-	}
-	return answers;
+function invalidPlanMessage(kind: "empty" | "multiple" | "malformed" | "unclosed") {
+	const detail = {
+		empty: "the block is empty",
+		multiple: "more than one plan block was produced",
+		malformed: "the tags must be on their own lines",
+		unclosed: "the closing tag is missing",
+	}[kind];
+	return `Proposed plan is not ready: ${detail}. Continue Plan mode and produce one complete non-empty <proposed_plan> block.`;
 }
 
-function formatPlanModeQuestionChoice(option: PlanModeQuestionOption, index: number) {
-	return `${index + 1}. ${option.label}${option.description ? ` — ${option.description}` : ""}`;
-}
-
-function planModeQuestionAnswered(questions: PlanModeQuestion[], answers: PlanModeQuestionAnswer[]) {
-	return {
-		content: [{ type: "text" as const, text: formatPlanModeQuestionPayload({ cancelled: false, answers }) }],
-		details: { cancelled: false, questions, answers } satisfies PlanModeQuestionDetails,
-	};
-}
-
-function planModeQuestionCancelled(
-	questions: PlanModeQuestion[],
-	reason: PlanModeQuestionReason,
-	message: string,
-) {
-	return {
-		content: [{ type: "text" as const, text: formatPlanModeQuestionPayload({ cancelled: true, reason, message }) }],
-		details: { cancelled: true, reason, questions } satisfies PlanModeQuestionDetails,
-	};
-}
-
-function formatPlanModeQuestionPayload(payload: {
-	cancelled: boolean;
-	reason?: PlanModeQuestionReason;
-	message?: string;
-	answers?: PlanModeQuestionAnswer[];
-}) {
-	return JSON.stringify(payload, null, 2);
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-	return typeof value === "object" && value !== null;
-}
-
-function stringField(value: unknown) {
-	return typeof value === "string" ? value.trim() : undefined;
-}
-
-// ═══════════════════════════════════════════════════
-//  Plan Mode system prompt
-// ═══════════════════════════════════════════════════
-
-/**
- * 构建 Plan Mode 的 system prompt 注入内容。
- *
- * 定位：由 before_agent_start 事件处理函数调用，追加到原有 system prompt 末尾。
- *
- * 内容包含：
- * - 三阶段规划流程：环境摸索 → 意图澄清 → 实现方案
- * - plan_mode_question 使用指导
- * - <proposed_plan> 输出规范
- */
-function buildPlanModePrompt() {
-	return `${PLAN_CONTEXT_MARKER}
-# Plan Mode (Conversational)
-
-You are in Plan Mode, a Codex-like collaboration mode for producing a decision-complete implementation plan. Chat your way to the plan before finalizing it. A final plan must leave no implementation decisions unresolved.
-
-## Mode rules
-
-- Stay in Plan Mode until a developer or extension explicitly exits it.
-- Treat requests to implement as requests to plan the implementation; do not edit files or carry out the plan.
-- Do not use update_plan/TODO tooling in Plan Mode; Plan Mode is conversational planning, not execution progress tracking.
-- Plan Mode manages built-in tool safety only. Non-built-in tools are disabled by default and may be enabled by the user at their own risk.
-- Do not perform mutating actions: no edit/write tools, no patching, no formatting that rewrites files, no dependency installation, no commits, no migrations.
-
-## Phase 1 — Ground in the environment
-
-- Explore first and ask second. Use non-mutating exploration to read files, search, inspect configuration, run read-only checks, and resolve discoverable facts.
-- Before asking the user any question, perform at least one targeted non-mutating exploration pass unless no local environment or repository is available.
-- Do not ask questions that can be answered from repository or system truth. Ask only when multiple plausible choices remain, a needed identifier/context is missing, or the ambiguity is product intent.
-
-## Phase 2 — Intent chat
-
-- Keep asking until you can clearly state the goal, success criteria, in/out of scope, constraints, current state, and key preferences/tradeoffs.
-- Bias toward questions over guessing: if a high-impact ambiguity remains, do not produce a proposed plan yet.
-
-## Phase 3 — Implementation chat
-
-- Once intent is stable, keep asking until the spec is decision-complete: approach, interfaces, data flow, edge cases/failure modes, testing and acceptance criteria, and any migration or compatibility constraints.
-- Use plan_mode_question for important preferences, tradeoffs, or assumption locks that cannot be discovered by non-mutating exploration. Ask 1-3 concise questions with 2-4 meaningful options. Do not include filler options.
-- If plan_mode_question returns cancelled or ui_unavailable, do not jump straight to a final plan when the missing answer is high impact. Ask one concise plain-text question or proceed only with a clearly stated low-risk assumption.
-
-## Finalization rule
-
-Only output the final plan when it is decision-complete and leaves no decisions to the implementer. When presenting the official plan, output exactly one proposed plan block and keep the tags exactly as shown:
-
-<proposed_plan>
-# Title
-
-## Summary
-...
-
-## Key Changes
-...
-
-## Test Plan
-...
-
-## Assumptions
-...
-</proposed_plan>
-
-Keep the proposed plan concise, human and agent digestible, and free of open decisions. Do not ask "should I proceed?" in the final output; the Plan-mode ready menu handles implementation, staying in Plan mode, or exit.`;
-}
-
-/** 从 tool_call 输入的 { command } 中提取 bash 命令字符串 */
-function readCommand(input: unknown) {
-	const command = input as { command?: unknown } | undefined;
-	return typeof command?.command === "string" ? command.command : "";
-}
-
-// ═══════════════════════════════════════════════════
-//  Bash 命令安全检查
-// ═══════════════════════════════════════════════════
-
-/**
- * 判断 bash 命令是否为安全的只读命令。
- *
- * 两步验证：
- * 1. 先检查是否匹配任何 mutating 模式（文件写入、包安装、git 写操作等）→ 匹配则拒绝
- * 2. 再检查是否匹配安全白名单模式 → 匹配且未命中黑名单才通过
- */
-export function isSafeCommand(command: string) {
-	const trimmed = command.trim();
-	if (!trimmed) return false;
-	if (MUTATING_BASH_PATTERNS.some((pattern) => pattern.test(trimmed))) return false;
-	return SAFE_BASH_PATTERNS.some((pattern) => pattern.test(trimmed));
-}
-
-// ═══════════════════════════════════════════════════
-//  <proposed_plan> 提取与剥离
-// ═══════════════════════════════════════════════════
-
-/**
- * 从 Agent 输出文本中提取 <proposed_plan>...</proposed_plan> 内容。
- * 使用 regex 非全局匹配提取第一个 plan 块。
- */
-export function extractProposedPlan(text: string) {
-	const match = PROPOSED_PLAN_PATTERN.exec(text);
-	return match?.[1]?.trim();
-}
-
-/**
- * 从消息数组中提取最新一条 assistant 消息的纯文本内容。
- * 支持两种消息格式：裸 SessionMessage 或 { message: SessionMessage } 包装。
- */
-export function latestAssistantText(messages: unknown) {
-	if (!Array.isArray(messages)) return "";
-	for (const entry of [...messages].reverse()) {
-		const message = (entry as { message?: SessionMessage })?.message ?? (entry as SessionMessage);
-		if (message?.role !== "assistant") continue;
-		const text = messageText(message);
-		if (text) return text;
-	}
-	return "";
-}
-
-/** 检查消息是否为遗留的 plan-mode-context artifact 类型 */
-function messageContainsLegacyPlanModeContextArtifact(message: unknown) {
-	const candidate = unwrapSessionMessage(message);
-	return candidate.customType === PLAN_CONTEXT_MESSAGE_TYPE;
-}
-
-/** 检查消息是否为非活跃 Plan Mode 下的 proposed-plan artifact */
-function messageContainsInactivePlanModeArtifact(message: unknown) {
-	const candidate = unwrapSessionMessage(message);
-	return candidate.customType === PROPOSED_PLAN_MESSAGE_TYPE;
-}
-
-export function stripProposedPlanBlocksFromMessage<T>(message: T): T {
-	const candidate = unwrapSessionMessage(message);
-	if (candidate.role !== "assistant") return message;
-
-	const content = stripProposedPlanBlocksFromContent(candidate.content);
-	if (content === candidate.content) return message;
-
-	if (isSessionMessageEntry(message)) {
-		return { ...message, message: { ...candidate, content } };
-	}
-	return { ...candidate, content } as T;
-}
-
-function unwrapSessionMessage(message: unknown) {
-	const entry = message as { message?: unknown };
-	return (entry.message ?? message) as { role?: string; customType?: string; content?: unknown };
-}
-
-function isSessionMessageEntry<T>(message: T): message is T & { message: SessionMessage } {
-	return typeof message === "object" && message !== null && "message" in message;
-}
-
-function stripProposedPlanBlocksFromContent(content: unknown) {
-	if (typeof content === "string") return stripProposedPlanBlocks(content);
-	if (!Array.isArray(content)) return content;
-
-	let changed = false;
-	const nextContent = content.map((block) => {
-		const textBlock = block as TextBlock;
-		if (textBlock.type !== "text" || typeof textBlock.text !== "string") return block;
-
-		const text = stripProposedPlanBlocks(textBlock.text);
-		if (text === textBlock.text) return block;
-
-		changed = true;
-		return { ...textBlock, text };
-	});
-	return changed ? nextContent : content;
-}
-
-export function stripProposedPlanBlocks(text: string) {
-	return text.replace(PROPOSED_PLAN_BLOCK_PATTERN, "");
-}
-
-// ═══════════════════════════════════════════════════
-//  消息内容文本提取与清理
-// ═══════════════════════════════════════════════════
-
-/** 从消息的内容字段提取纯文本字符串 */
-function messageText(message: SessionMessage) {
-	return contentText(message.content);
-}
-
-function contentText(content: unknown): string {
-	if (typeof content === "string") return content;
-	if (!Array.isArray(content)) return "";
-	return content
-		.map((block) => {
-			const textBlock = block as TextBlock;
-			return textBlock.type === "text" && typeof textBlock.text === "string" ? textBlock.text : "";
-		})
-		.filter(Boolean)
-		.join("\n");
-}
+export {
+	extractProposedPlan,
+	latestAssistantText,
+	parseProposedPlan,
+	stripProposedPlanBlocks,
+	stripProposedPlanBlocksFromMessage,
+} from "./message-transform.js";
+export { buildPlanModePrompt } from "./prompt.js";
+export { normalizePlanModeQuestionParams } from "./question-tool.js";
+export { normalizePlanModeSettings, readPlanModeSettings } from "./settings.js";
+export { canSelectToolInPlanMode, classifyPlanModeTool, isSafeCommand } from "./tool-policy.js";

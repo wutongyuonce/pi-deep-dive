@@ -1,4 +1,14 @@
-import { existsSync, readFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import {
+	chmodSync,
+	existsSync,
+	linkSync,
+	lstatSync,
+	readFileSync,
+	rmSync,
+	statSync,
+	writeFileSync,
+} from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
@@ -21,6 +31,8 @@ const COMMON_SKIP_DIRECTORIES = new Set([
 	"dist",
 	"node_modules",
 	"out",
+	"target",
+	"vendor",
 	"venv",
 ]);
 
@@ -60,6 +72,152 @@ export const DEFAULT_SERVER_CONFIGS: InternalLspServer[] = [
 		command: ["ruff", "server"],
 		extensions: [".py", ".pyi"],
 	},
+	{
+		name: "rust-analyzer",
+		command: ["rust-analyzer"],
+		extensions: [".rs"],
+	},
+	{
+		name: "gopls",
+		command: ["gopls"],
+		extensions: [".go"],
+	},
+	{
+		name: "rubocop",
+		command: ["rubocop", "--lsp"],
+		extensions: [".rb", ".rake", ".gemspec", ".ru"],
+	},
+	{
+		name: "elixir-ls",
+		command: [process.platform === "win32" ? "language_server.bat" : "language_server.sh"],
+		extensions: [".ex", ".exs"],
+		skipDirectories: ["_build", "deps"],
+	},
+	{
+		name: "zls",
+		command: ["zls"],
+		extensions: [".zig", ".zon"],
+		skipDirectories: [".zig-cache", "zig-out"],
+	},
+	{
+		name: "csharp",
+		command: ["roslyn-language-server", "--stdio", "--autoLoadProjects"],
+		extensions: [".cs", ".csx"],
+		skipDirectories: ["bin", "obj"],
+	},
+	{
+		name: "fsharp",
+		command: ["fsautocomplete"],
+		extensions: [".fs", ".fsi", ".fsx", ".fsscript"],
+		skipDirectories: ["bin", "obj"],
+		initialization: { AutomaticWorkspaceInit: true },
+	},
+	{
+		name: "sourcekit-lsp",
+		command: ["sourcekit-lsp"],
+		extensions: [".swift", ".mm"],
+		skipDirectories: [".build", "DerivedData"],
+	},
+	{
+		name: "clangd",
+		command: ["clangd", "--background-index", "--clang-tidy"],
+		extensions: [".c", ".cpp", ".cc", ".cxx", ".c++", ".h", ".hpp", ".hh", ".hxx", ".h++"],
+		skipDirectories: ["build"],
+	},
+	{
+		name: "jdtls",
+		command: ["jdtls"],
+		extensions: [".java"],
+		skipDirectories: [".gradle", "build"],
+	},
+	{
+		name: "kotlin-lsp",
+		command: ["kotlin-lsp", "--stdio"],
+		extensions: [".kt", ".kts"],
+		skipDirectories: [".gradle", "build"],
+	},
+	{
+		name: "yaml-language-server",
+		command: ["yaml-language-server", "--stdio"],
+		extensions: [".yaml", ".yml"],
+	},
+	{
+		name: "lua-language-server",
+		command: ["lua-language-server"],
+		extensions: [".lua"],
+	},
+	{
+		name: "intelephense",
+		command: ["intelephense", "--stdio"],
+		extensions: [".php"],
+		initialization: { intelephense: { telemetry: { enabled: false } } },
+		// Publishes empty on didOpen, then real diagnostics ~0.2-3s later.
+		diagnosticsSettleMs: 4000,
+	},
+	{
+		name: "prisma",
+		command: ["prisma-language-server", "--stdio"],
+		extensions: [".prisma"],
+	},
+	{
+		name: "dart",
+		command: ["dart", "language-server"],
+		extensions: [".dart"],
+		skipDirectories: [".dart_tool", "build"],
+	},
+	{
+		name: "ocaml-lsp",
+		command: ["ocamllsp"],
+		extensions: [".ml", ".mli"],
+		skipDirectories: ["_build", "_opam"],
+	},
+	{
+		name: "bash-language-server",
+		command: ["bash-language-server", "start"],
+		extensions: [".sh", ".bash"],
+	},
+	{
+		name: "terraform-ls",
+		command: ["terraform-ls", "serve"],
+		extensions: [".tf", ".tfvars"],
+		skipDirectories: [".terraform"],
+		initialization: {
+			experimentalFeatures: { prefillRequiredFields: true },
+		},
+	},
+	{
+		name: "texlab",
+		command: ["texlab"],
+		extensions: [".tex", ".bib"],
+	},
+	{
+		name: "gleam",
+		command: ["gleam", "lsp"],
+		extensions: [".gleam"],
+		skipDirectories: ["build"],
+	},
+	{
+		name: "clojure-lsp",
+		command: ["clojure-lsp", "listen"],
+		extensions: [".clj", ".cljs", ".cljc", ".edn"],
+		skipDirectories: [".cpcache"],
+	},
+	{
+		name: "nixd",
+		command: ["nixd"],
+		extensions: [".nix"],
+	},
+	{
+		name: "tinymist",
+		command: ["tinymist"],
+		extensions: [".typ", ".typc"],
+	},
+	{
+		name: "haskell-language-server",
+		command: ["haskell-language-server-wrapper", "--lsp"],
+		extensions: [".hs", ".lhs"],
+		skipDirectories: [".stack-work", "dist-newstyle"],
+	},
 ];
 
 export function loadRuntime(cwd = process.cwd()) {
@@ -72,26 +230,139 @@ export function loadRuntime(cwd = process.cwd()) {
 
 export function loadConfig(cwd = process.cwd()): LspConfig {
 	const configured = loadConfiguredConfig(cwd);
-	return configured ?? { servers: DEFAULT_SERVER_CONFIGS };
+	return (
+		configured ?? {
+			servers: DEFAULT_SERVER_CONFIGS.map((server) => ({ ...server, isDefault: true })),
+		}
+	);
 }
 
+let pendingConfigNotice: string | undefined;
+
 function loadConfiguredConfig(cwd: string): LspConfig | undefined {
+	pendingConfigNotice = undefined;
 	const rawConfig = process.env.PI_LSP_CONFIG?.trim();
 	if (rawConfig) return parseConfigSource(rawConfig, cwd, "PI_LSP_CONFIG");
 
-	const projectConfig = path.join(cwd, ".pi", "lsp.json");
-	if (existsSync(projectConfig)) return parseConfigFile(projectConfig);
+	const projectConfig = path.join(cwd, ".pi", "pi-lsp.json");
+	const legacyProjectConfig = path.join(cwd, ".pi", "lsp.json");
+	if (existsSync(projectConfig)) {
+		if (existsSync(legacyProjectConfig)) {
+			pendingConfigNotice = ".pi/lsp.json ignored because .pi/pi-lsp.json takes precedence.";
+		}
+		return parseConfigFile(projectConfig);
+	}
+	if (existsSync(legacyProjectConfig)) {
+		pendingConfigNotice =
+			"Using legacy .pi/lsp.json. Rename it to .pi/pi-lsp.json; the repository file was not modified automatically.";
+		return parseConfigFile(legacyProjectConfig);
+	}
 
-	const userConfig = path.join(getAgentDir(), "lsp.json");
-	if (existsSync(userConfig)) return parseConfigFile(userConfig);
+	const userConfig = path.join(getAgentDir(), "pi-lsp.json");
+	const legacyUserConfig = path.join(getAgentDir(), "lsp.json");
+	if (existsSync(userConfig)) {
+		if (existsSync(legacyUserConfig)) {
+			pendingConfigNotice = "lsp.json ignored because pi-lsp.json takes precedence.";
+		}
+		return parseConfigFile(userConfig);
+	}
+	if (!existsSync(legacyUserConfig)) return undefined;
 
-	return undefined;
+	const legacyContents = readFileSync(legacyUserConfig, "utf8");
+	const legacy = normalizeConfig(JSON.parse(legacyContents), legacyUserConfig);
+	let installedIdentity: FileIdentity;
+	try {
+		installedIdentity = installFileExclusively(
+			userConfig,
+			legacyContents,
+			statSync(legacyUserConfig).mode & 0o777,
+		);
+	} catch (error) {
+		if (existsSync(userConfig)) {
+			pendingConfigNotice = "lsp.json ignored because pi-lsp.json was created concurrently.";
+			return parseConfigFile(userConfig);
+		}
+		pendingConfigNotice = `LSP config migration failed: ${formatError(error)}. The legacy file was used for this session.`;
+		return legacy;
+	}
+	if (!fileContentsEqual(legacyUserConfig, legacyContents)) {
+		if (removeFileIfIdentityMatches(userConfig, installedIdentity, legacyContents)) {
+			pendingConfigNotice =
+				"lsp.json changed during migration; the stale pi-lsp.json snapshot was removed and the legacy file was used for this session.";
+		} else {
+			pendingConfigNotice =
+				"lsp.json changed during migration, but pi-lsp.json was replaced concurrently and takes precedence on the next load.";
+		}
+		return legacy;
+	}
+	try {
+		rmSync(legacyUserConfig);
+		pendingConfigNotice = "LSP config migrated from lsp.json to pi-lsp.json.";
+	} catch (error) {
+		pendingConfigNotice = `LSP config migrated to pi-lsp.json, but lsp.json could not be removed: ${formatError(error)}.`;
+	}
+	return legacy;
+}
+
+type FileIdentity = { dev: number; ino: number };
+
+function installFileExclusively(filePath: string, contents: string, mode: number): FileIdentity {
+	const tempFile = path.join(path.dirname(filePath), `.pi-lsp.json.${randomUUID()}.tmp`);
+	try {
+		writeFileSync(tempFile, contents, { encoding: "utf8", flag: "wx", mode });
+		chmodSync(tempFile, mode);
+		const identity = lstatSync(tempFile);
+		linkSync(tempFile, filePath);
+		return { dev: identity.dev, ino: identity.ino };
+	} finally {
+		try {
+			rmSync(tempFile, { force: true });
+		} catch {
+			// Preserve the migration result if best-effort temp cleanup fails.
+		}
+	}
+}
+
+function removeFileIfIdentityMatches(
+	filePath: string,
+	expected: FileIdentity,
+	expectedContents: string,
+) {
+	try {
+		const current = lstatSync(filePath);
+		if (current.dev !== expected.dev || current.ino !== expected.ino) return false;
+		if (readFileSync(filePath, "utf8") !== expectedContents) return false;
+		rmSync(filePath);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+function fileContentsEqual(filePath: string, expected: string) {
+	try {
+		return readFileSync(filePath, "utf8") === expected;
+	} catch {
+		return false;
+	}
+}
+
+export function consumeLspConfigNotice() {
+	const notice = pendingConfigNotice;
+	pendingConfigNotice = undefined;
+	return notice;
+}
+
+function formatError(error: unknown) {
+	return error instanceof Error ? error.message : String(error);
 }
 
 function parseConfigSource(source: string, cwd: string, label: string): LspConfig {
 	if (source.startsWith("{")) return normalizeConfig(JSON.parse(source), label);
 	const expandedSource = expandHome(source);
-	const filePath = path.isAbsolute(expandedSource) ? expandedSource : path.resolve(cwd, expandedSource);
+	const filePath = path.isAbsolute(expandedSource)
+		? expandedSource
+		: path.resolve(cwd, expandedSource);
 	return parseConfigFile(filePath);
 }
 
@@ -115,7 +386,9 @@ function normalizeConfig(value: unknown, label: string): LspConfig {
 		const timeout = normalizeTimeout(value.timeout, label);
 		const servers = value.servers;
 		if (!isRecord(servers) || Array.isArray(servers)) {
-			throw new Error(`${label}.servers must be a JSON object mapping server names to LSP server config.`);
+			throw new Error(
+				`${label}.servers must be a JSON object mapping server names to LSP server config.`,
+			);
 		}
 		return { timeout, servers: normalizeServerMap(servers, `${label}.servers`) };
 	}
@@ -128,14 +401,13 @@ function normalizeConfig(value: unknown, label: string): LspConfig {
 }
 
 function normalizeServerMap(value: Record<string, unknown>, label: string) {
-	return Object.entries(value).map(([name, server]) => normalizeServer(name, server, `${label}.${name}`));
+	return Object.entries(value).map(([name, server]) =>
+		normalizeServer(name, server, `${label}.${name}`),
+	);
 }
 
 function isServerEntry(value: unknown) {
-	return (
-		isRecord(value) &&
-		(Array.isArray(value.command) || Array.isArray(value.extensions))
-	);
+	return isRecord(value) && (Array.isArray(value.command) || Array.isArray(value.extensions));
 }
 
 function normalizeServer(name: string, value: unknown, label: string): InternalLspServer {
@@ -148,6 +420,8 @@ function normalizeServer(name: string, value: unknown, label: string): InternalL
 		extensions,
 		env: optionalStringRecordField(value, "env", label),
 		initialization: optionalRecordField(value, "initialization", label),
+		skipDirectories: optionalDirectoryNamesField(value, "skipDirectories", label),
+		diagnosticsSettleMs: optionalPositiveNumberField(value, "diagnosticsSettleMs", label),
 	};
 }
 
@@ -165,13 +439,15 @@ function configToAdapter(config: InternalLspServer): LspServerAdapter {
 	if (!command) throw new Error(`${config.name}.command must contain at least one string.`);
 	return {
 		name: config.name,
+		isDefault: config.isDefault ?? false,
 		defaultCommand: { command, args },
 		commandEnvVar: envName(config.name, "COMMAND"),
 		missingCommandHint: `Install ${config.name} or set ${envName(config.name, "COMMAND")}.`,
 		extensions: config.extensions,
 		env: config.env,
 		initialization: config.initialization,
-		skipDirectories: COMMON_SKIP_DIRECTORIES,
+		skipDirectories: new Set([...COMMON_SKIP_DIRECTORIES, ...(config.skipDirectories ?? [])]),
+		diagnosticsSettleMs: config.diagnosticsSettleMs,
 		isSupportedFile: (filePath) => extensionSet.has(path.extname(filePath)),
 		languageIdFor: (filePath) => languageIdFor(config, filePath),
 	};
@@ -183,22 +459,80 @@ function languageIdFor(_config: InternalLspServer, filePath: string) {
 }
 
 const LANGUAGE_IDS: Record<string, string> = {
+	".bash": "shellscript",
+	".bib": "bibtex",
+	".c": "c",
+	".c++": "cpp",
+	".cc": "cpp",
 	".cjs": "javascript",
+	".clj": "clojure",
+	".cljc": "clojure",
+	".cljs": "clojure",
+	".cpp": "cpp",
+	".cs": "csharp",
+	".csx": "csharp",
 	".cts": "typescript",
+	".cxx": "cpp",
+	".dart": "dart",
+	".edn": "clojure",
+	".ex": "elixir",
+	".exs": "elixir",
+	".fs": "fsharp",
+	".fsi": "fsharp",
+	".fsscript": "fsharp",
+	".fsx": "fsharp",
+	".gemspec": "ruby",
+	".go": "go",
 	".gql": "graphql",
+	".h": "c",
+	".h++": "cpp",
+	".hh": "cpp",
+	".hpp": "cpp",
+	".hs": "haskell",
+	".hxx": "cpp",
+	".jl": "julia",
 	".js": "javascript",
 	".jsx": "javascriptreact",
 	".jsonc": "jsonc",
+	".ksh": "shellscript",
+	".kt": "kotlin",
+	".kts": "kotlin",
+	".lhs": "lhaskell",
+	".m": "objective-c",
 	".mjs": "javascript",
+	".ml": "ocaml",
+	".mli": "ocaml.interface",
+	".mm": "objective-cpp",
 	".mts": "typescript",
+	".nix": "nix",
+	".php": "php",
 	".py": "python",
 	".pyi": "python",
+	".rake": "ruby",
+	".rb": "ruby",
+	".rs": "rust",
+	".ru": "ruby",
+	".sh": "shellscript",
+	".swift": "swift",
+	".tex": "latex",
+	".tf": "terraform",
+	".tfvars": "terraform-vars",
 	".ts": "typescript",
 	".tsx": "typescriptreact",
+	".typ": "typst",
+	".typc": "typst-code",
+	".yaml": "yaml",
+	".yml": "yaml",
+	".zig": "zig",
+	".zon": "zig",
+	".zsh": "shellscript",
 };
 
 function commandFromEnvName(name: string): string {
-	return name.replace(/[^a-zA-Z0-9]+/g, "_").replace(/^_+|_+$/g, "").toUpperCase();
+	return name
+		.replace(/[^a-zA-Z0-9]+/g, "_")
+		.replace(/^_+|_+$/g, "")
+		.toUpperCase();
 }
 
 function envName(name: string, suffix: "COMMAND") {
@@ -213,6 +547,15 @@ function stringArrayField(value: Record<string, unknown>, field: string, label: 
 	const fieldValue = value[field];
 	if (!Array.isArray(fieldValue) || !fieldValue.every((item) => typeof item === "string")) {
 		throw new Error(`${label}.${field} must be an array of strings.`);
+	}
+	return fieldValue;
+}
+
+function optionalPositiveNumberField(value: Record<string, unknown>, field: string, label: string) {
+	const fieldValue = value[field];
+	if (fieldValue === undefined) return undefined;
+	if (typeof fieldValue !== "number" || !Number.isFinite(fieldValue) || fieldValue <= 0) {
+		throw new Error(`${label}.${field} must be a positive number.`);
 	}
 	return fieldValue;
 }
@@ -236,6 +579,25 @@ function optionalRecordField(value: Record<string, unknown>, field: string, labe
 		throw new Error(`${label}.${field} must be an object.`);
 	}
 	return fieldValue;
+}
+
+function optionalDirectoryNamesField(value: Record<string, unknown>, field: string, label: string) {
+	const fieldValue = value[field];
+	if (fieldValue === undefined) return undefined;
+	if (!Array.isArray(fieldValue) || !fieldValue.every((item) => typeof item === "string")) {
+		throw new Error(`${label}.${field} must be an array of directory names.`);
+	}
+	const names = fieldValue.map((item) => item.trim());
+	if (
+		names.some(
+			(name) => !name || name === "." || name === ".." || name.includes("/") || name.includes("\\"),
+		)
+	) {
+		throw new Error(
+			`${label}.${field} must contain non-empty directory names without path separators.`,
+		);
+	}
+	return [...new Set(names)];
 }
 
 function expandHome(filePath: string) {

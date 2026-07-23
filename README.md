@@ -10,12 +10,12 @@
 
 本项目是开源项目 [pi](https://github.com/earendil-works/pi-mono) 的 fork 解析教程仓库。
 
-对应项目版本：0.80.6
-最后一个 commit：Jul 13, 2026 fix(ai): route GitHub Copilot MAI-Code models through /responses endpoint (#6544)
-
 0.80.10
 Commits on Jul 17, 2026
 Add [Unreleased] section for next cycle
+
+Commits on Jul 22, 2026
+fix(coding-agent): defer catalog refresh until after TUI startup
 
 
 ## 关于 Pi

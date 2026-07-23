@@ -1,7 +1,7 @@
 import { defineTool, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { loadRuntime } from "./adapters.js";
-import { commandExists, commandFromEnv } from "./command.js";
+import { consumeLspConfigNotice, loadRuntime } from "./adapters.js";
+import { commandExists, commandFromEnv, commandPathValue } from "./command.js";
 import { resolveRoot } from "./files.js";
 import { selectDiagnosticRoutes, selectFixRoute } from "./routes.js";
 import { DEFAULT_FILE_LIMIT, runDiagnostics, runFix, textResult } from "./runner.js";
@@ -60,7 +60,7 @@ const lspDiagnosticsTool = defineTool({
 	async execute(_toolCallId, params, signal, _onUpdate, ctx) {
 		const requestedRoot = resolveRoot(params.root);
 		const { adapters, timeoutMs } = loadRuntime(requestedRoot);
-		const { root, routes } = selectDiagnosticRoutes(
+		const { root, routes, skipped } = selectDiagnosticRoutes(
 			adapters,
 			{ ...params, root: requestedRoot },
 			DEFAULT_FILE_LIMIT,
@@ -78,11 +78,23 @@ const lspDiagnosticsTool = defineTool({
 			results.push({ route, result });
 		}
 
-		const text = results
-			.map(({ route, result }) => `${route.reason}\n\n${textFromResult(result)}`)
-			.join("\n\n---\n\n");
-		return textResult(text, {
+		const sections = results.map(
+			({ route, result }) => `${route.reason}\n\n${textFromResult(result)}`,
+		);
+		if (skipped.length) {
+			sections.push(
+				`Skipped unavailable default LSP server(s): ${skipped
+					.map((route) => route.adapter.name)
+					.join(", ")}.`,
+			);
+		}
+		return textResult(sections.join("\n\n---\n\n"), {
 			root,
+			skipped: skipped.map((route) => ({
+				server: route.adapter.name,
+				reason: route.reason,
+				files: route.files,
+			})),
 			routes: results.map(({ route, result }) => ({
 				server: route.adapter.name,
 				backend: route.adapter.name,
@@ -133,18 +145,35 @@ export default function lsp(pi: ExtensionAPI) {
 	pi.registerCommand("lsp", {
 		description: "Show shared LSP extension configuration",
 		handler: async (_args, ctx) => {
-			const { adapters } = loadRuntime(ctx.cwd);
-			ctx.ui.notify(buildStatusMessage(adapters, ctx.cwd), statusLevel(adapters, ctx.cwd));
+			try {
+				const { adapters } = loadRuntime(ctx.cwd);
+				const notice = consumeLspConfigNotice();
+				if (notice) ctx.ui.notify(notice, "warning");
+				ctx.ui.notify(buildStatusMessage(adapters, ctx.cwd), statusLevel(adapters, ctx.cwd));
+			} catch (error) {
+				ctx.ui.notify(`LSP config ignored: ${formatError(error)}`, "warning");
+			}
 		},
 	});
 
 	pi.on("session_start", (_event, ctx) => {
 		ctx.ui.setStatus(STATUS_KEY, undefined);
+		try {
+			loadRuntime(ctx.cwd);
+			const notice = consumeLspConfigNotice();
+			if (notice) ctx.ui.notify(notice, "warning");
+		} catch (error) {
+			ctx.ui.notify(`LSP config ignored: ${formatError(error)}`, "warning");
+		}
 	});
 
 	pi.on("session_shutdown", (_event, ctx) => {
 		ctx.ui.setStatus(STATUS_KEY, undefined);
 	});
+}
+
+function formatError(error: unknown) {
+	return error instanceof Error ? error.message : String(error);
 }
 
 function textFromResult(result: { content?: Array<{ type?: string; text?: string }> }) {
@@ -157,7 +186,11 @@ function buildStatusMessage(adapters: ReturnType<typeof loadRuntime>["adapters"]
 			const command = commandFromEnv(adapter.commandEnvVar, adapter.defaultCommand);
 			return [
 				`${adapter.name} LSP command: ${command.command} ${command.args.join(" ")}`.trim(),
-				`${adapter.name} status: ${commandExists(command.command, cwd) ? "ready" : "command missing"}`,
+				`${adapter.name} status: ${
+					commandExists(command.command, cwd, commandPathValue(adapter.env))
+						? "ready"
+						: "command missing"
+				}`,
 			];
 		})
 		.join("\n");
@@ -166,7 +199,7 @@ function buildStatusMessage(adapters: ReturnType<typeof loadRuntime>["adapters"]
 function statusLevel(adapters: ReturnType<typeof loadRuntime>["adapters"], cwd: string) {
 	return adapters.every((adapter) => {
 		const command = commandFromEnv(adapter.commandEnvVar, adapter.defaultCommand);
-		return commandExists(command.command, cwd);
+		return commandExists(command.command, cwd, commandPathValue(adapter.env));
 	})
 		? "info"
 		: "warning";

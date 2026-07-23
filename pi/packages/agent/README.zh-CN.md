@@ -8,17 +8,28 @@
 npm install @earendil-works/pi-agent-core
 ```
 
+### SQLite session backends
+
+The SQLite session backend and the `node:sqlite` adapter live in a separate package, `@earendil-works/pi-storage-sqlite-node`, so the core package does not pull in runtime builtins or native SQLite dependencies by default. The backend accepts a runtime-specific SQLite factory, allowing other storage backends to ship as their own packages in the future.
+
 ## 快速开始
 
 ```typescript
 import { Agent } from "@earendil-works/pi-agent-core";
-import { getModel } from "@earendil-works/pi-ai";
+import { createModels } from "@earendil-works/pi-ai";
+import { anthropicProvider } from "@earendil-works/pi-ai/providers/anthropic";
+
+const models = createModels();
+models.setProvider(anthropicProvider());
+const model = models.getModel("anthropic", "claude-sonnet-4-6");
+if (!model) throw new Error("Model not found");
 
 const agent = new Agent({
   initialState: {
     systemPrompt: "You are a helpful assistant.",
-    model: getModel("anthropic", "claude-sonnet-4-20250514"),
+    model,
   },
+  streamFn: models.streamSimple.bind(models), // bind 锁定 this 始终指向 models 实例
 });
 
 agent.subscribe((event) => {
@@ -115,13 +126,19 @@ prompt("Read config.json")
 底层循环调用者可以设置 `shouldStopAfterTurn` 来在当前轮次完成后优雅停止：
 
 ```typescript
-const stream = agentLoop(prompts, context, {
-  model,
-  convertToLlm,
-  shouldStopAfterTurn: async ({ message, toolResults, context, newMessages }) => {
-    return shouldCompactBeforeNextTurn(context.messages);
-  },
-});
+const stream = agentLoop(
+  prompts,
+  context,
+  {
+    model,
+    convertToLlm,
+    shouldStopAfterTurn: async ({ message, toolResults, context, newMessages }) => {
+      return shouldCompactBeforeNextTurn(context.messages);
+    },
+  }
+  undefined,
+  models.streamSimple.bind(models),
+);
 ```
 
 `shouldStopAfterTurn` 在 `turn_end` 发送后、且助手响应和所有工具执行正常完成后运行。如果返回 `true`，循环将发送 `agent_end` 并在轮询引导（steering）或后续（follow-up）队列之前退出，也会在开始另一个 LLM 调用之前退出。它不会中止提供者流，不会取消正在运行的工具，也不会更改助手消息的停止原因。
@@ -181,8 +198,8 @@ const agent = new Agent({
   // 后续模式："one-at-a-time"（默认）或 "all"
   followUpMode: "one-at-a-time",
 
-  // 自定义流函数（用于代理后端）
-  streamFn: streamProxy,
+  // Required stream function
+  streamFn: models.streamSimple.bind(models),
 
   // 提供者缓存的会话 ID
   sessionId: "session-123",
@@ -369,6 +386,7 @@ const msg: AgentMessage = { role: "notification", text: "Info", timestamp: Date.
 
 ```typescript
 const agent = new Agent({
+  streamFn: models.streamSimple.bind(models),
   convertToLlm: (messages) => messages.flatMap(m => {
     if (m.role === "notification") return []; // 过滤掉
     return [m];
@@ -471,12 +489,13 @@ const config: AgentLoopConfig = {
 
 const userMessage = { role: "user", content: "Hello", timestamp: Date.now() };
 
-for await (const event of agentLoop([userMessage], context, config)) {
+const streamFn = models.streamSimple.bind(models);
+for await (const event of agentLoop([userMessage], context, config, undefined, streamFn)) {
   console.log(event.type);
 }
 
 // 从现有上下文继续
-for await (const event of agentLoopContinue(context, config)) {
+for await (const event of agentLoopContinue(context, config, undefined, streamFn)) {
   console.log(event.type);
 }
 ```

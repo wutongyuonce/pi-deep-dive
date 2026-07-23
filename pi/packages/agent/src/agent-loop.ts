@@ -23,10 +23,9 @@ import {
 	type AssistantMessage,
 	type Context,
 	EventStream,
-	streamSimple,
 	type ToolResultMessage,
 	validateToolArguments,
-} from "@earendil-works/pi-ai/compat";
+} from "@earendil-works/pi-ai";
 import type {
 	AgentContext,
 	AgentEvent,
@@ -56,8 +55,8 @@ export function agentLoop(
 	prompts: AgentMessage[],
 	context: AgentContext,
 	config: AgentLoopConfig,
-	signal?: AbortSignal,
-	streamFn?: StreamFn,
+	signal: AbortSignal | undefined,
+	streamFunction: StreamFn,
 ): EventStream<AgentEvent, AgentMessage[]> {
 	const stream = createAgentStream();
 
@@ -69,7 +68,7 @@ export function agentLoop(
 			stream.push(event);
 		},
 		signal,
-		streamFn,
+		streamFunction,
 	).then((messages) => {
 		stream.end(messages);
 	});
@@ -92,8 +91,8 @@ export function agentLoop(
 export function agentLoopContinue(
 	context: AgentContext,
 	config: AgentLoopConfig,
-	signal?: AbortSignal,
-	streamFn?: StreamFn,
+	signal: AbortSignal | undefined,
+	streamFunction: StreamFn,
 ): EventStream<AgentEvent, AgentMessage[]> {
 	if (context.messages.length === 0) {
 		throw new Error("Cannot continue: no messages in context");
@@ -112,7 +111,7 @@ export function agentLoopContinue(
 			stream.push(event);
 		},
 		signal,
-		streamFn,
+		streamFunction,
 	).then((messages) => {
 		stream.end(messages);
 	});
@@ -128,8 +127,8 @@ export async function runAgentLoop(
 	context: AgentContext,
 	config: AgentLoopConfig,
 	emit: AgentEventSink,
-	signal?: AbortSignal,
-	streamFn?: StreamFn,
+	signal: AbortSignal | undefined,
+	streamFunction: StreamFn,
 ): Promise<AgentMessage[]> {
 	const newMessages: AgentMessage[] = [...prompts];
 	const currentContext: AgentContext = {
@@ -144,7 +143,7 @@ export async function runAgentLoop(
 		await emit({ type: "message_end", message: prompt });
 	}
 
-	await runLoop(currentContext, newMessages, config, signal, emit, streamFn);
+	await runLoop(currentContext, newMessages, config, signal, emit, streamFunction);
 	return newMessages;
 }
 
@@ -155,8 +154,8 @@ export async function runAgentLoopContinue(
 	context: AgentContext,
 	config: AgentLoopConfig,
 	emit: AgentEventSink,
-	signal?: AbortSignal,
-	streamFn?: StreamFn,
+	signal: AbortSignal | undefined,
+	streamFunction: StreamFn,
 ): Promise<AgentMessage[]> {
 	if (context.messages.length === 0) {
 		throw new Error("Cannot continue: no messages in context");
@@ -172,7 +171,7 @@ export async function runAgentLoopContinue(
 	await emit({ type: "agent_start" });
 	await emit({ type: "turn_start" });
 
-	await runLoop(currentContext, newMessages, config, signal, emit, streamFn);
+	await runLoop(currentContext, newMessages, config, signal, emit, streamFunction);
 	return newMessages;
 }
 
@@ -197,7 +196,7 @@ async function runLoop(
 	initialConfig: AgentLoopConfig,
 	signal: AbortSignal | undefined,
 	emit: AgentEventSink,
-	streamFn?: StreamFn,
+	streamFunction: StreamFn,
 ): Promise<void> {
 	let currentContext = initialContext;
 	let config = initialConfig;
@@ -230,7 +229,7 @@ async function runLoop(
 			}
 
 			// 请求一轮 assistant 回复；provider 事件会在内部翻译成 AgentEvent。
-			const message = await streamAssistantResponse(currentContext, config, signal, emit, streamFn);
+			const message = await streamAssistantResponse(currentContext, config, signal, emit, streamFunction);
 			newMessages.push(message);
 
 			if (message.stopReason === "error" || message.stopReason === "aborted") {
@@ -327,7 +326,7 @@ async function streamAssistantResponse(
 	config: AgentLoopConfig,
 	signal: AbortSignal | undefined,
 	emit: AgentEventSink,
-	streamFn?: StreamFn,
+	streamFunction: StreamFn,
 ): Promise<AssistantMessage> {
 	// `transformContext()` 运行在 AgentMessage 层，适合做裁剪、摘要、外部上下文注入。
 	let messages = context.messages;
@@ -344,8 +343,6 @@ async function streamAssistantResponse(
 		messages: llmMessages,
 		tools: context.tools,
 	};
-
-	const streamFunction = streamFn || streamSimple;
 
 	// 每轮请求前动态解析 apiKey，兼容短期 token 或外部密钥轮换。
 	const resolvedApiKey =
@@ -830,6 +827,7 @@ async function finalizeExecutedToolCall(
 					...result,
 					content: afterResult.content ?? result.content,
 					details: afterResult.details ?? result.details,
+					usage: afterResult.usage ?? result.usage,
 					terminate: afterResult.terminate ?? result.terminate,
 				};
 				isError = afterResult.isError ?? isError;
@@ -880,6 +878,7 @@ function createToolResultMessage(finalized: FinalizedToolCallOutcome): ToolResul
 		// 未类型化的 JS 扩展工具可能返回缺失的 content；这里统一归一化，避免 null 进入 transcript。
 		content: finalized.result.content ?? [],
 		details: finalized.result.details,
+		usage: finalized.result.usage,
 		...(finalized.result.addedToolNames?.length ? { addedToolNames: finalized.result.addedToolNames } : {}),
 		isError: finalized.isError,
 		timestamp: Date.now(),

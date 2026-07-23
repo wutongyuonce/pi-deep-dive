@@ -11,6 +11,7 @@ import type {
 	TextContent,
 	Tool,
 	ToolResultMessage,
+	Usage,
 } from "@earendil-works/pi-ai";
 import type { Static, TSchema } from "typebox";
 
@@ -136,16 +137,19 @@ export interface BeforeToolCallResult {
  * - `content`：若提供，则整体替换工具结果 content
  * - `details`：若提供，则整体替换 details
  * - `isError`：若提供，则替换错误标记
+ * - `usage`: 若提供，则替换工具结果 usage
  * - `terminate`：若提供，则替换提前终止提示
  *
  * 说明：
  * - 省略字段会保留原始执行结果
- * - `content` / `details` 不做深度合并
+ * - `content` / `details` / `usage` 不做深度合并
  */
 export interface AfterToolCallResult {
 	content?: (TextContent | ImageContent)[];
 	details?: unknown;
 	isError?: boolean;
+	/** 来自工具执行本身最终返回的用量信息（如果有的话）。该用量不会计入主 LLM 上下文（上下文窗口/计费）的统计范围。 */
+	usage?: Usage;
 	/**
 	 * 提示 Agent 在当前工具批次后停止。
 	 * 仅当批次内每个 finalized 结果都把它设为 true 时，才会真正提前终止。
@@ -191,6 +195,8 @@ export interface AgentToolResult<T> {
 	content: (TextContent | ImageContent)[];
 	/** 供日志或 UI 渲染使用的任意结构化详情。 */
 	details: T;
+	/** 来自工具执行本身最终返回的用量信息（如果有的话）。该用量不会计入主 LLM 上下文（上下文窗口/计费）的统计范围。 */
+	usage?: Usage;
 	/** 此结果新引入的工具名，表示这些工具从当前 transcript 点开始可用。 */
 	addedToolNames?: string[];
 	/**
@@ -395,10 +401,8 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	transformContext?: (messages: AgentMessage[], signal?: AbortSignal) => Promise<AgentMessage[]>;
 
 	/**
-	 * 为每轮 LLM 请求动态解析 API key。
-	 *
-	 * 适合短期 OAuth token 或会在长时间工具执行期间过期的鉴权方式。
-	 * 没有可用 key 时返回 `undefined`。
+	 * 适合短期 token 的鉴权方式（调用方可在回调内自行实现过期检测与刷新）。
+	 * 没有可用 key 时返回 `undefined`，此时回退到 config.apiKey 或 pi-ai 系统认证。
 	 */
 	getApiKey?: (provider: string) => Promise<string | undefined> | string | undefined;
 
@@ -474,9 +478,11 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 * - `content`
 	 * - `details`
 	 * - `isError`
+	 * - `usage`
 	 * - `terminate`
 	 *
 	 * 省略字段保留原始结果；不做深度合并。
+	 * The hook receives the agent abort signal and is responsible for honoring it.
 	 */
 	afterToolCall?: (context: AfterToolCallContext, signal?: AbortSignal) => Promise<AfterToolCallResult | undefined>;
 }

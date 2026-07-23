@@ -1,7 +1,7 @@
 import { type ChildProcessWithoutNullStreams, spawn } from "node:child_process";
 import path from "node:path";
 import process from "node:process";
-import { commandExists } from "./command.js";
+import { commandPathValue, mergeEnvironment, resolveCommandPath } from "./command.js";
 import { directoryUri } from "./files.js";
 import { positionAt } from "./text-edits.js";
 import type {
@@ -11,6 +11,21 @@ import type {
 	LspServerAdapter,
 	ServerCommand,
 } from "./types.js";
+
+export function resolveSpawnCommand(
+	command: ServerCommand,
+	platform: NodeJS.Platform = process.platform,
+	comSpec = process.env.ComSpec,
+): ServerCommand {
+	if (platform !== "win32" || !/\.(?:bat|cmd)$/i.test(command.command)) return command;
+	return {
+		command: comSpec?.trim() || "cmd.exe",
+		args: ["/d", "/s", "/c", command.command, ...command.args],
+	};
+}
+
+// Quiet period (ms) after each publish before treating push diagnostics as settled.
+const PUBLISHED_DIAGNOSTICS_SETTLE_MS = 800;
 
 export class LspClient {
 	#child?: ChildProcessWithoutNullStreams;
@@ -27,13 +42,14 @@ export class LspClient {
 	#publishedDiagnostics = new Map<string, LspDiagnostic[]>();
 	#diagnosticWaiters = new Map<
 		string,
-		Array<{
-			resolve: (diagnostics: LspDiagnostic[]) => void;
+		Set<{
+			onPublish: () => void;
 			reject: (reason: unknown) => void;
-			timeout: NodeJS.Timeout;
+			dispose: () => void;
 		}>
 	>();
 	#stderr = "";
+	#serverCapabilities: Record<string, unknown> = {};
 	#adapter: LspServerAdapter;
 	#command: ServerCommand;
 	#cwd: string;
@@ -47,15 +63,22 @@ export class LspClient {
 	}
 
 	async start() {
-		if (!commandExists(this.#command.command, this.#cwd)) {
+		const commandPath = resolveCommandPath(
+			this.#command.command,
+			this.#cwd,
+			process.platform,
+			commandPathValue(this.#adapter.env),
+		);
+		if (!commandPath) {
 			throw new Error(
 				`${this.#adapter.name} LSP command not found: ${this.#command.command}. ${this.#adapter.missingCommandHint}`,
 			);
 		}
 
-		const child = spawn(this.#command.command, this.#command.args, {
+		const spawnCommand = resolveSpawnCommand({ ...this.#command, command: commandPath });
+		const child = spawn(spawnCommand.command, spawnCommand.args, {
 			cwd: this.#cwd,
-			env: { ...process.env, ...this.#adapter.env },
+			env: mergeEnvironment(this.#adapter.env),
 			stdio: "pipe",
 		});
 		this.#child = child;
@@ -99,18 +122,20 @@ export class LspClient {
 	async initialize(root: string) {
 		const rootUri = directoryUri(root);
 		const workspaceFolders = [{ uri: rootUri, name: path.basename(root) || "workspace" }];
-		await this.request("initialize", {
+		const response = await this.request("initialize", {
 			processId: process.pid,
 			rootUri,
 			workspaceFolders,
 			initializationOptions: this.#adapter.initialization ?? {},
 			capabilities: {
 				textDocument: {
+					// This spawn-per-call client can't track dynamic registrations, so
+					// capabilities must be advertised statically.
 					codeAction: {
-						dynamicRegistration: true,
+						dynamicRegistration: false,
 						resolveSupport: { properties: ["edit"] },
 					},
-					diagnostic: { dynamicRegistration: true, relatedDocumentSupport: true },
+					diagnostic: { dynamicRegistration: false, relatedDocumentSupport: true },
 					publishDiagnostics: {},
 					synchronization: { didSave: true },
 				},
@@ -121,6 +146,9 @@ export class LspClient {
 				},
 			},
 		});
+		this.#serverCapabilities =
+			(response.result as { capabilities?: Record<string, unknown> } | undefined)?.capabilities ??
+			{};
 		this.notify("initialized", {});
 		if (this.#adapter.initialization) {
 			this.notify("workspace/didChangeConfiguration", { settings: this.#adapter.initialization });
@@ -142,18 +170,17 @@ export class LspClient {
 	}
 
 	async diagnostics(uri: string) {
-		try {
-			const response = await this.request("textDocument/diagnostic", {
-				textDocument: { uri },
-				identifier: null,
-				previousResultId: null,
-			});
-			const result = response.result as { items?: LspDiagnostic[] } | undefined;
-			return result?.items ?? [];
-		} catch (error) {
-			if (!isUnsupportedMethodError(error)) throw error;
+		// Only pull if the server advertised it; otherwise use push diagnostics.
+		if (!this.#serverCapabilities.diagnosticProvider) {
 			return this.#waitForPublishedDiagnostics(uri);
 		}
+		const response = await this.request("textDocument/diagnostic", {
+			textDocument: { uri },
+			identifier: null,
+			previousResultId: null,
+		});
+		const result = response.result as { items?: LspDiagnostic[] } | undefined;
+		return result?.items ?? [];
 	}
 
 	async codeActions(uri: string, text: string, diagnostics: LspDiagnostic[], kind: string) {
@@ -166,20 +193,23 @@ export class LspClient {
 	}
 
 	async resolveActions(actions: CodeAction[]) {
+		// Only resolve when the server advertised resolveProvider; otherwise use the
+		// action as-is. Any error from an advertised resolve is real and propagates.
+		const codeActionProvider = this.#serverCapabilities.codeActionProvider;
+		const canResolve =
+			typeof codeActionProvider === "object" &&
+			codeActionProvider !== null &&
+			(codeActionProvider as { resolveProvider?: boolean }).resolveProvider === true;
+
 		const resolvedActions: CodeAction[] = [];
 		for (const action of actions) {
-			if (action.edit) {
+			if (action.edit || !canResolve) {
 				resolvedActions.push(action);
 				continue;
 			}
 
-			try {
-				const response = await this.request("codeAction/resolve", action);
-				resolvedActions.push((response.result as CodeAction | undefined) ?? action);
-			} catch (error) {
-				if (!isUnsupportedMethodError(error)) throw error;
-				resolvedActions.push(action);
-			}
+			const response = await this.request("codeAction/resolve", action);
+			resolvedActions.push((response.result as CodeAction | undefined) ?? action);
 		}
 
 		return resolvedActions;
@@ -212,8 +242,7 @@ export class LspClient {
 		}
 		this.#pending.clear();
 		for (const waiters of this.#diagnosticWaiters.values()) {
-			for (const waiter of waiters) {
-				clearTimeout(waiter.timeout);
+			for (const waiter of [...waiters]) {
 				waiter.reject(new Error(typeof message === "string" ? message : message("diagnostics")));
 			}
 		}
@@ -233,7 +262,9 @@ export class LspClient {
 			const timeout = setTimeout(() => {
 				this.#pending.delete(id);
 				reject(
-					new Error(`${this.#adapter.name} LSP request timed out: ${method}.${this.#formatStderr()}`),
+					new Error(
+						`${this.#adapter.name} LSP request timed out: ${method}.${this.#formatStderr()}`,
+					),
 				);
 			}, this.#timeoutMs);
 			this.#pending.set(id, { resolve, reject, timeout });
@@ -310,11 +341,9 @@ export class LspClient {
 			if (params?.uri) {
 				const diagnostics = params.diagnostics ?? [];
 				this.#publishedDiagnostics.set(params.uri, diagnostics);
-				const waiters = this.#diagnosticWaiters.get(params.uri) ?? [];
-				this.#diagnosticWaiters.delete(params.uri);
-				for (const waiter of waiters) {
-					clearTimeout(waiter.timeout);
-					waiter.resolve(diagnostics);
+				const waiters = this.#diagnosticWaiters.get(params.uri);
+				if (waiters) {
+					for (const waiter of [...waiters]) waiter.onPublish();
 				}
 			}
 			return;
@@ -326,25 +355,53 @@ export class LspClient {
 	}
 
 	#waitForPublishedDiagnostics(uri: string) {
-		const diagnostics = this.#publishedDiagnostics.get(uri);
-		if (diagnostics) return Promise.resolve(diagnostics);
-
+		// See PUBLISHED_DIAGNOSTICS_SETTLE_MS. Bounded by #timeoutMs.
 		return new Promise<LspDiagnostic[]>((resolve, reject) => {
-			const waiter = {
-				resolve,
-				reject,
-				timeout: setTimeout(() => {
-					const waiters = this.#diagnosticWaiters.get(uri)?.filter((entry) => entry !== waiter) ?? [];
-					if (waiters.length) this.#diagnosticWaiters.set(uri, waiters);
-					else this.#diagnosticWaiters.delete(uri);
-					reject(
+			let settleTimer: NodeJS.Timeout | undefined;
+			let overallTimer: NodeJS.Timeout | undefined;
+
+			const dispose = () => {
+				if (settleTimer) clearTimeout(settleTimer);
+				if (overallTimer) clearTimeout(overallTimer);
+				const set = this.#diagnosticWaiters.get(uri);
+				set?.delete(waiter);
+				if (set && set.size === 0) this.#diagnosticWaiters.delete(uri);
+			};
+			const settleWith = (diagnostics: LspDiagnostic[]) => {
+				dispose();
+				resolve(diagnostics);
+			};
+			const fail = (reason: unknown) => {
+				dispose();
+				reject(reason);
+			};
+			const onPublish = () => {
+				if (settleTimer) clearTimeout(settleTimer);
+				settleTimer = setTimeout(
+					() => settleWith(this.#publishedDiagnostics.get(uri) ?? []),
+					this.#adapter.diagnosticsSettleMs ?? PUBLISHED_DIAGNOSTICS_SETTLE_MS,
+				);
+			};
+
+			const waiter = { onPublish, reject: fail, dispose };
+			const set = this.#diagnosticWaiters.get(uri) ?? new Set<typeof waiter>();
+			set.add(waiter);
+			this.#diagnosticWaiters.set(uri, set);
+
+			overallTimer = setTimeout(() => {
+				const latest = this.#publishedDiagnostics.get(uri);
+				if (latest !== undefined) {
+					settleWith(latest);
+				} else {
+					fail(
 						new Error(
 							`${this.#adapter.name} LSP did not return diagnostics for ${uri} before timeout.`,
 						),
 					);
-				}, this.#timeoutMs),
-			};
-			this.#diagnosticWaiters.set(uri, [...(this.#diagnosticWaiters.get(uri) ?? []), waiter]);
+				}
+			}, this.#timeoutMs);
+
+			if (this.#publishedDiagnostics.has(uri)) onPublish();
 		});
 	}
 
@@ -393,10 +450,6 @@ export class LspClient {
 		const stderr = this.#stderr.trim();
 		return stderr ? `\nServer stderr:\n${stderr}` : "";
 	}
-}
-
-function isUnsupportedMethodError(error: unknown) {
-	return error instanceof Error && /method not found|not supported|unsupported/i.test(error.message);
 }
 
 function formatErrorMessage(error: unknown) {

@@ -12,20 +12,20 @@
  * - 各类 provider 兼容配置与成本模型
  */
 
-import type { AnthropicOptions } from "./api/anthropic-messages.ts";
-import type { AzureOpenAIResponsesOptions } from "./api/azure-openai-responses.ts";
+import type { AnthropicOptions } from "../../../../pi-old/packages/ai/src/api/anthropic-messages.ts";
+import type { AzureOpenAIResponsesOptions } from "../../../../pi-old/packages/ai/src/api/azure-openai-responses.ts";
 import type { BedrockOptions } from "./api/bedrock-converse-stream.ts";
-import type { GoogleOptions } from "./api/google-generative-ai.ts";
-import type { GoogleVertexOptions } from "./api/google-vertex.ts";
-import type { MistralOptions } from "./api/mistral-conversations.ts";
-import type { OpenAICodexResponsesOptions } from "./api/openai-codex-responses.ts";
-import type { OpenAICompletionsOptions } from "./api/openai-completions.ts";
-import type { OpenAIResponsesOptions } from "./api/openai-responses.ts";
-import type { PiMessagesOptions } from "./api/pi-messages.ts";
-import type { AssistantMessageDiagnostic } from "./utils/diagnostics.ts";
-import type { AssistantMessageEventStream } from "./utils/event-stream.ts";
+import type { GoogleOptions } from "../../../../pi-old/packages/ai/src/api/google-generative-ai.ts";
+import type { GoogleVertexOptions } from "../../../../pi-old/packages/ai/src/api/google-vertex.ts";
+import type { MistralOptions } from "../../../../pi-old/packages/ai/src/api/mistral-conversations.ts";
+import type { OpenAICodexResponsesOptions } from "../../../../pi-old/packages/ai/src/api/openai-codex-responses.ts";
+import type { OpenAICompletionsOptions } from "../../../../pi-old/packages/ai/src/api/openai-completions.ts";
+import type { OpenAIResponsesOptions } from "../../../../pi-old/packages/ai/src/api/openai-responses.ts";
+import type { PiMessagesOptions } from "../../../../pi-old/packages/ai/src/api/pi-messages.ts";
+import type { AssistantMessageDiagnostic } from "../../../../pi-old/packages/ai/src/utils/diagnostics.ts";
+import type { AssistantMessageEventStream } from "../../../../pi-old/packages/ai/src/utils/event-stream.ts";
 
-export type { AssistantMessageEventStream } from "./utils/event-stream.ts";
+export type { AssistantMessageEventStream } from "../../../../pi-old/packages/ai/src/utils/event-stream.ts";
 
 // ============================================================================
 // API / Provider 标识类型
@@ -92,6 +92,8 @@ export type KnownProvider =
 	| "kimi-coding"
 	| "cloudflare-workers-ai"
 	| "cloudflare-ai-gateway"
+	| "qwen-token-plan"
+	| "qwen-token-plan-cn"
 	| "xiaomi"
 	| "xiaomi-token-plan-cn"
 	| "xiaomi-token-plan-ams"
@@ -541,6 +543,8 @@ export interface ToolResultMessage<TDetails = any> {
 	/** 支持文本和图片内容。 */
 	content: (TextContent | ImageContent)[];
 	details?: TDetails;
+	/** 来自工具执行本身最终返回的用量信息（如果有的话）。该用量不会计入主 LLM 上下文（上下文窗口/计费）的统计范围。 */
+	usage?: Usage;
 	/**
 	 * 此结果返回后新增可用的工具名称列表（来自 `Context.tools`）。
 	 * 支持原生延迟工具加载的 provider 将此作为加载点；
@@ -704,9 +708,9 @@ export interface OpenAICompletionsCompat {
 	/** provider 是否支持工具定义中的 `strict` 字段。默认：true。 */
 	supportsStrictMode?: boolean;
 	/**
-	 * 提示缓存的 cache control 约定。
-	 * "anthropic" 表示对系统提示、最后一个工具定义以及最后一个 user/assistant 文本内容
-	 * 应用 Anthropic 风格的 `cache_control` 标记。
+	 * Prompt caching 的缓存控制约定。
+	 * "anthropic" 表示对系统提示、最后一个工具定义以及最后一个
+	 * user / assistant / tool-result 文本内容应用 Anthropic 风格的 `cache_control` 标记。
 	 */
 	cacheControlFormat?: "anthropic";
 	/** Whether to send session-affinity data from `options.sessionId`. Default: false. */
